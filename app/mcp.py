@@ -1,0 +1,456 @@
+"""
+Composition MCP Server
+"""
+
+import asyncio
+import os
+import re
+from pathlib import Path
+from typing import Any
+
+import uvicorn
+from fastmcp import FastMCP
+from fastmcp.client.transports import StreamableHttpTransport
+from fastmcp.server import create_proxy
+
+from app import __project__, __version__
+from app.core.config import settings
+from app.core.log import logger, uvicorn_log_config
+
+__all__ = ("create_mcp_server", "mcp", "mcp_app")
+
+mcp = FastMCP(f"{__project__}-composition-server")
+
+def _display_path(path: Path) -> str:
+    if path == settings.WORKSPACE_ROOT:
+        return "."
+
+    return str(path.relative_to(settings.WORKSPACE_ROOT))
+
+
+def _resolve_workspace_path(path: str | Path) -> Path:
+    raw_path = Path(path)
+    candidate = raw_path if raw_path.is_absolute() else settings.WORKSPACE_ROOT / raw_path
+    resolved = candidate.resolve()
+
+    if not resolved.is_relative_to(settings.WORKSPACE_ROOT):
+        raise ValueError(f"Path escapes workspace root: {path}")
+
+    return resolved
+
+
+def _validate_page_size(page_size: int) -> int:
+    if page_size < 1:
+        raise ValueError("page_size must be at least 1")
+
+    return min(page_size, settings.MCP_MAX_PAGE_SIZE)
+
+
+def _validate_max_results(max_results: int) -> int:
+    if max_results < 1:
+        raise ValueError("max_results must be at least 1")
+
+    return min(max_results, settings.MCP_MAX_SEARCH_RESULTS)
+
+
+def _validate_command_timeout(timeout_seconds: float) -> float:
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be greater than 0")
+
+    return min(timeout_seconds, settings.MCP_MAX_COMMAND_TIMEOUT_SECONDS)
+
+
+def _read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _write_text(path: Path, content: str, *, mode: str) -> int:
+    with path.open(mode, encoding="utf-8") as file:
+        return file.write(content)
+
+
+def _is_hidden(relative_path: Path) -> bool:
+    return any(part.startswith(".") for part in relative_path.parts)
+
+
+def _truncate_output(
+    text: str,
+    limit: int = settings.MCP_MAX_COMMAND_OUTPUT_CHARS,
+) -> tuple[str, bool]:
+    if len(text) <= limit:
+        return text, False
+
+    omitted_chars = len(text) - limit
+    suffix = f"\n... truncated {omitted_chars} characters"
+    truncated = text[: max(limit - len(suffix), 0)] + suffix
+    return truncated, True
+
+
+def _get_command_shell() -> str:
+    shell = os.environ.get("SHELL")
+    if shell and Path(shell).is_file():
+        return shell
+
+    return "/bin/sh"
+
+
+@mcp.resource("resource://info")
+def get_greeting() -> str:
+    """
+    Provides an info about the CLI application.
+    """
+    return f"{__project__} v{__version__} - AI assistant for terminal"
+
+
+@mcp.tool
+async def list_files(
+    directory: str = ".",
+    include_hidden: bool = False,
+) -> dict[str, Any]:
+    """
+    Lists files and directories directly under a workspace-relative directory.
+    """
+
+    target_directory = _resolve_workspace_path(directory)
+
+    if not await asyncio.to_thread(target_directory.exists):
+        raise ValueError(f"Directory does not exist: {directory}")
+
+    if not await asyncio.to_thread(target_directory.is_dir):
+        raise ValueError(f"Path is not a directory: {directory}")
+
+    def build_entries() -> list[dict[str, Any]]:
+        entries: list[dict[str, Any]] = []
+
+        for entry in sorted(target_directory.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())):
+            relative_path = entry.relative_to(settings.WORKSPACE_ROOT)
+            if not include_hidden and _is_hidden(relative_path):
+                continue
+
+            entry_type = "directory" if entry.is_dir() else "file"
+            entries.append({
+                "name": entry.name,
+                "path": _display_path(entry),
+                "type": entry_type,
+                "size": entry.stat().st_size if entry.is_file() else None,
+            })
+
+        return entries
+
+    entries = await asyncio.to_thread(build_entries)
+    logger.debug(f"Listed {len(entries)} entries in {_display_path(target_directory)}")
+
+    return {
+        "directory": _display_path(target_directory),
+        "entries": entries,
+        "count": len(entries),
+    }
+
+
+@mcp.tool
+async def read_file_page(
+    path: str,
+    start_line: int = 1,
+    page_size: int = settings.MCP_DEFAULT_PAGE_SIZE,
+) -> dict[str, Any]:
+    """
+    Reads a UTF-8 text file from the workspace with line-based pagination.
+    """
+
+    if start_line < 1:
+        raise ValueError("start_line must be at least 1")
+
+    page_size = _validate_page_size(page_size)
+    target_file = _resolve_workspace_path(path)
+
+    if not await asyncio.to_thread(target_file.exists):
+        raise ValueError(f"File does not exist: {path}")
+
+    if not await asyncio.to_thread(target_file.is_file):
+        raise ValueError(f"Path is not a file: {path}")
+
+    content = await asyncio.to_thread(_read_text, target_file)
+    lines = content.splitlines(keepends=True)
+    total_lines = len(lines)
+    start_index = min(start_line - 1, total_lines)
+    page_lines = lines[start_index : start_index + page_size]
+    end_line = start_index + len(page_lines)
+
+    logger.debug(f"Read {len(page_lines)} lines from {_display_path(target_file)} starting at line {start_line}")
+
+    return {
+        "path": _display_path(target_file),
+        "start_line": start_line,
+        "end_line": end_line,
+        "page_size": page_size,
+        "total_lines": total_lines,
+        "has_more": end_line < total_lines,
+        "content": "".join(page_lines),
+    }
+
+
+@mcp.tool
+async def write_new_file(
+    path: str,
+    content: str,
+    make_parents: bool = True,
+) -> dict[str, Any]:
+    """
+    Creates a new UTF-8 text file in the workspace and fails if it already exists.
+    """
+
+    target_file = _resolve_workspace_path(path)
+
+    if await asyncio.to_thread(target_file.exists):
+        raise ValueError(f"File already exists: {path}")
+
+    if make_parents:
+        await asyncio.to_thread(target_file.parent.mkdir, parents=True, exist_ok=True)
+    elif not await asyncio.to_thread(target_file.parent.exists):
+        raise ValueError(f"Parent directory does not exist: {_display_path(target_file.parent)}")
+
+    chars_written = await asyncio.to_thread(_write_text, target_file, content, mode="x")
+    logger.info(f"Created file {_display_path(target_file)}")
+
+    return {
+        "path": _display_path(target_file),
+        "chars_written": chars_written,
+    }
+
+
+@mcp.tool
+async def replace_file_text(
+    path: str,
+    old_text: str,
+    new_text: str,
+    replace_all: bool = False,
+    expected_occurrences: int | None = None,
+) -> dict[str, Any]:
+    """
+    Replaces literal text inside an existing UTF-8 text file.
+    """
+
+    if not old_text:
+        raise ValueError("old_text must not be empty")
+
+    target_file = _resolve_workspace_path(path)
+
+    if not await asyncio.to_thread(target_file.exists):
+        raise ValueError(f"File does not exist: {path}")
+
+    if not await asyncio.to_thread(target_file.is_file):
+        raise ValueError(f"Path is not a file: {path}")
+
+    content = await asyncio.to_thread(_read_text, target_file)
+    occurrences = content.count(old_text)
+
+    if occurrences == 0:
+        raise ValueError("old_text was not found in the file")
+
+    if expected_occurrences is not None and occurrences != expected_occurrences:
+        raise ValueError(f"Expected {expected_occurrences} occurrences of old_text, but found {occurrences}")
+
+    replacement_count = occurrences if replace_all else 1
+    updated_content = content.replace(old_text, new_text, replacement_count)
+    await asyncio.to_thread(_write_text, target_file, updated_content, mode="w")
+    logger.info(f"Replaced {replacement_count} occurrence(s) in {_display_path(target_file)}")
+
+    return {
+        "path": _display_path(target_file),
+        "occurrences_found": occurrences,
+        "occurrences_replaced": replacement_count,
+    }
+
+
+@mcp.tool
+async def search_file_regex(
+    path: str,
+    pattern: str,
+    max_results: int = 50,
+) -> dict[str, Any]:
+    """
+    Searches a UTF-8 text file line by line using a regular expression.
+    """
+
+    target_file = _resolve_workspace_path(path)
+    max_results = _validate_max_results(max_results)
+
+    if not await asyncio.to_thread(target_file.exists):
+        raise ValueError(f"File does not exist: {path}")
+
+    if not await asyncio.to_thread(target_file.is_file):
+        raise ValueError(f"Path is not a file: {path}")
+
+    try:
+        regex = re.compile(pattern)
+    except re.error as exc:
+        raise ValueError(f"Invalid regular expression: {exc}") from exc
+
+    content = await asyncio.to_thread(_read_text, target_file)
+    matches: list[dict[str, Any]] = []
+    truncated = False
+
+    for line_number, line in enumerate(content.splitlines(), start=1):
+        for match in regex.finditer(line):
+            matches.append({
+                "line": line_number,
+                "start_column": match.start() + 1,
+                "end_column": match.end(),
+                "match": match.group(0),
+                "line_text": line,
+            })
+
+            if len(matches) >= max_results:
+                truncated = True
+                break
+
+        if truncated:
+            break
+
+    logger.debug(f"Found {len(matches)} regex matches in {_display_path(target_file)}")
+
+    return {
+        "path": _display_path(target_file),
+        "pattern": pattern,
+        "matches": matches,
+        "count": len(matches),
+        "truncated": truncated,
+    }
+
+
+@mcp.tool
+async def find_files(
+    pattern: str,
+    include_hidden: bool = False,
+) -> dict[str, Any]:
+    """
+    Finds workspace files by glob pattern relative to the workspace root.
+    """
+
+    def run_glob() -> list[str]:
+        matches: list[str] = []
+
+        for candidate in sorted(settings.WORKSPACE_ROOT.glob(pattern)):
+            if not candidate.is_file():
+                continue
+
+            relative_path = candidate.relative_to(settings.WORKSPACE_ROOT)
+            if not include_hidden and _is_hidden(relative_path):
+                continue
+
+            matches.append(str(relative_path))
+
+        return matches
+
+    matches = await asyncio.to_thread(run_glob)
+    logger.debug(f"Glob pattern {pattern} matched {len(matches)} files")
+
+    return {
+        "pattern": pattern,
+        "matches": matches,
+        "count": len(matches),
+    }
+
+
+@mcp.tool
+async def execute_command(
+    command: str,
+    directory: str = ".",
+    timeout_seconds: float = settings.MCP_DEFAULT_COMMAND_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """
+    Executes a shell command inside the workspace and returns its captured output.
+    """
+
+    if not command.strip():
+        raise ValueError("command must not be empty")
+
+    timeout_seconds = _validate_command_timeout(timeout_seconds)
+    target_directory = _resolve_workspace_path(directory)
+
+    if not await asyncio.to_thread(target_directory.exists):
+        raise ValueError(f"Directory does not exist: {directory}")
+
+    if not await asyncio.to_thread(target_directory.is_dir):
+        raise ValueError(f"Path is not a directory: {directory}")
+
+    shell = _get_command_shell()
+
+    process = await asyncio.create_subprocess_shell(
+        command,
+        cwd=str(target_directory),
+        executable=shell,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    timed_out = False
+
+    try:
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
+    except TimeoutError:
+        timed_out = True
+        process.kill()
+        stdout_bytes, stderr_bytes = await process.communicate()
+
+    stdout = stdout_bytes.decode("utf-8", errors="replace")
+    stderr = stderr_bytes.decode("utf-8", errors="replace")
+    combined_output, combined_truncated = _truncate_output(stdout + stderr)
+    stdout, stdout_truncated = _truncate_output(stdout)
+    stderr, stderr_truncated = _truncate_output(stderr)
+
+    logger.info(f"Executed command in {_display_path(target_directory)} with exit code {process.returncode}: {command}")
+
+    return {
+        "command": command,
+        "directory": _display_path(target_directory),
+        "shell": shell,
+        "exit_code": process.returncode,
+        "timed_out": timed_out,
+        "stdout": stdout,
+        "stderr": stderr,
+        "combined_output": combined_output,
+        "stdout_truncated": stdout_truncated,
+        "stderr_truncated": stderr_truncated,
+        "combined_output_truncated": combined_truncated,
+    }
+
+
+if (mcp_config_file := settings.WORKSPACE_ROOT / "mcp.json").is_file():
+    logger.info(f"Loading MCP config from {mcp_config_file}")
+    from app.schema.mcp_config import MCPConfig
+
+    mcp_config = MCPConfig.model_validate_json(mcp_config_file.read_text(encoding="utf-8"))
+
+    for server in mcp_config.servers.values():
+        mcp.mount(
+            create_proxy(
+                StreamableHttpTransport(
+                    server.url,
+                    headers=server.headers,
+                ),
+            ),
+            namespace=server.name,
+        )
+
+
+mcp_app = mcp.http_app(
+    transport="streamable-http",
+    json_response=True,
+)
+
+
+def create_mcp_server() -> uvicorn.Server:
+    return uvicorn.Server(
+        uvicorn.Config(
+            mcp_app,
+            host=settings.MCP_HOST,
+            port=settings.MCP_PORT,
+            reload=False,
+            log_config=uvicorn_log_config,
+        )
+    )
+
+
+if __name__ == "__main__":
+    create_mcp_server().run()
