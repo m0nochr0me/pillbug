@@ -1,0 +1,15 @@
+*.log
+*.tmp
+*.bak
+*.ipynb
+*.pyc
+*.pyo
+
+.venv/
+__pycache__/
+scratch/
+
+.env
+
+.vscode/
+.github/
