@@ -8,13 +8,19 @@ import sys
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
 from importlib import import_module
-
-import uvicorn
+from typing import TYPE_CHECKING
 
 from app import __banner__, __version__
-from app.core.ai import chat_service
 from app.core.config import settings
+from app.core.log import logger
+
+# isort: split
+
+from app.core.ai import chat_service
 from app.runtime import ApplicationLoop
+
+if TYPE_CHECKING:
+    import uvicorn
 
 
 def get_mcp_server_factory() -> Callable[[], uvicorn.Server]:
@@ -55,6 +61,7 @@ async def main(*args) -> None:
         print(__banner__)
         if "cli" in settings.enabled_channels():
             print("CLI channel ready. Type /exit to quit.")
+        logger.info(f"Active channels: {', '.join(settings.enabled_channels())}")
 
         application_loop = ApplicationLoop(chat_service=chat_service)
         await application_loop.run()
