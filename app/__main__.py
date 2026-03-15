@@ -4,15 +4,17 @@ Entrypoint
 
 import argparse
 import asyncio
+import sys
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
 from importlib import import_module
 
 import uvicorn
 
-from app import __version__
-from app.core.ai import GeminiChatService, chat_service
+from app import __banner__, __version__
+from app.core.ai import chat_service
 from app.core.config import settings
+from app.runtime import ApplicationLoop
 
 
 def get_mcp_server_factory() -> Callable[[], uvicorn.Server]:
@@ -50,11 +52,12 @@ async def managed_mcp_server() -> AsyncIterator[None]:
 
 async def main(*args) -> None:
     async with managed_mcp_server():
-        # TODO: Implement application loop
-        print(f"Hello from {__version__}!")
-        await chat_service.create_chat()
-        response = await chat_service.send_message("What is the meaning of life, the universe, and everything?")
-        print(response.text, response.usage_metadata.model_dump_json() if response.usage_metadata else "No usage metadata")
+        print(__banner__)
+        if "cli" in settings.enabled_channels():
+            print("CLI channel ready. Type /exit to quit.")
+
+        application_loop = ApplicationLoop(chat_service=chat_service)
+        await application_loop.run()
 
 
 def entrypoint() -> None:
@@ -69,9 +72,18 @@ def workspace_init() -> None:
     settings.WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
     if not (settings.WORKSPACE_ROOT / "AGENTS.md").is_file():
         (settings.WORKSPACE_ROOT / "AGENTS.md").write_text(
-            "# Assistant\n\nYou are Joi(she/her) a smiley virtual assistant.\n",
+            "---\n"
+            "name: Assistant\n"
+            "description: You are Joi (she/her) a friendly AI assistant.\n"
+            "output_format: Plain text, suitable for direct speech. Avoid any markup, emoji and formatting.\n"
+            "---\n",
             encoding="utf-8",
         )
+        print(
+            f"Initialized workspace at {settings.WORKSPACE_ROOT}\n"
+            f"Please review your workspace files and customize your assistant's personality and settings as desired."
+        )
+        sys.exit(0)
 
     settings.LOG_DIR.mkdir(parents=True, exist_ok=True)
 

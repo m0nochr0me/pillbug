@@ -16,6 +16,10 @@ from app.schema.log_entry import LogEntry
 __all__ = ("settings",)
 
 
+def _split_csv(value: str) -> tuple[str, ...]:
+    return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
 class Settings(BaseSettings):
 
     DEBUG: bool = False
@@ -27,7 +31,9 @@ class Settings(BaseSettings):
 
     CACHE_TTL: int = 7200  # 2 hours
 
-    LOG_DIR: Path = Path.home() / ".pillbug/logs"
+    BASE_DIR: Path = Path.home() / ".pillbug"
+
+    LOG_DIR: Path = BASE_DIR / "logs"
 
     GEMINI_MODEL: str = "gemini-3.1-pro-preview"
     GEMINI_TEMPERATURE: float = 1.0
@@ -46,7 +52,12 @@ class Settings(BaseSettings):
     MCP_MAX_COMMAND_TIMEOUT_SECONDS: float = 300.0
     MCP_MAX_COMMAND_OUTPUT_CHARS: int = 20000
 
-    WORKSPACE_ROOT: Path = Path.home() / ".pillbug/workspace"
+    ENABLED_CHANNELS_RAW: str = "cli"
+    CHANNEL_PLUGIN_FACTORIES_RAW: str = ""
+    INBOUND_DEBOUNCE_SECONDS: float = 1.5
+    INBOUND_MAX_MESSAGE_CHARS: int = 4000
+
+    WORKSPACE_ROOT: Path = BASE_DIR / "workspace"
 
     TIMEZONE: str = "UTC"
 
@@ -57,6 +68,24 @@ class Settings(BaseSettings):
         extra="ignore",
         case_sensitive=True,
     )
+
+    def enabled_channels(self) -> tuple[str, ...]:
+        enabled_channels = _split_csv(self.ENABLED_CHANNELS_RAW)
+        return enabled_channels or ("cli",)
+
+    def channel_plugin_factories(self) -> dict[str, str]:
+        mappings: dict[str, str] = {}
+
+        for raw_mapping in _split_csv(self.CHANNEL_PLUGIN_FACTORIES_RAW):
+            channel_name, separator, import_path = raw_mapping.partition("=")
+            if not separator or not channel_name.strip() or not import_path.strip():
+                raise ValueError(
+                    "PB_CHANNEL_PLUGIN_FACTORIES entries must use the format channel=package.module:factory"
+                )
+
+            mappings[channel_name.strip()] = import_path.strip()
+
+        return mappings
 
 
 try:

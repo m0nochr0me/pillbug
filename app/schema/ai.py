@@ -1,3 +1,8 @@
+"""
+AI-related services and utilities.
+"""
+
+
 from google.genai import types
 from pydantic import BaseModel, Field
 

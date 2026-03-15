@@ -17,27 +17,59 @@ from google.genai import types
 from app.core.config import settings
 from app.schema.ai import ChatResponse
 
-__all__ = ("chat_service",)
+__all__ = (
+    "GeminiChatService",
+    "GeminiChatSession",
+    "chat_service",
+)
 
 
 class GeminiChatService:
     def __init__(self) -> None:
         self.ai_client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
-    async def create_chat(self) -> None:
-        self.mcp_client = Client(
+    def create_session(self) -> "GeminiChatSession":
+        return GeminiChatSession(self)
+
+    async def get_base_context(self) -> str:
+        now = datetime.now(ZoneInfo(settings.TIMEZONE))
+
+        context = f"""
+        ---
+        datetime: {now:%Y-%b-%d %H:%M:%S}
+        timezone: {settings.TIMEZONE}
+        workspace: {settings.WORKSPACE_ROOT}
+        ---
+        """
+        return cleandoc(context)
+
+    @asynccontextmanager
+    async def get_system_instruction(self) -> AsyncIterator[str | None]:
+        async with aiofile.AIOFile(settings.WORKSPACE_ROOT / "AGENTS.md", "r", encoding="utf-8") as agents_file:
+            content = str(await agents_file.read())
+            content = await self.get_base_context() + "\n" + content
+            yield content
+            return
+
+        yield None
+
+
+class GeminiChatSession:
+    def __init__(self, service: GeminiChatService) -> None:
+        self._service = service
+        self._mcp_client = Client(
             StreamableHttpTransport(
                 f"http://{settings.MCP_HOST}:{settings.MCP_PORT}/mcp",
             )
         )
-        self.chat = self.ai_client.aio.chats.create(model=settings.GEMINI_MODEL)
+        self._chat = service.ai_client.aio.chats.create(model=settings.GEMINI_MODEL)
 
     async def send_message(
         self,
         message: str,
     ) -> ChatResponse:
-        async with self.mcp_client as mcp_client, self._get_system_instruction() as system_instruction:
-            response = await self.chat.send_message(
+        async with self._mcp_client as mcp_client, self._service.get_system_instruction() as system_instruction:
+            response = await self._chat.send_message(
                 message=message,
                 config=types.GenerateContentConfig(
                     system_instruction=system_instruction,
@@ -63,32 +95,10 @@ class GeminiChatService:
             usage_metadata=response.usage_metadata,
         )
 
-    async def get_base_context(self) -> str:
-        now = datetime.now(ZoneInfo(settings.TIMEZONE))
-
-        context = f"""
-        ---
-        datetime: {now:%Y-%b-%d %H:%M:%S}
-        timezone: {settings.TIMEZONE}
-        workspace: {settings.WORKSPACE_ROOT}
-        ---
-        """
-        return cleandoc(context)
-
-    @asynccontextmanager
-    async def _get_system_instruction(self) -> AsyncIterator[str | None]:
-        async with aiofile.AIOFile(settings.WORKSPACE_ROOT / "AGENTS.md", "r", encoding="utf-8") as agents_file:
-            content = str(await agents_file.read())
-            content = await self.get_base_context() + "\n" + content
-            yield content
-            return
-
-        yield None
-
     def _get_latest_model_response_text(
         self,
     ) -> str:
-        history = self.chat.get_history(curated=True)
+        history = self._chat.get_history(curated=True)
         model_contents: list[types.Content] = []
 
         for content in reversed(history):
