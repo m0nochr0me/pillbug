@@ -989,6 +989,7 @@ dependencies = [
     { name = "google-genai" },
     { name = "jinja2" },
     { name = "loguru" },
+    { name = "pydantic" },
     { name = "redis" },
 ]
 
@@ -1002,6 +1003,7 @@ requires-dist = [
     { name = "google-genai", specifier = ">=1.67.0" },
     { name = "jinja2", specifier = ">=3.1.6" },
     { name = "loguru", specifier = ">=0.7.3" },
+    { name = "pydantic", specifier = ">=2.0" },
     { name = "redis", specifier = ">=7.3.0" },
 ]
 
