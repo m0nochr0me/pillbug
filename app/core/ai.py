@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from inspect import cleandoc
+from typing import cast
 from zoneinfo import ZoneInfo
 
 import aiofile
@@ -15,7 +16,8 @@ from google import genai
 from google.genai import types
 
 from app.core.config import settings
-from app.schema.ai import ChatResponse
+from app.core.log import logger
+from app.schema.ai import ChatResponse, Skill
 
 __all__ = (
     "GeminiChatService",
@@ -43,11 +45,53 @@ class GeminiChatService:
         """
         return cleandoc(context)
 
+    async def discover_skills(self) -> list[Skill]:
+        """
+        Glob directories in the skills base dir, and treat each one as a skill
+        """
+        if not (skills_base_dir := settings.WORKSPACE_ROOT / "skills").is_dir():
+            return []
+        skill_dirs = [d for d in skills_base_dir.iterdir() if d.is_dir()]
+        skills = []
+        for skill_dir in skill_dirs:
+            if not (skill_file := skill_dir / "SKILL.md").is_file():
+                logger.warning(f"Skipping skill directory {skill_dir} because it does not contain a SKILL.md file")
+                continue
+
+            async with aiofile.AIOFile(skill_file, "r", encoding="utf-8") as skill_md_file:
+                name = None
+                description = None
+                async for line in aiofile.LineReader(skill_md_file):
+                    if not line:
+                        raise StopAsyncIteration
+                    line = cast("str", line).strip()  # noqa: PLW2901
+                    if line.startswith("name:"):
+                        name = line[len("name:") :].strip()
+                    elif line.startswith("description:"):
+                        description = line[len("description:") :].strip()
+                    if name and description:
+                        skills.append(Skill(name=name, description=description, location=skill_dir))
+                        break
+        return skills
+
     @asynccontextmanager
     async def get_system_instruction(self) -> AsyncIterator[str | None]:
         async with aiofile.AIOFile(settings.WORKSPACE_ROOT / "AGENTS.md", "r", encoding="utf-8") as agents_file:
             content = str(await agents_file.read())
             content = await self.get_base_context() + "\n" + content
+            if skills := await self.discover_skills():
+                content += (
+                    "\n\n---\n\n"
+                    "## Available Skills\n\nThe following skills extend your capabilities. "
+                    "To use a skill, read its SKILL.md file using the `read_file` tool."
+                    "\n"
+                )
+                for skill in skills:
+                    content += (
+                        f"### {skill.name}\n\n"
+                        f"- Description: {skill.description}\n"
+                        f"- Location: {skill.location}\n\n"
+                    )
             yield content
             return
 

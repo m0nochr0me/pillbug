@@ -1,8 +1,8 @@
-import json
 import re
 import unicodedata
 
 from app.core.config import settings
+from app.core.log import logger
 from app.schema.messages import (
     InboundBatch,
     MessageProcessingContext,
@@ -81,14 +81,10 @@ class ContextEnrichmentStep:
             security_warnings=list(state.security.warnings),
             metadata=batch.last_message.metadata,
             normalized_text=state.normalized_text,
-            model_input="",
+            model_input=state.cleaned_text,  # NOTE: In a real implementation, you would likely want to construct a more complex model input that includes context, instructions, etc. This is simplified for demonstration purposes.
         )
 
-        rendered_context = json.dumps(
-            context.model_dump(mode="json", exclude={"model_input"}),
-            ensure_ascii=True,
-            sort_keys=True,
-        )
+        rendered_context = context.model_dump_json(indent=2, exclude_none=True, exclude={"model_input"})
         state.context = context.model_copy(
             update={
                 "model_input": f"Inbound message context:\n{rendered_context}\n\nUser message:\n{state.cleaned_text}"
@@ -102,7 +98,7 @@ class InboundProcessingPipeline:
         self._steps = (
             CleanupStep(),
             SecurityCheckStep(),
-            ContextEnrichmentStep(),
+            # ContextEnrichmentStep(),  # NOTE: Disabled for now
         )
 
     async def process(
@@ -115,13 +111,13 @@ class InboundProcessingPipeline:
             state = await step.process(state)
 
         if state.context is None:
-            raise RuntimeError("Message processing pipeline did not populate context")
+            logger.warning("Message processing pipeline did not populate context")
 
         return ProcessedInboundMessage(
             batch=batch,
             cleaned_text=state.cleaned_text,
             normalized_text=state.normalized_text,
-            model_input=state.context.model_input,
+            model_input=state.context.model_input if state.context is not None else state.cleaned_text,
             security=state.security,
             context=state.context,
         )

@@ -148,7 +148,7 @@ async def list_files(
 
 
 @mcp.tool
-async def read_file_page(
+async def read_file(
     path: str,
     start_line: int = 1,
     page_size: int = settings.MCP_DEFAULT_PAGE_SIZE,

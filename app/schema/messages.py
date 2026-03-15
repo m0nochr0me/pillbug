@@ -151,8 +151,8 @@ class ProcessedInboundMessage(BaseModel):
         default_factory=SecurityCheckResult,
         description="The result of the security checks performed on the message",
     )
-    context: MessageProcessingContext = Field(
-        ...,
+    context: MessageProcessingContext | None = Field(
+        default=None,
         description="The context information generated during message processing",
     )
 
