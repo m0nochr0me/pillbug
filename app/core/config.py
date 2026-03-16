@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     BASE_DIR: Path = Path.home() / ".pillbug"
 
     LOG_DIR: Path = BASE_DIR / "logs"
+    SESSIONS_DIR: Path = BASE_DIR / "sessions"
 
     GEMINI_MODEL: str = "gemini-3.1-pro-preview"
     GEMINI_TEMPERATURE: float = 1.0

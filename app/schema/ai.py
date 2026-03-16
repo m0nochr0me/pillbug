@@ -2,6 +2,7 @@
 AI-related services and utilities.
 """
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 from google.genai import types
@@ -13,6 +14,18 @@ class ChatResponse(BaseModel):
     usage_metadata: types.GenerateContentResponseUsageMetadata | None = Field(
         None,
         description="Metadata about the usage of the response, such as token counts.",
+    )
+
+
+class ChatSessionSnapshot(BaseModel):
+    session_id: str = Field(description="The stable session identifier used by the runtime.")
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="The last time this session history was written to disk.",
+    )
+    history: list[types.Content] = Field(
+        default_factory=list,
+        description="Curated Gemini chat history for restoring a prior session.",
     )
 
 

@@ -93,6 +93,7 @@ def workspace_init() -> None:
         sys.exit(0)
 
     settings.LOG_DIR.mkdir(parents=True, exist_ok=True)
+    settings.SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 if __name__ == "__main__":

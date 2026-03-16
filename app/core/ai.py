@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from inspect import cleandoc
 from typing import cast
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import aiofile
@@ -17,7 +18,7 @@ from google.genai import types
 
 from app.core.config import settings
 from app.core.log import logger
-from app.schema.ai import ChatResponse, Skill
+from app.schema.ai import ChatResponse, ChatSessionSnapshot, Skill
 
 __all__ = (
     "GeminiChatService",
@@ -29,9 +30,59 @@ __all__ = (
 class GeminiChatService:
     def __init__(self) -> None:
         self.ai_client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        self._sessions_dir = settings.SESSIONS_DIR
 
-    def create_session(self) -> "GeminiChatSession":
-        return GeminiChatSession(self)
+    def create_session(
+        self,
+        session_id: str,
+        history: list[types.Content] | None = None,
+    ) -> "GeminiChatSession":
+        return GeminiChatSession(self, session_id=session_id, history=history)
+
+    async def restore_session(self, session_id: str) -> "GeminiChatSession":
+        history = await self._load_session_history(session_id)
+        if history:
+            logger.info(f"Restored session history for {session_id} with {len(history)} messages")
+
+        return self.create_session(session_id=session_id, history=history or None)
+
+    async def reset_session(self, session_id: str) -> "GeminiChatSession":
+        await self._delete_session_history(session_id)
+        return self.create_session(session_id=session_id)
+
+    async def save_session_history(
+        self,
+        session_id: str,
+        history: list[types.Content],
+    ) -> None:
+        self._sessions_dir.mkdir(parents=True, exist_ok=True)
+        snapshot = ChatSessionSnapshot(session_id=session_id, history=history)
+        session_path = self._get_session_path(session_id)
+
+        async with aiofile.AIOFile(session_path, "w", encoding="utf-8") as session_file:
+            await session_file.write(snapshot.model_dump_json(indent=2))
+
+    async def _load_session_history(self, session_id: str) -> list[types.Content] | None:
+        session_path = self._get_session_path(session_id)
+        if not session_path.is_file():
+            return None
+
+        try:
+            async with aiofile.AIOFile(session_path, "r", encoding="utf-8") as session_file:
+                snapshot = ChatSessionSnapshot.model_validate_json(str(await session_file.read()))
+        except Exception:
+            logger.exception(f"Failed to restore session history from {session_path}")
+            return None
+
+        return snapshot.history
+
+    async def _delete_session_history(self, session_id: str) -> None:
+        session_path = self._get_session_path(session_id)
+        if session_path.exists():
+            session_path.unlink()
+
+    def _get_session_path(self, session_id: str):
+        return self._sessions_dir / quote(session_id, safe="")
 
     async def get_base_context(self) -> str:
         now = datetime.now(ZoneInfo(settings.TIMEZONE))
@@ -88,9 +139,7 @@ class GeminiChatService:
                 )
                 for skill in skills:
                     content += (
-                        f"### {skill.name}\n\n"
-                        f"- Description: {skill.description}\n"
-                        f"- Location: {skill.location}\n\n"
+                        f"### {skill.name}\n\n- Description: {skill.description}\n- Location: {skill.location}\n\n"
                     )
             yield content
             return
@@ -99,14 +148,23 @@ class GeminiChatService:
 
 
 class GeminiChatSession:
-    def __init__(self, service: GeminiChatService) -> None:
+    def __init__(
+        self,
+        service: GeminiChatService,
+        session_id: str,
+        history: list[types.Content] | None = None,
+    ) -> None:
         self._service = service
+        self._session_id = session_id
         self._mcp_client = Client(
             StreamableHttpTransport(
                 f"http://{settings.MCP_HOST}:{settings.MCP_PORT}/mcp",
             )
         )
-        self._chat = service.ai_client.aio.chats.create(model=settings.GEMINI_MODEL)
+        self._chat = service.ai_client.aio.chats.create(
+            model=settings.GEMINI_MODEL,
+            history=cast("list[types.ContentOrDict] | None", history),
+        )
 
     async def send_message(
         self,
@@ -128,6 +186,7 @@ class GeminiChatSession:
             )
 
         full_response = response.text or self._extract_parts_text(response.parts)
+        await self._persist_history()
         if full_response.strip():
             return ChatResponse(
                 text=full_response,
@@ -138,6 +197,16 @@ class GeminiChatSession:
             text=self._get_latest_model_response_text(),
             usage_metadata=response.usage_metadata,
         )
+
+    async def _persist_history(self) -> None:
+        try:
+            await self._service.save_session_history(self._session_id, self._get_curated_history())
+        except Exception:
+            logger.exception(f"Failed to persist session history for {self._session_id}")
+
+    def _get_curated_history(self) -> list[types.Content]:
+        history = self._chat.get_history(curated=True)
+        return [types.Content.model_validate(content) for content in history]
 
     def _get_latest_model_response_text(
         self,

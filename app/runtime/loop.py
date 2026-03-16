@@ -137,16 +137,19 @@ class ApplicationLoop:
         batch = processed_message.batch
         channel = self._channel_by_name[batch.channel_name]
 
+        if self._is_clear_command(batch.raw_text):
+            self._sessions[batch.session_key] = await self._chat_service.reset_session(batch.session_key)
+            await channel.send_response(batch.last_message, "Session cleared. Started a new chat session.")
+            logger.info(f"Cleared session history for {batch.session_key}")
+            return
+
         if processed_message.security.blocked:
             rejection = self._render_security_rejection(processed_message)
             await channel.send_response(batch.last_message, rejection)
             logger.warning(f"Blocked inbound message from {batch.session_key}: {processed_message.security.reasons}")
             return
 
-        session = self._sessions.get(batch.session_key)
-        if session is None:
-            session = self._chat_service.create_session()
-            self._sessions[batch.session_key] = session
+        session = await self._get_session(batch.session_key)
 
         try:
             response = await session.send_message(processed_message.model_input)
@@ -162,6 +165,18 @@ class ApplicationLoop:
             logger.info(f"Completed response for {batch.session_key}: {response.usage_metadata.model_dump_json()}")
 
         await channel.send_response(batch.last_message, response.text)
+
+    async def _get_session(self, session_key: str) -> GeminiChatSession:
+        session = self._sessions.get(session_key)
+        if session is not None:
+            return session
+
+        session = await self._chat_service.restore_session(session_key)
+        self._sessions[session_key] = session
+        return session
+
+    def _is_clear_command(self, raw_text: str) -> bool:
+        return raw_text.strip().lower() == "/clear"
 
     def _render_security_rejection(self, processed_message: ProcessedInboundMessage) -> str:
         reasons = "; ".join(processed_message.security.reasons)
