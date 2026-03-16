@@ -416,7 +416,7 @@ async def execute_command(
     }
 
 
-if (mcp_config_file := settings.WORKSPACE_ROOT / "mcp.json").is_file():
+if (mcp_config_file := settings.BASE_DIR / "mcp.json").is_file():
     logger.info(f"Loading MCP config from {mcp_config_file}")
     from app.schema.mcp_config import MCPConfig
 
