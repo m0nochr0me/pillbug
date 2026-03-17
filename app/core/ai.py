@@ -36,17 +36,17 @@ class GeminiChatService:
         self,
         session_id: str,
         history: list[types.Content] | None = None,
-    ) -> "GeminiChatSession":
+    ) -> GeminiChatSession:
         return GeminiChatSession(self, session_id=session_id, history=history)
 
-    async def restore_session(self, session_id: str) -> "GeminiChatSession":
+    async def restore_session(self, session_id: str) -> GeminiChatSession:
         history = await self._load_session_history(session_id)
         if history:
             logger.info(f"Restored session history for {session_id} with {len(history)} messages")
 
         return self.create_session(session_id=session_id, history=history or None)
 
-    async def reset_session(self, session_id: str) -> "GeminiChatSession":
+    async def reset_session(self, session_id: str) -> GeminiChatSession:
         await self._delete_session_history(session_id)
         return self.create_session(session_id=session_id)
 
