@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from app.core.ai import GeminiChatService, GeminiChatSession
 from app.core.config import settings
 from app.core.log import logger
-from app.runtime.channels import ChannelPlugin, load_channel_plugins
+from app.runtime.channels import ChannelPlugin, load_channel_plugins, unregister_channel_plugin
 from app.runtime.pipeline import InboundProcessingPipeline
 from app.schema.messages import InboundBatch, InboundMessage, ProcessedInboundMessage
 
@@ -188,3 +188,5 @@ class ApplicationLoop:
                 await channel.close()
             except Exception:
                 logger.exception(f"Failed to close channel: {channel.name}")
+            finally:
+                unregister_channel_plugin(channel.name)

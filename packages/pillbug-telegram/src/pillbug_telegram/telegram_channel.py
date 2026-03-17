@@ -151,12 +151,32 @@ class TelegramChannel(BaseChannel):
         finally:
             await self.close()
 
+    async def send_message(self, conversation_id: str, message_text: str) -> None:
+        try:
+            chat_id = int(conversation_id)
+        except ValueError as exc:
+            raise ValueError(f"Telegram conversation_id must be an integer chat ID, got: {conversation_id}") from exc
+
+        await self._send_text(chat_id=chat_id, response_text=message_text)
+
     async def send_response(self, inbound_message: InboundMessage, response_text: str) -> None:
         chat_id = inbound_message.metadata.get("telegram_chat_id")
         if not isinstance(chat_id, int):
             raise ValueError("Telegram inbound message metadata is missing telegram_chat_id")
 
         reply_to_message_id = inbound_message.metadata.get("telegram_message_id")
+        await self._send_text(chat_id=chat_id, response_text=response_text, reply_to_message_id=reply_to_message_id)
+
+    async def close(self) -> None:
+        await self._client.close()
+
+    async def _send_text(
+        self,
+        *,
+        chat_id: int,
+        response_text: str,
+        reply_to_message_id: object | None = None,
+    ) -> None:
         for index, chunk in enumerate(_chunk_message(response_text)):
             params = {
                 "chat_id": chat_id,
@@ -167,9 +187,6 @@ class TelegramChannel(BaseChannel):
                 params["allow_sending_without_reply"] = True
 
             await self._client.call_async("sendMessage", **params)
-
-    async def close(self) -> None:
-        await self._client.close()
 
     async def _delete_webhook(self) -> None:
         await self._client.call_async(

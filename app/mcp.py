@@ -16,6 +16,7 @@ from fastmcp.server import create_proxy
 from app import __project__, __version__
 from app.core.config import settings
 from app.core.log import logger, uvicorn_log_config
+from app.runtime.channels import get_channel_plugin
 
 __all__ = ("create_mcp_server", "mcp", "mcp_app")
 
@@ -92,6 +93,20 @@ def _get_command_shell() -> str:
         return shell
 
     return "/bin/sh"
+
+
+def _parse_channel_target(channel: str) -> tuple[str, str]:
+    channel_name, separator, conversation_id = channel.strip().partition(":")
+    if not channel_name:
+        raise ValueError("channel must not be empty")
+
+    if not separator:
+        return channel_name, ""
+
+    if not conversation_id:
+        raise ValueError("channel targets using ':' must include a destination after the channel name")
+
+    return channel_name, conversation_id
 
 
 @mcp.resource("resource://info")
@@ -349,6 +364,38 @@ async def find_files(
         "pattern": pattern,
         "matches": matches,
         "count": len(matches),
+    }
+
+
+@mcp.tool
+async def send_message(
+    channel: str,
+    message: str,
+) -> dict[str, Any]:
+    """
+    Sends a direct outbound message to a configured channel.
+
+    The channel argument accepts either a bare channel name for default destinations such as cli,
+    or a session-style target in the form channel_name:conversation_id such as telegram:123456789.
+    """
+
+    if not message.strip():
+        raise ValueError("message must not be empty")
+
+    channel_name, conversation_id = _parse_channel_target(channel)
+    channel_plugin = get_channel_plugin(channel_name, create=True)
+    if channel_plugin is None:
+        raise ValueError(f"Channel is not enabled or available: {channel_name}")
+
+    await channel_plugin.send_message(conversation_id, message)
+    logger.info(
+        f"Sent outbound message via channel={channel_name} destination={conversation_id or '<default>'}"
+    )
+
+    return {
+        "channel": channel_name,
+        "conversation_id": conversation_id or None,
+        "chars_sent": len(message),
     }
 
 

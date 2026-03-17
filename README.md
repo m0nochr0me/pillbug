@@ -9,7 +9,7 @@ Pillbug is an async AI agent runtime.
 - Async runtime with debounced inbound message handling
 - Built-in CLI channel plus factory-based external channel plugins
 - uv workspace-friendly plugin layout for optional channel packages
-- Local MCP server for workspace file, search, and command tools
+- Local MCP server for workspace file, search, command, and outbound channel tools
 - Per-workspace `AGENTS.md` instructions seeded on first run
 
 ## Quick Start
@@ -57,6 +57,10 @@ Runtime flow:
 - `app/runtime/loop.py` listens on each channel, groups messages by session, and reuses one chat session per session key.
 - `app/runtime/pipeline.py` cleans input, runs security checks, and builds the structured model input.
 - `app/mcp.py` exposes workspace-safe file and command tools to the model.
+
+External executions can also deliver messages through the local MCP server with `send_message(channel, message)`.
+Use `cli` for the local console, or a session-style target such as `telegram:123456789` where the suffix is the
+channel conversation identifier.
 
 ## Configuration
 

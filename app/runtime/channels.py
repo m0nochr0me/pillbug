@@ -17,6 +17,12 @@ class ChannelPlugin(Protocol):
 
     def listen(self) -> AsyncIterator[InboundMessage]: ...
 
+    async def send_message(
+        self,
+        conversation_id: str,
+        message_text: str,
+    ) -> None: ...
+
     async def send_response(
         self,
         inbound_message: InboundMessage,
@@ -31,6 +37,14 @@ class BaseChannel(ABC):
 
     @abstractmethod
     def listen(self) -> AsyncIterator[InboundMessage]:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def send_message(
+        self,
+        conversation_id: str,
+        message_text: str,
+    ) -> None:
         raise NotImplementedError
 
     @abstractmethod
@@ -78,12 +92,18 @@ class CliChannel(BaseChannel):
                 metadata={"source": "stdin"},
             )
 
+    async def send_message(self, conversation_id: str, message_text: str) -> None:
+        del conversation_id
+        await asyncio.to_thread(print, f"{self._assistant_prefix}{message_text}")
+
     async def send_response(self, inbound_message: InboundMessage, response_text: str) -> None:
-        await asyncio.to_thread(print, f"{self._assistant_prefix}{response_text}")
+        await self.send_message(inbound_message.conversation_id, response_text)
 
 
 ChannelFactory = Callable[[], ChannelPlugin]
 """Factory type for creating channel plugin instances."""
+
+_active_channels: dict[str, ChannelPlugin] = {}
 
 
 def _load_channel_factory(import_path: str) -> ChannelFactory:
@@ -102,10 +122,7 @@ def _load_channel_factory(import_path: str) -> ChannelFactory:
     return cast("ChannelFactory", factory)
 
 
-def load_channel_plugins() -> list[ChannelPlugin]:
-    """
-    Load channel plugins based on settings.
-    """
+def _get_channel_factories() -> dict[str, ChannelFactory]:
     factories: dict[str, ChannelFactory] = {
         "cli": CliChannel,
     }
@@ -113,14 +130,44 @@ def load_channel_plugins() -> list[ChannelPlugin]:
     for channel_name, import_path in settings.channel_plugin_factories().items():
         factories[channel_name] = _load_channel_factory(import_path)
 
+    return factories
+
+
+def get_channel_plugin(channel_name: str, *, create: bool = False) -> ChannelPlugin | None:
+    channel = _active_channels.get(channel_name)
+    if channel is not None or not create:
+        return channel
+
+    if channel_name not in settings.enabled_channels():
+        return None
+
+    factory = _get_channel_factories().get(channel_name)
+    if factory is None:
+        raise ValueError(
+            f"Enabled channel '{channel_name}' is not available. Configure PB_CHANNEL_PLUGIN_FACTORIES to register it."
+        )
+
+    channel = factory()
+    _active_channels[channel_name] = channel
+    return channel
+
+
+def unregister_channel_plugin(channel_name: str) -> None:
+    _active_channels.pop(channel_name, None)
+
+
+def load_channel_plugins() -> list[ChannelPlugin]:
+    """
+    Load channel plugins based on settings.
+    """
     channels: list[ChannelPlugin] = []
     for channel_name in settings.enabled_channels():
-        factory = factories.get(channel_name)
-        if factory is None:
+        channel = get_channel_plugin(channel_name, create=True)
+        if channel is None:
             raise ValueError(
                 f"Enabled channel '{channel_name}' is not available. Configure PB_CHANNEL_PLUGIN_FACTORIES to register it."
             )
 
-        channels.append(factory())
+        channels.append(channel)
 
     return channels
