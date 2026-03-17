@@ -7,6 +7,7 @@ Config Maker
 import sys
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote
 
 from pydantic import ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -35,6 +36,8 @@ class Settings(BaseSettings):
 
     LOG_DIR: Path = BASE_DIR / "logs"
     SESSIONS_DIR: Path = BASE_DIR / "sessions"
+    TASKS_DIR: Path = BASE_DIR / "tasks"
+    TASKS_STORE_PATH: Path = TASKS_DIR / "agent_tasks.json"
 
     GEMINI_MODEL: str = "gemini-3.1-pro-preview"
     GEMINI_TEMPERATURE: float = 1.0
@@ -52,6 +55,12 @@ class Settings(BaseSettings):
     MCP_DEFAULT_COMMAND_TIMEOUT_SECONDS: float = 30.0
     MCP_MAX_COMMAND_TIMEOUT_SECONDS: float = 300.0
     MCP_MAX_COMMAND_OUTPUT_CHARS: int = 20000
+
+    DOCKET_NAME: str = "pillbug"
+    DOCKET_URL: str | None = None
+    DOCKET_WORKER_CONCURRENCY: int = 3
+    DOCKET_REDELIVERY_TIMEOUT_SECONDS: float = 300.0
+    DOCKET_EXECUTION_TTL_SECONDS: float = 900.0
 
     ENABLED_CHANNELS: str = "cli"
     CHANNEL_PLUGIN_FACTORIES: str = ""
@@ -87,6 +96,19 @@ class Settings(BaseSettings):
             mappings[channel_name.strip()] = import_path.strip()
 
         return mappings
+
+    def docket_url(self) -> str:
+        if self.DOCKET_URL:
+            return self.DOCKET_URL
+
+        if not self.REDIS_HOST:
+            return "memory://"
+
+        auth = ""
+        if self.REDIS_PASSWORD:
+            auth = f":{quote(self.REDIS_PASSWORD, safe='')}@"
+
+        return f"redis://{auth}{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
 
 
 try:

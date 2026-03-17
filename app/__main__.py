@@ -18,6 +18,7 @@ from app.core.log import logger
 
 from app.core.ai import chat_service
 from app.runtime import ApplicationLoop
+from app.runtime.scheduler import task_scheduler
 
 if TYPE_CHECKING:
     import uvicorn
@@ -57,7 +58,7 @@ async def managed_mcp_server() -> AsyncIterator[None]:
 
 
 async def main(*args) -> None:
-    async with managed_mcp_server():
+    async with managed_mcp_server(), managed_scheduler():
         print(__banner__)
         if "cli" in settings.enabled_channels():
             print("CLI channel ready. Type /exit to quit.")
@@ -73,6 +74,16 @@ def entrypoint() -> None:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args = parser.parse_args()
     asyncio.run(main(args))
+
+
+@asynccontextmanager
+async def managed_scheduler() -> AsyncIterator[None]:
+    await task_scheduler.ensure_started()
+
+    try:
+        yield
+    finally:
+        await task_scheduler.aclose()
 
 
 def workspace_init() -> None:
@@ -94,6 +105,7 @@ def workspace_init() -> None:
 
     settings.LOG_DIR.mkdir(parents=True, exist_ok=True)
     settings.SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    settings.TASKS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 if __name__ == "__main__":

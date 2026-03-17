@@ -5,8 +5,10 @@ Composition MCP Server
 import asyncio
 import os
 import re
+from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import uvicorn
 from fastmcp import FastMCP
@@ -17,6 +19,7 @@ from app import __project__, __version__
 from app.core.config import settings
 from app.core.log import logger, uvicorn_log_config
 from app.runtime.channels import get_channel_plugin
+from app.runtime.scheduler import task_scheduler
 
 __all__ = ("create_mcp_server", "mcp", "mcp_app")
 
@@ -463,6 +466,80 @@ async def execute_command(
     }
 
 
+@mcp.tool
+async def manage_agent_task(
+    action: Literal["list", "get", "create", "update", "delete"],
+    task_id: str | None = None,
+    name: str | None = None,
+    prompt: str | None = None,
+    schedule_type: Literal["cron", "delayed"] | None = None,
+    cron_expression: str | None = None,
+    delay_seconds: int | None = None,
+    enabled: bool | None = None,
+    repeat: bool | None = None,
+) -> dict[str, Any]:
+    """
+    Creates, lists, reads, updates, and deletes scheduled background AI tasks.
+
+    Supported schedule_type values are cron and delayed.
+    Cron tasks use cron_expression.
+    Delayed tasks use delay_seconds. They are one-shot by default and only repeat when repeat=true is explicitly set.
+    Session identifiers are assigned automatically and are not user-managed.
+    """
+
+    normalized_action = action.strip().lower()
+
+    if normalized_action == "list":
+        return await task_scheduler.list_tasks()
+
+    if normalized_action == "get":
+        if not task_id:
+            raise ValueError("task_id is required for get")
+        return await task_scheduler.get_task(task_id)
+
+    if normalized_action == "create":
+        if not name or not name.strip():
+            raise ValueError("name is required for create")
+        if not prompt or not prompt.strip():
+            raise ValueError("prompt is required for create")
+        if not schedule_type or not schedule_type.strip():
+            raise ValueError("schedule_type is required for create")
+
+        return await task_scheduler.create_task(
+            name=name,
+            prompt=prompt,
+            schedule_type=schedule_type,
+            cron_expression=cron_expression,
+            delay_seconds=delay_seconds,
+            timezone_name=settings.TIMEZONE,
+            enabled=enabled if enabled is not None else True,
+            repeat=repeat if repeat is not None else False,
+        )
+
+    if normalized_action == "update":
+        if not task_id:
+            raise ValueError("task_id is required for update")
+
+        return await task_scheduler.update_task(
+            task_id,
+            name=name,
+            prompt=prompt,
+            schedule_type=schedule_type,
+            cron_expression=cron_expression,
+            delay_seconds=delay_seconds,
+            timezone_name=settings.TIMEZONE,
+            enabled=enabled,
+            repeat=repeat,
+        )
+
+    if normalized_action == "delete":
+        if not task_id:
+            raise ValueError("task_id is required for delete")
+        return await task_scheduler.delete_task(task_id)
+
+    raise ValueError(f"Unsupported action: {action}")
+
+
 if (mcp_config_file := settings.BASE_DIR / "mcp.json").is_file():
     logger.info(f"Loading MCP config from {mcp_config_file}")
     from app.schema.mcp_config import MCPConfig
@@ -499,5 +576,35 @@ def create_mcp_server() -> uvicorn.Server:
     )
 
 
+async def wait_for_server_startup(
+    server_task: asyncio.Task[None],
+    server_started: Callable[[], bool],
+) -> None:
+    for _ in range(100):
+        if server_started():
+            return
+        if server_task.done():
+            if error := server_task.exception():
+                raise RuntimeError("Composition MCP server failed to start") from error
+            raise RuntimeError("Composition MCP server exited before startup completed")
+        await asyncio.sleep(0.05)
+    raise TimeoutError("Timed out waiting for Composition MCP server to start")
+
+
+async def serve_mcp_server() -> None:
+    server = create_mcp_server()
+    server_task = asyncio.create_task(server.serve())
+
+    try:
+        await wait_for_server_startup(server_task, lambda: server.started)
+        await task_scheduler.ensure_started()
+        await server_task
+    finally:
+        server.should_exit = True
+        await task_scheduler.aclose()
+        with suppress(asyncio.CancelledError):
+            await server_task
+
+
 if __name__ == "__main__":
-    create_mcp_server().run()
+    asyncio.run(serve_mcp_server())

@@ -10,6 +10,7 @@ Pillbug is an async AI agent runtime.
 - Built-in CLI channel plus factory-based external channel plugins
 - uv workspace-friendly plugin layout for optional channel packages
 - Local MCP server for workspace file, search, command, and outbound channel tools
+- Embedded Docket worker for scheduled background AI tasks
 - Per-workspace `AGENTS.md` instructions seeded on first run
 
 ## Quick Start
@@ -71,6 +72,27 @@ Common environment variables:
 - `PB_CHANNEL_PLUGIN_FACTORIES` for `channel=package.module:factory` plugin mappings
 - `PB_WORKSPACE_ROOT` to change the runtime workspace location
 - `PB_INBOUND_DEBOUNCE_SECONDS` to tune message batching behavior
+- `PB_DOCKET_URL` to point scheduled tasks at a dedicated Redis-backed docket
+
+## Scheduled Tasks
+
+Pillbug includes an embedded Docket worker for background agent tasks. Tasks are persisted in `~/.pillbug/tasks/agent_tasks.json`, and each task executes in its own Gemini session keyed by the task identifier.
+
+Use the MCP tool `manage_agent_task` with these actions:
+
+- `create` to add a new task
+- `list` to inspect all tasks
+- `get` to inspect one task
+- `update` to change the prompt, schedule, or enabled flag
+- `delete` to remove a task
+
+Supported task types:
+
+- `cron` with `cron_expression`
+- `delayed` with `delay_seconds`; these are one-shot by default and only repeat when `repeat=true` is explicitly configured
+
+Each scheduled execution receives a task-specific JSON response contract. One-shot delayed tasks are cancelled after execution even if the model tries to continue them; repeat-enabled delayed tasks may reschedule themselves with `{"action": "continue"}`.
+Task session identifiers are assigned automatically from the task id and are not part of the MCP management interface.
 
 ## Workspace Plugins
 
