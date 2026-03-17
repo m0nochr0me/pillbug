@@ -8,12 +8,15 @@ from collections.abc import AsyncIterator, Callable
 from importlib import import_module
 from typing import Protocol, cast
 
+from app.core.cache import cache
 from app.core.config import settings
+from app.core.log import logger
 from app.schema.messages import InboundMessage
 
 
 class ChannelPlugin(Protocol):
     name: str
+    destination_kind: str
 
     def listen(self) -> AsyncIterator[InboundMessage]: ...
 
@@ -34,6 +37,7 @@ class ChannelPlugin(Protocol):
 
 class BaseChannel(ABC):
     name: str
+    destination_kind: str
 
     @abstractmethod
     def listen(self) -> AsyncIterator[InboundMessage]:
@@ -61,6 +65,7 @@ class BaseChannel(ABC):
 
 class CliChannel(BaseChannel):
     name = "cli"
+    destination_kind = "implicit"
 
     def __init__(
         self,
@@ -104,23 +109,60 @@ ChannelFactory = Callable[[], ChannelPlugin]
 """Factory type for creating channel plugin instances."""
 
 _active_channels: dict[str, ChannelPlugin] = {}
-_known_channel_conversations: dict[str, set[str]] = {"cli": {"default"}}
+_known_channel_conversations: dict[str, set[str]] = {}
+_channel_conversation_sync_tasks: dict[str, asyncio.Task[None]] = {}
+_KNOWN_CHANNEL_CONVERSATIONS_CACHE_KEY_PREFIX = "runtime:channel-conversations"
+_KNOWN_CHANNEL_CONVERSATIONS_CACHE_TTL_SECONDS = settings.CACHE_TTL
 
 
-def _channel_destination_kind(channel_name: str) -> str:
-    if channel_name == "cli":
-        return "implicit"
-    if channel_name == "telegram":
-        return "chat_id"
-
-    return "conversation_id"
+def _known_channel_conversations_cache_key(channel_name: str) -> str:
+    return f"{_KNOWN_CHANNEL_CONVERSATIONS_CACHE_KEY_PREFIX}:{channel_name}"
 
 
-def _channel_send_target(channel_name: str) -> str:
-    if channel_name == "cli":
-        return "cli"
+async def _get_cached_channel_conversations(channel_name: str) -> set[str]:
+    cached_conversations = await cache.get(_known_channel_conversations_cache_key(channel_name))
+    if not isinstance(cached_conversations, list | tuple | set):
+        return set()
 
-    return f"{channel_name}:<{_channel_destination_kind(channel_name)}>"
+    return {
+        conversation_id.strip()
+        for conversation_id in cached_conversations
+        if isinstance(conversation_id, str) and conversation_id.strip()
+    }
+
+
+async def _sync_known_channel_conversations(channel_name: str) -> None:
+    known_conversations = sorted(_known_channel_conversations.get(channel_name, ()))
+    await cache.set(
+        _known_channel_conversations_cache_key(channel_name),
+        known_conversations,
+        ttl=_KNOWN_CHANNEL_CONVERSATIONS_CACHE_TTL_SECONDS,
+    )
+
+
+def _track_channel_conversation_sync_task(channel_name: str, task: asyncio.Task[None]) -> None:
+    _channel_conversation_sync_tasks[channel_name] = task
+
+    def cleanup(done_task: asyncio.Task[None]) -> None:
+        current_task = _channel_conversation_sync_tasks.get(channel_name)
+        if current_task is done_task:
+            _channel_conversation_sync_tasks.pop(channel_name, None)
+
+        try:
+            done_task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception(f"Failed to sync known channel conversations for {channel_name}")
+
+    task.add_done_callback(cleanup)
+
+
+def _channel_send_target(channel: ChannelPlugin) -> str:
+    if channel.destination_kind == "implicit":
+        return channel.name
+
+    return f"{channel.name}:<{channel.destination_kind}>"
 
 
 def _load_channel_factory(import_path: str) -> ChannelFactory:
@@ -179,19 +221,40 @@ def register_channel_conversation(channel_name: str, conversation_id: str) -> No
         return
 
     _known_channel_conversations.setdefault(channel_name, set()).add(normalized_conversation_id)
+    existing_task = _channel_conversation_sync_tasks.get(channel_name)
+    if existing_task is not None:
+        existing_task.cancel()
+
+    try:
+        sync_task = asyncio.create_task(
+            _sync_known_channel_conversations(channel_name),
+            name=f"channel-conversations:{channel_name}",
+        )
+    except RuntimeError:
+        return
+
+    _track_channel_conversation_sync_task(channel_name, sync_task)
 
 
-def get_available_channels_context() -> list[str]:
-
-    channels = []
+async def get_available_channels_context() -> list[str]:
+    channels: list[str] = []
 
     for channel_name in settings.enabled_channels():
-        destination_kind = _channel_destination_kind(channel_name)
-        if destination_kind == "implicit":
-            channels = [*channels, channel_name]
+        channel = get_channel_plugin(channel_name, create=True)
+        if channel is None:
+            continue
+
+        if channel.destination_kind == "implicit":
+            channels.append(channel.name)
         else:
-            known_destinations = sorted(_known_channel_conversations.get(channel_name, ()))
-            channels = [*channels, *[f"{channel_name}:{destination}" for destination in known_destinations]]
+            known_destinations = sorted(
+                _known_channel_conversations.get(channel_name, set())
+                | await _get_cached_channel_conversations(channel_name)
+            )
+            if known_destinations:
+                channels.extend(f"{channel.name}:{destination}" for destination in known_destinations)
+            else:
+                channels.append(_channel_send_target(channel))
 
     return channels
 

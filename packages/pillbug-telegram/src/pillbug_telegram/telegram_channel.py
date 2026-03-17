@@ -102,6 +102,7 @@ class TelegramChannelSettings(BaseSettings):
 
 class TelegramChannel(BaseChannel):
     name = "telegram"
+    destination_kind = "chat_id"
 
     def __init__(self, settings: TelegramChannelSettings | None = None) -> None:
         self._settings = settings or TelegramChannelSettings.from_env()

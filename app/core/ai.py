@@ -92,7 +92,7 @@ class GeminiChatService:
             f"datetime: {now:%Y-%b-%d %H:%M:%S}",
             f"timezone: {settings.TIMEZONE}",
             f"workspace: {settings.WORKSPACE_ROOT}",
-            f"available_channels: {', '.join(get_available_channels_context())}",
+            f"available_channels: {', '.join(await get_available_channels_context())}",
             "---",
         ))
 
