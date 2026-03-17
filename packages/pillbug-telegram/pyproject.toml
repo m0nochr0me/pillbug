@@ -1,0 +1,21 @@
+[project]
+name = "pillbug-telegram"
+version = "0.1.0"
+description = "Telegram channel plugin for Pillbug"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "pillbug",
+    "shingram>=0.3.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.10.9,<0.11.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+pillbug = { workspace = true }
+
+[tool.uv.build-backend]
+module-name = "pillbug_telegram"
+module-root = "src"

@@ -8,6 +8,7 @@ Pillbug is an async AI agent runtime.
 
 - Async runtime with debounced inbound message handling
 - Built-in CLI channel plus factory-based external channel plugins
+- uv workspace-friendly plugin layout for optional channel packages
 - Local MCP server for workspace file, search, and command tools
 - Per-workspace `AGENTS.md` instructions seeded on first run
 
@@ -66,3 +67,30 @@ Common environment variables:
 - `PB_CHANNEL_PLUGIN_FACTORIES` for `channel=package.module:factory` plugin mappings
 - `PB_WORKSPACE_ROOT` to change the runtime workspace location
 - `PB_INBOUND_DEBOUNCE_SECONDS` to tune message batching behavior
+
+## Workspace Plugins
+
+Pillbug can keep optional integrations as separate uv workspace members under `packages/`. This fits the existing
+factory-based channel loader well: the root runtime stays generic, while each plugin ships its own dependencies and
+exports a factory callable.
+
+The repository now includes `packages/pillbug-telegram`, a Telegram long-polling channel implemented with `shingram`.
+The root package exposes that plugin through the `telegram` extra, so the runtime only installs it when requested.
+
+Example setup:
+
+```bash
+uv sync --extra telegram
+export PB_ENABLED_CHANNELS=cli,telegram
+export PB_CHANNEL_PLUGIN_FACTORIES=telegram=pillbug_telegram.telegram_channel:create_channel
+export PB_TELEGRAM_BOT_TOKEN=your_bot_token
+uv run python -m app
+```
+
+Optional Telegram-specific settings:
+
+- `PB_TELEGRAM_ALLOWED_UPDATES` as a CSV list such as `message,edited_message`
+- `PB_TELEGRAM_POLL_TIMEOUT_SECONDS` for long-poll timeout tuning
+- `PB_TELEGRAM_POLL_LIMIT` for each `getUpdates` batch size
+- `PB_TELEGRAM_REPLY_TO_MESSAGE` to control whether replies are threaded to the inbound message
+- `PB_TELEGRAM_DELETE_WEBHOOK_ON_START` and `PB_TELEGRAM_DROP_PENDING_UPDATES` when switching a bot from webhook mode to polling

@@ -31,6 +31,9 @@ dependencies = [
     "redis>=7.3.0",
 ]
 
+[project.optional-dependencies]
+telegram = ["pillbug-telegram"]
+
 [project.urls]
 Homepage = "https://github.com/m0nochr0me/pillbug"
 Repository = "https://github.com/m0nochr0me/pillbug"
@@ -48,6 +51,12 @@ pillbug = "app.__main__:entrypoint"
 
 [tool.uv]
 package = true
+
+[tool.uv.sources]
+pillbug-telegram = { workspace = true }
+
+[tool.uv.workspace]
+members = ["packages/*"]
 
 [tool.ruff]
 exclude = [
@@ -91,3 +100,8 @@ line-ending = "auto"
 select = ["E", "W", "F", "I", "B", "C4", "UP"]
 ignore = ["TC001", "TC002", "TC003", "E501", "RUF012", "C901"]
 unfixable = ["TC"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.6",
+]

@@ -83,9 +83,13 @@ class CliChannel(BaseChannel):
 
 
 ChannelFactory = Callable[[], ChannelPlugin]
+"""Factory type for creating channel plugin instances."""
 
 
 def _load_channel_factory(import_path: str) -> ChannelFactory:
+    """
+    Dynamically load a channel factory from an import path.
+    """
     module_path, separator, attribute_name = import_path.partition(":")
     if not separator or not module_path or not attribute_name:
         raise ValueError(f"Invalid channel plugin factory path: {import_path}")
@@ -99,6 +103,9 @@ def _load_channel_factory(import_path: str) -> ChannelFactory:
 
 
 def load_channel_plugins() -> list[ChannelPlugin]:
+    """
+    Load channel plugins based on settings.
+    """
     factories: dict[str, ChannelFactory] = {
         "cli": CliChannel,
     }
