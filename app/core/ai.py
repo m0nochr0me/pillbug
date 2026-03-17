@@ -17,7 +17,7 @@ from google.genai import types
 
 from app.core.config import settings
 from app.core.log import logger
-from app.runtime.channels import render_available_channels_context
+from app.runtime.channels import get_available_channels_context
 from app.schema.ai import ChatResponse, ChatSessionSnapshot, Skill
 
 __all__ = (
@@ -87,16 +87,14 @@ class GeminiChatService:
     async def get_base_context(self) -> str:
         now = datetime.now(ZoneInfo(settings.TIMEZONE))
 
-        return "\n".join(
-            (
-                "---",
-                f"datetime: {now:%Y-%b-%d %H:%M:%S}",
-                f"timezone: {settings.TIMEZONE}",
-                f"workspace: {settings.WORKSPACE_ROOT}",
-                render_available_channels_context(),
-                "---",
-            )
-        )
+        return "\n".join((
+            "---",
+            f"datetime: {now:%Y-%b-%d %H:%M:%S}",
+            f"timezone: {settings.TIMEZONE}",
+            f"workspace: {settings.WORKSPACE_ROOT}",
+            f"available_channels: {', '.join(get_available_channels_context())}",
+            "---",
+        ))
 
     async def discover_skills(self) -> list[Skill]:
         """

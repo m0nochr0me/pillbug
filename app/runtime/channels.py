@@ -181,24 +181,19 @@ def register_channel_conversation(channel_name: str, conversation_id: str) -> No
     _known_channel_conversations.setdefault(channel_name, set()).add(normalized_conversation_id)
 
 
-def render_available_channels_context() -> str:
-    lines = ["available_channels:"]
+def get_available_channels_context() -> list[str]:
+
+    channels = []
 
     for channel_name in settings.enabled_channels():
-        lines.append(f"  - name: {channel_name}")
-        lines.append(f"    status: {'active' if channel_name in _active_channels else 'configured'}")
-        lines.append(f"    send_target: {_channel_send_target(channel_name)}")
-        lines.append(f"    destination_kind: {_channel_destination_kind(channel_name)}")
+        destination_kind = _channel_destination_kind(channel_name)
+        if destination_kind == "implicit":
+            channels = [*channels, channel_name]
+        else:
+            known_destinations = sorted(_known_channel_conversations.get(channel_name, ()))
+            channels = [*channels, *[f"{channel_name}:{destination}" for destination in known_destinations]]
 
-        known_destinations = sorted(_known_channel_conversations.get(channel_name, ()))
-        if not known_destinations:
-            lines.append("    known_destinations: []")
-            continue
-
-        lines.append("    known_destinations:")
-        lines.extend(f"      - {destination}" for destination in known_destinations)
-
-    return "\n".join(lines)
+    return channels
 
 
 def load_channel_plugins() -> list[ChannelPlugin]:
