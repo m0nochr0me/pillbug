@@ -53,8 +53,8 @@ class Settings(BaseSettings):
     MCP_MAX_COMMAND_TIMEOUT_SECONDS: float = 300.0
     MCP_MAX_COMMAND_OUTPUT_CHARS: int = 20000
 
-    ENABLED_CHANNELS_RAW: str = "cli"
-    CHANNEL_PLUGIN_FACTORIES_RAW: str = ""
+    ENABLED_CHANNELS: str = "cli"
+    CHANNEL_PLUGIN_FACTORIES: str = ""
     INBOUND_DEBOUNCE_SECONDS: float = 1.5
     INBOUND_MAX_MESSAGE_CHARS: int = 4000
 
@@ -71,13 +71,13 @@ class Settings(BaseSettings):
     )
 
     def enabled_channels(self) -> tuple[str, ...]:
-        enabled_channels = _split_csv(self.ENABLED_CHANNELS_RAW)
+        enabled_channels = _split_csv(self.ENABLED_CHANNELS)
         return enabled_channels or ("cli",)
 
     def channel_plugin_factories(self) -> dict[str, str]:
         mappings: dict[str, str] = {}
 
-        for raw_mapping in _split_csv(self.CHANNEL_PLUGIN_FACTORIES_RAW):
+        for raw_mapping in _split_csv(self.CHANNEL_PLUGIN_FACTORIES):
             channel_name, separator, import_path = raw_mapping.partition("=")
             if not separator or not channel_name.strip() or not import_path.strip():
                 raise ValueError(
