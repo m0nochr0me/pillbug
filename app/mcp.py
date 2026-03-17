@@ -481,10 +481,11 @@ async def manage_agent_task(
     """
     Creates, lists, reads, updates, and deletes scheduled background AI tasks.
 
+    Name is required for create and update actions.
+    Prompt and schedule parameters are also required for create, while update allows partial updates of these fields.
     Supported schedule_type values are cron and delayed.
     Cron tasks use cron_expression.
     Delayed tasks use delay_seconds. They are one-shot by default and only repeat when repeat=true is explicitly set.
-    Session identifiers are assigned automatically and are not user-managed.
     """
 
     normalized_action = action.strip().lower()
