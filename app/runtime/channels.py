@@ -104,6 +104,23 @@ ChannelFactory = Callable[[], ChannelPlugin]
 """Factory type for creating channel plugin instances."""
 
 _active_channels: dict[str, ChannelPlugin] = {}
+_known_channel_conversations: dict[str, set[str]] = {"cli": {"default"}}
+
+
+def _channel_destination_kind(channel_name: str) -> str:
+    if channel_name == "cli":
+        return "implicit"
+    if channel_name == "telegram":
+        return "chat_id"
+
+    return "conversation_id"
+
+
+def _channel_send_target(channel_name: str) -> str:
+    if channel_name == "cli":
+        return "cli"
+
+    return f"{channel_name}:<{_channel_destination_kind(channel_name)}>"
 
 
 def _load_channel_factory(import_path: str) -> ChannelFactory:
@@ -154,6 +171,34 @@ def get_channel_plugin(channel_name: str, *, create: bool = False) -> ChannelPlu
 
 def unregister_channel_plugin(channel_name: str) -> None:
     _active_channels.pop(channel_name, None)
+
+
+def register_channel_conversation(channel_name: str, conversation_id: str) -> None:
+    normalized_conversation_id = conversation_id.strip()
+    if not normalized_conversation_id:
+        return
+
+    _known_channel_conversations.setdefault(channel_name, set()).add(normalized_conversation_id)
+
+
+def render_available_channels_context() -> str:
+    lines = ["available_channels:"]
+
+    for channel_name in settings.enabled_channels():
+        lines.append(f"  - name: {channel_name}")
+        lines.append(f"    status: {'active' if channel_name in _active_channels else 'configured'}")
+        lines.append(f"    send_target: {_channel_send_target(channel_name)}")
+        lines.append(f"    destination_kind: {_channel_destination_kind(channel_name)}")
+
+        known_destinations = sorted(_known_channel_conversations.get(channel_name, ()))
+        if not known_destinations:
+            lines.append("    known_destinations: []")
+            continue
+
+        lines.append("    known_destinations:")
+        lines.extend(f"      - {destination}" for destination in known_destinations)
+
+    return "\n".join(lines)
 
 
 def load_channel_plugins() -> list[ChannelPlugin]:

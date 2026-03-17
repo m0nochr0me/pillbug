@@ -5,7 +5,12 @@ from dataclasses import dataclass
 from app.core.ai import GeminiChatService, GeminiChatSession
 from app.core.config import settings
 from app.core.log import logger
-from app.runtime.channels import ChannelPlugin, load_channel_plugins, unregister_channel_plugin
+from app.runtime.channels import (
+    ChannelPlugin,
+    load_channel_plugins,
+    register_channel_conversation,
+    unregister_channel_plugin,
+)
 from app.runtime.pipeline import InboundProcessingPipeline
 from app.schema.messages import InboundBatch, InboundMessage, ProcessedInboundMessage
 
@@ -93,6 +98,7 @@ class ApplicationLoop:
         self,
         inbound_message: InboundMessage,
     ) -> None:
+        register_channel_conversation(inbound_message.channel_name, inbound_message.conversation_id)
         debounce_key = inbound_message.debounce_key
         self._pending_messages.setdefault(debounce_key, []).append(inbound_message)
 
