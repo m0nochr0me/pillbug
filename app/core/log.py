@@ -81,6 +81,13 @@ uvicorn_log_config = {
 }
 
 
+def _normalize_external_logger(name: str) -> None:
+    external_logger = logging.getLogger(name)
+    external_logger.handlers.clear()
+    external_logger.propagate = True
+    external_logger.setLevel(logging.NOTSET)
+
+
 def log_serializer(record: loguru.Record) -> str:
     """
     Custom log serializer for loguru
@@ -129,6 +136,8 @@ def configure_standard_logging() -> None:
     warnings_logger.handlers = [intercept_handler]
     warnings_logger.setLevel(logging.WARNING)
     warnings_logger.propagate = False
+
+    _normalize_external_logger("fastmcp")
 
 
 logger.remove()
