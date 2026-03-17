@@ -72,7 +72,7 @@ class ContextEnrichmentStep:
         state: MessageProcessingState,
     ) -> MessageProcessingState:
         batch = state.batch
-        context = MessageProcessingContext(
+        state.context = MessageProcessingContext(
             channel=batch.channel_name,
             conversation_id=batch.conversation_id,
             user_id=batch.user_id,
@@ -81,15 +81,15 @@ class ContextEnrichmentStep:
             security_warnings=list(state.security.warnings),
             metadata=batch.last_message.metadata,
             normalized_text=state.normalized_text,
-            model_input=state.cleaned_text,  # NOTE: In a real implementation, you would likely want to construct a more complex model input that includes context, instructions, etc. This is simplified for demonstration purposes.
+            model_input=(  # Compact extra context
+                f"---\nchannel: {batch.channel_name}\n"
+                f"user_id: {batch.user_id}\n"
+                f"received_at: {batch.received_at.isoformat()}"
+                f"{'\nsecurity_warnings: ' + ', '.join(state.security.warnings) if state.security.warnings else ''}\n"
+                f"---\n\n{state.cleaned_text}"
+            ),
         )
 
-        rendered_context = context.model_dump_json(indent=2, exclude_none=True, exclude={"model_input"})
-        state.context = context.model_copy(
-            update={
-                "model_input": f"Inbound message context:\n{rendered_context}\n\nUser message:\n{state.cleaned_text}"
-            }
-        )
         return state
 
 
@@ -98,7 +98,7 @@ class InboundProcessingPipeline:
         self._steps = (
             CleanupStep(),
             SecurityCheckStep(),
-            # ContextEnrichmentStep(),  # NOTE: Disabled for now
+            ContextEnrichmentStep(),
         )
 
     async def process(
