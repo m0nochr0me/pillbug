@@ -93,7 +93,7 @@ class GeminiChatService:
             f"timezone: {settings.TIMEZONE}",
             f"workspace: {settings.WORKSPACE_ROOT}",
             f"available_channels: {', '.join(await get_available_channels_context())}",
-            "---",
+            "---\n",
         ))
 
     async def discover_skills(self) -> list[Skill]:
