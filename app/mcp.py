@@ -25,6 +25,7 @@ __all__ = ("create_mcp_server", "mcp", "mcp_app")
 
 mcp = FastMCP(f"{__project__}-composition-server")
 
+
 def _display_path(path: Path) -> str:
     if path == settings.WORKSPACE_ROOT:
         return "."
@@ -146,12 +147,14 @@ async def list_files(
                 continue
 
             entry_type = "directory" if entry.is_dir() else "file"
-            entries.append({
-                "name": entry.name,
-                "path": _display_path(entry),
-                "type": entry_type,
-                "size": entry.stat().st_size if entry.is_file() else None,
-            })
+            entries.append(
+                {
+                    "name": entry.name,
+                    "path": _display_path(entry),
+                    "type": entry_type,
+                    "size": entry.stat().st_size if entry.is_file() else None,
+                }
+            )
 
         return entries
 
@@ -310,13 +313,15 @@ async def search_file_regex(
 
     for line_number, line in enumerate(content.splitlines(), start=1):
         for match in regex.finditer(line):
-            matches.append({
-                "line": line_number,
-                "start_column": match.start() + 1,
-                "end_column": match.end(),
-                "match": match.group(0),
-                "line_text": line,
-            })
+            matches.append(
+                {
+                    "line": line_number,
+                    "start_column": match.start() + 1,
+                    "end_column": match.end(),
+                    "match": match.group(0),
+                    "line_text": line,
+                }
+            )
 
             if len(matches) >= max_results:
                 truncated = True
@@ -377,6 +382,7 @@ async def send_message(
 ) -> dict[str, Any]:
     """
     Sends a direct outbound message to a configured channel.
+    Intended for subagents and scheduled tasks to proactively send messages outside of an active conversation turn.
 
     The channel argument accepts either a bare channel name for default destinations such as cli,
     or a session-style target in the form channel_name:conversation_id such as telegram:123456789.
@@ -391,9 +397,7 @@ async def send_message(
         raise ValueError(f"Channel is not enabled or available: {channel_name}")
 
     await channel_plugin.send_message(conversation_id, message)
-    logger.info(
-        f"Sent outbound message via channel={channel_name} destination={conversation_id or '<default>'}"
-    )
+    logger.info(f"Sent outbound message via channel={channel_name} destination={conversation_id or '<default>'}")
 
     return {
         "channel": channel_name,
