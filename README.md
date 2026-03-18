@@ -70,6 +70,7 @@ Common environment variables:
 - `PB_GEMINI_API_KEY` for Gemini access
 - `PB_ENABLED_CHANNELS` to enable `cli` and registered external channels
 - `PB_CHANNEL_PLUGIN_FACTORIES` for `channel=package.module:factory` plugin mappings
+- `PB_SECURITY_PATTERNS_PATH` to tune inbound warning and block regexes loaded by the pipeline at runtime startup and on file change
 - `PB_WORKSPACE_ROOT` to change the runtime workspace location
 - `PB_INBOUND_DEBOUNCE_SECONDS` to tune message batching behavior
 - `PB_DOCKET_URL` to point scheduled tasks at a dedicated Redis-backed docket

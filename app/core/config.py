@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     SESSIONS_DIR: Path = BASE_DIR / "sessions"
     TASKS_DIR: Path = BASE_DIR / "tasks"
     TASKS_STORE_PATH: Path = TASKS_DIR / "agent_tasks.json"
+    SECURITY_PATTERNS_PATH: Path = BASE_DIR / "security_patterns.json"
 
     GEMINI_MODEL: str = "gemini-3.1-pro-preview"
     GEMINI_TEMPERATURE: float = 1.0

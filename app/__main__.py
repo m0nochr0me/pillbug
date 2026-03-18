@@ -18,6 +18,7 @@ from app.core.log import logger
 
 from app.core.ai import chat_service
 from app.runtime import ApplicationLoop
+from app.runtime.pipeline import ensure_security_patterns_file
 from app.runtime.scheduler import task_scheduler
 
 if TYPE_CHECKING:
@@ -88,6 +89,12 @@ async def managed_scheduler() -> AsyncIterator[None]:
 
 def workspace_init() -> None:
     settings.WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
+    settings.LOG_DIR.mkdir(parents=True, exist_ok=True)
+    settings.SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    settings.TASKS_DIR.mkdir(parents=True, exist_ok=True)
+
+    ensure_security_patterns_file()
+
     if not (settings.WORKSPACE_ROOT / "AGENTS.md").is_file():
         (settings.WORKSPACE_ROOT / "AGENTS.md").write_text(
             "---\n"
@@ -102,10 +109,6 @@ def workspace_init() -> None:
             f"Please review your workspace files and customize your assistant's personality and settings as desired."
         )
         sys.exit(0)
-
-    settings.LOG_DIR.mkdir(parents=True, exist_ok=True)
-    settings.SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-    settings.TASKS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 if __name__ == "__main__":
