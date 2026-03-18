@@ -16,7 +16,7 @@ from app.schema.messages import (
 )
 from app.util.text import full_cleanup_text, slight_cleanup_text
 
-_DEFAULT_SECURITY_PATTERNS_JSON = """{
+_DEFAULT_SECURITY_PATTERNS_JSON = r"""{
     "warning_patterns": [
         {
             "name": "prompt-injection-language",
@@ -133,7 +133,7 @@ def _compile_security_patterns_config(
                     definition.name,
                     definition.reason or definition.name,
                     re.compile(definition.pattern),
-                )
+                ),
             )
         except re.error as exc:
             logger.warning(
@@ -161,7 +161,10 @@ def _load_security_patterns_from_disk(
     return _compile_security_patterns_config(config, patterns_source=patterns_path)
 
 
-def _get_security_patterns() -> tuple[tuple[tuple[str, re.Pattern[str]], ...], tuple[tuple[str, str, re.Pattern[str]], ...]]:
+def _get_security_patterns() -> tuple[
+    tuple[tuple[str, re.Pattern[str]], ...],
+    tuple[tuple[str, str, re.Pattern[str]], ...],
+]:
     ensure_security_patterns_file()
 
     try:
