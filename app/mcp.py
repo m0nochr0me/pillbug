@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import uvicorn
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.server import create_proxy
 
@@ -20,10 +20,13 @@ from app.core.config import settings
 from app.core.log import logger, uvicorn_log_config
 from app.runtime.channels import get_channel_plugin
 from app.runtime.scheduler import task_scheduler
+from app.schema.todo import TodoItem, TodoListSnapshot
 
 __all__ = ("create_mcp_server", "mcp", "mcp_app")
 
 mcp = FastMCP(f"{__project__}-composition-server")
+
+_TODO_LIST_STATE_KEY = "todo_list"
 
 
 def _display_path(path: Path) -> str:
@@ -111,6 +114,25 @@ def _parse_channel_target(channel: str) -> tuple[str, str]:
         raise ValueError("channel targets using ':' must include a destination after the channel name")
 
     return channel_name, conversation_id
+
+
+async def _get_todo_snapshot(ctx: Context) -> TodoListSnapshot:
+    state = await ctx.get_state(_TODO_LIST_STATE_KEY)
+    if state is None:
+        return TodoListSnapshot()
+
+    return TodoListSnapshot.model_validate(state)
+
+
+def _serialize_todo_snapshot(action: str, snapshot: TodoListSnapshot) -> dict[str, Any]:
+    return {
+        "action": action,
+        "items": [item.model_dump(mode="json") for item in snapshot.items],
+        "total": len(snapshot.items),
+        "counts": snapshot.counts,
+        "explanation": snapshot.explanation,
+        "updated_at": snapshot.updated_at.isoformat(),
+    }
 
 
 @mcp.resource("resource://info")
@@ -404,6 +426,42 @@ async def send_message(
         "conversation_id": conversation_id or None,
         "chars_sent": len(message),
     }
+
+
+@mcp.tool
+async def manage_todo_list(
+    action: Literal["get", "set", "clear"] = "get",
+    todo_list: list[TodoItem] | None = None,
+    explanation: str | None = None,
+    ctx: Context = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    """
+    Stores and retrieves a session-scoped todo list for multi-step work.
+
+    Use get to inspect the current plan, set to replace the full plan, and clear to remove it.
+    Todo lists may contain at most one in-progress item at a time.
+    """
+
+    normalized_action = action.strip().lower()
+
+    if normalized_action == "get":
+        snapshot = await _get_todo_snapshot(ctx)
+        return _serialize_todo_snapshot("get", snapshot)
+
+    if normalized_action == "clear":
+        await ctx.delete_state(_TODO_LIST_STATE_KEY)
+        return _serialize_todo_snapshot("clear", TodoListSnapshot())
+
+    if normalized_action == "set":
+        if todo_list is None:
+            raise ValueError("todo_list is required for set")
+
+        snapshot = TodoListSnapshot(items=todo_list, explanation=explanation)
+        await ctx.set_state(_TODO_LIST_STATE_KEY, snapshot.model_dump(mode="json"))
+        logger.debug(f"Updated todo list with {len(snapshot.items)} items")
+        return _serialize_todo_snapshot("set", snapshot)
+
+    raise ValueError(f"Unsupported action: {action}")
 
 
 @mcp.tool
