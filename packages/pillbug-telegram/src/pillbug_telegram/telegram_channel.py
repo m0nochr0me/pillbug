@@ -22,6 +22,23 @@ def _split_csv(value: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
+def _parse_chat_ids(value: str) -> list[int]:
+    chat_ids: list[int] = []
+    for item in value.split(","):
+        stripped_item = item.strip()
+        if not stripped_item:
+            continue
+
+        try:
+            chat_ids.append(int(stripped_item))
+        except ValueError as exc:
+            raise ValueError(
+                "PB_TELEGRAM_ALLOWED_CHAT_IDS must be a comma-separated list of integer chat IDs"
+            ) from exc
+
+    return chat_ids
+
+
 def _chunk_message(text: str, *, max_chars: int = _MAX_TELEGRAM_MESSAGE_CHARS) -> tuple[str, ...]:
     remaining = text.strip() or " "
     chunks: list[str] = []
@@ -52,6 +69,7 @@ class TelegramChannelSettings(BaseSettings):
     poll_timeout_seconds: int = 30
     poll_limit: int = 100
     allowed_updates: Annotated[tuple[str, ...], NoDecode] = _DEFAULT_ALLOWED_UPDATES
+    allowed_chat_ids: Annotated[list[int] | None, NoDecode] = None
     reply_to_message: bool = True
     delete_webhook_on_start: bool = False
     drop_pending_updates: bool = False
@@ -81,6 +99,16 @@ class TelegramChannelSettings(BaseSettings):
             return _split_csv(value) or _DEFAULT_ALLOWED_UPDATES
         return value
 
+    @field_validator("allowed_chat_ids", mode="before")
+    @classmethod
+    def _parse_allowed_chat_ids(cls, value: object) -> object:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            parsed_chat_ids = _parse_chat_ids(value)
+            return parsed_chat_ids or None
+        return value
+
     @field_validator("poll_timeout_seconds")
     @classmethod
     def _validate_poll_timeout_seconds(cls, value: int) -> int:
@@ -108,6 +136,7 @@ class TelegramChannel(BaseChannel):
         self._settings = settings or TelegramChannelSettings.from_env()
         self._client = AsyncClient(self._settings.bot_token)
         self._offset = 0
+        self._allowed_chat_ids = frozenset(self._settings.allowed_chat_ids or ())
 
     async def listen(self) -> AsyncIterator[InboundMessage]:
         if self._settings.delete_webhook_on_start:
@@ -115,7 +144,9 @@ class TelegramChannel(BaseChannel):
 
         logger.info(
             "Starting Telegram channel polling "
-            f"allowed_updates={list(self._settings.allowed_updates)} timeout={self._settings.poll_timeout_seconds}s"
+            f"allowed_updates={list(self._settings.allowed_updates)} "
+            f"allowed_chat_ids={sorted(self._allowed_chat_ids) if self._allowed_chat_ids else 'all'} "
+            f"timeout={self._settings.poll_timeout_seconds}s"
         )
 
         try:
@@ -203,6 +234,12 @@ class TelegramChannel(BaseChannel):
         if event is None or event.type not in _TEXT_EVENT_TYPES:
             return None
         if not event.text or event.chat_id == 0:
+            return None
+        if self._allowed_chat_ids and event.chat_id not in self._allowed_chat_ids:
+            logger.warning(
+                "Ignoring Telegram update from unauthorized chat "
+                f"chat_id={event.chat_id} user_id={event.user_id} event_type={event.type}"
+            )
             return None
 
         return InboundMessage(
