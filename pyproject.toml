@@ -20,6 +20,7 @@ classifiers = [
 ]
 dependencies = [
     "aiocache>=0.12.3",
+    "aiofile>=3.9.0",
     "aiohttp>=3.13.3",
     "asgi-correlation-id>=4.3.4",
     "fakeredis>=2.34.1",

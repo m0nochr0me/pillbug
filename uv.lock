@@ -1033,6 +1033,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiocache" },
+    { name = "aiofile" },
     { name = "aiohttp" },
     { name = "asgi-correlation-id" },
     { name = "fakeredis" },
@@ -1060,6 +1061,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiocache", specifier = ">=0.12.3" },
+    { name = "aiofile", specifier = ">=3.9.0" },
     { name = "aiohttp", specifier = ">=3.13.3" },
     { name = "asgi-correlation-id", specifier = ">=4.3.4" },
     { name = "fakeredis", specifier = ">=2.34.1" },
