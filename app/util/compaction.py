@@ -21,6 +21,7 @@ _URL_PATTERN = re.compile(
     r"[^\s<>'\"]+"
 )
 _REGEX_SUB_PREFIX = "rsub::"
+_TRAILING_URL_PUNCTUATION = ".,;:!?)]}"
 
 
 def _normalize_stage(stage: str) -> str:
@@ -37,13 +38,44 @@ def _wrap_sync_stage(stage_function: Callable[[str], str]) -> CompactionStage:
     return runner
 
 
+def _split_trailing_url_punctuation(url: str) -> tuple[str, str]:
+    candidate = url
+    trailing: list[str] = []
+
+    while candidate:
+        last_char = candidate[-1]
+        if last_char in ".,;:!?":
+            trailing.append(last_char)
+            candidate = candidate[:-1]
+            continue
+
+        if last_char == ")" and candidate.count("(") < candidate.count(")"):
+            trailing.append(last_char)
+            candidate = candidate[:-1]
+            continue
+
+        if last_char == "]" and candidate.count("[") < candidate.count("]"):
+            trailing.append(last_char)
+            candidate = candidate[:-1]
+            continue
+
+        if last_char == "}" and candidate.count("{") < candidate.count("}"):
+            trailing.append(last_char)
+            candidate = candidate[:-1]
+            continue
+
+        break
+
+    return candidate, "".join(reversed(trailing))
+
+
 async def _shorten_urls(text: str) -> str:
     urls: list[str] = []
     seen_urls: set[str] = set()
 
     for match in _URL_PATTERN.finditer(text):
-        url = match.group(0)
-        if url in seen_urls:
+        url, _ = _split_trailing_url_punctuation(match.group(0))
+        if not url or url in seen_urls:
             continue
 
         seen_urls.add(url)
@@ -53,8 +85,13 @@ async def _shorten_urls(text: str) -> str:
         return text
 
     shortened_urls = await local_url_shortener.shorten_many(tuple(urls))
+
+    def replace_match(match: re.Match[str]) -> str:
+        normalized_url, trailing = _split_trailing_url_punctuation(match.group(0))
+        return f"{shortened_urls.get(normalized_url, normalized_url)}{trailing}"
+
     return _URL_PATTERN.sub(
-        lambda match: shortened_urls.get(match.group(0), match.group(0)),
+        replace_match,
         text,
     )
 

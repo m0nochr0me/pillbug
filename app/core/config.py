@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     TASKS_DIR: Path = BASE_DIR / "tasks"
     TASKS_STORE_PATH: Path = TASKS_DIR / "agent_tasks.json"
     SECURITY_PATTERNS_PATH: Path = BASE_DIR / "security_patterns.json"
+    WORKSPACE_ROOT: Path = BASE_DIR / "workspace"
 
     GEMINI_MODEL: str = "gemini-3.1-pro-preview"
     GEMINI_TEMPERATURE: float = 1.0
@@ -60,6 +61,9 @@ class Settings(BaseSettings):
     MCP_MAX_COMMAND_TIMEOUT_SECONDS: float = 300.0
     MCP_MAX_COMMAND_OUTPUT_CHARS: int = 20000
     MCP_USE_COMPACTOR_MIDDLEWARE: bool = True
+    MCP_FETCH_URL_OUTPUT_DIR: Path = WORKSPACE_ROOT / "fetched"
+    MCP_FETCH_URL_MAX_BYTES: int = 20 * 1024 * 1024
+    MCP_FETCH_URL_TIMEOUT_SECONDS: float = 30.0
 
     DOCKET_NAME: str = "pillbug"
     DOCKET_URL: str | None = None
@@ -71,8 +75,6 @@ class Settings(BaseSettings):
     CHANNEL_PLUGIN_FACTORIES: str = ""
     INBOUND_DEBOUNCE_SECONDS: float = 1.5
     INBOUND_MAX_MESSAGE_CHARS: int = 4000
-
-    WORKSPACE_ROOT: Path = BASE_DIR / "workspace"
 
     TIMEZONE: str = "UTC"
 

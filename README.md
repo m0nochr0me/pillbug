@@ -10,6 +10,7 @@ Pillbug is an async AI agent runtime.
 - Built-in CLI channel plus factory-based external channel plugins
 - uv workspace-friendly plugin layout for optional channel packages
 - Local MCP server for workspace file, search, command, and outbound channel tools
+- URL fetching tool with streamed size limits and readable HTML snapshots
 - Session-scoped todo planning tool for multi-step agent work
 - Embedded Docket worker for scheduled background AI tasks
 - Per-workspace `AGENTS.md` instructions seeded on first run
@@ -58,7 +59,7 @@ Runtime flow:
 - `app/__main__.py` initializes the workspace, starts the local MCP server, and runs the application loop.
 - `app/runtime/loop.py` listens on each channel, groups messages by session, and reuses one chat session per session key.
 - `app/runtime/pipeline.py` cleans input, runs security checks, and builds the structured model input.
-- `app/mcp.py` exposes workspace-safe file, command, outbound messaging, and todo-planning tools to the model.
+- `app/mcp.py` exposes workspace-safe file, command, outbound messaging, URL-fetching, and todo-planning tools to the model.
 
 External executions can also deliver messages through the local MCP server with `send_message(channel, message)`.
 Use `cli` for the local console, or a session-style target such as `telegram:123456789` where the suffix is the
@@ -88,6 +89,9 @@ Common environment variables:
 - `PB_WORKSPACE_ROOT` to change the runtime workspace location
 - `PB_INBOUND_DEBOUNCE_SECONDS` to tune message batching behavior
 - `PB_DOCKET_URL` to point scheduled tasks at a dedicated Redis-backed docket
+- `PB_MCP_FETCH_URL_MAX_BYTES` to cap streamed URL downloads before they are saved
+- `PB_MCP_FETCH_URL_OUTPUT_DIR` to choose where fetched resources are written inside the workspace
+- `PB_MCP_FETCH_URL_TIMEOUT_SECONDS` to tune remote fetch timeouts
 
 ## Scheduled Tasks
 
