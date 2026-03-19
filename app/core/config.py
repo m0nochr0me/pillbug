@@ -22,7 +22,6 @@ def _split_csv(value: str) -> tuple[str, ...]:
 
 
 class Settings(BaseSettings):
-
     DEBUG: bool = False
 
     REDIS_HOST: str | None = None
@@ -56,6 +55,7 @@ class Settings(BaseSettings):
     MCP_DEFAULT_COMMAND_TIMEOUT_SECONDS: float = 30.0
     MCP_MAX_COMMAND_TIMEOUT_SECONDS: float = 300.0
     MCP_MAX_COMMAND_OUTPUT_CHARS: int = 20000
+    MCP_USE_COMPACTOR_MIDDLEWARE: bool = True
 
     DOCKET_NAME: str = "pillbug"
     DOCKET_URL: str | None = None

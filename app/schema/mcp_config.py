@@ -2,6 +2,8 @@ from typing import Any, Literal
 
 from pydantic import AliasChoices, AnyUrl, BaseModel, ConfigDict, Field, field_validator
 
+from app.util.compaction import validate_compaction_stages
+
 
 class MCPServer(BaseModel):
     name: str = Field(
@@ -23,6 +25,19 @@ class MCPServer(BaseModel):
         None,
         description="Optional headers to include in requests to the MCP server",
     )
+    compacting: list[str] | None = Field(
+        None,
+        description=(
+            "Optional list of compaction stages to apply to tool outputs from this "
+            "server. Supported stages are slight, full, url_shorten, and "
+            "rsub::<pattern>::<replacement>."
+        ),
+    )
+
+    @field_validator("compacting")
+    @classmethod
+    def validate_compacting(cls, value: list[str] | None) -> list[str] | None:
+        return validate_compaction_stages(value)
 
     model_config = ConfigDict(extra="ignore")
 

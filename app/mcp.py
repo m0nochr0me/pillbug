@@ -18,6 +18,7 @@ from fastmcp.server import create_proxy
 from app import __project__, __version__
 from app.core.config import settings
 from app.core.log import logger, uvicorn_log_config
+from app.middleware.compactor import CompactorMiddleware
 from app.runtime.channels import get_channel_plugin
 from app.runtime.scheduler import task_scheduler
 from app.schema.todo import TodoItem, TodoListSnapshot
@@ -606,12 +607,15 @@ async def manage_agent_task(
 # Load MCP server configuration from app/mcp.json if it exists, and mount configured servers
 if (mcp_config_file := settings.BASE_DIR / "mcp.json").is_file():
     logger.info(f"Loading MCP config from {mcp_config_file}")
+
     from app.schema.mcp_config import MCPConfig
 
     mcp_config = MCPConfig.model_validate_json(mcp_config_file.read_text(encoding="utf-8"))
 
     for server in mcp_config.servers.values():
         proxy = create_proxy(StreamableHttpTransport(server.url, headers=server.headers))
+        if settings.MCP_USE_COMPACTOR_MIDDLEWARE and server.compacting:
+            proxy.add_middleware(CompactorMiddleware(cleanup_stages=server.compacting))
         mcp.mount(proxy, namespace=server.name)
 
 
