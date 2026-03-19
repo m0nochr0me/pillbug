@@ -35,13 +35,13 @@ from app.util.web import (
     render_readable_html_document,
 )
 from app.util.workspace import (
+    async_read_text_file,
+    async_write_bytes_file,
+    async_write_text_file,
     display_path,
     is_hidden_path,
-    read_text_file,
     resolve_path_within_root,
     truncate_text,
-    write_bytes_file,
-    write_text_file,
 )
 
 __all__ = ("create_mcp_server", "mcp", "mcp_app")
@@ -205,7 +205,7 @@ async def read_file(
     if not await asyncio.to_thread(target_file.is_file):
         raise ValueError(f"Path is not a file: {path}")
 
-    content = await asyncio.to_thread(read_text_file, target_file)
+    content = await async_read_text_file(target_file)
     lines = content.splitlines(keepends=True)
     total_lines = len(lines)
     start_index = min(start_line - 1, total_lines)
@@ -245,7 +245,7 @@ async def write_new_file(
     elif not await asyncio.to_thread(target_file.parent.exists):
         raise ValueError(f"Parent directory does not exist: {_display_path(target_file.parent)}")
 
-    chars_written = await asyncio.to_thread(write_text_file, target_file, content, mode="x")
+    chars_written = await async_write_text_file(target_file, content, mode="x")
     logger.info(f"Created file {_display_path(target_file)}")
 
     return {
@@ -277,7 +277,7 @@ async def replace_file_text(
     if not await asyncio.to_thread(target_file.is_file):
         raise ValueError(f"Path is not a file: {path}")
 
-    content = await asyncio.to_thread(read_text_file, target_file)
+    content = await async_read_text_file(target_file)
     occurrences = content.count(old_text)
 
     if occurrences == 0:
@@ -288,7 +288,7 @@ async def replace_file_text(
 
     replacement_count = occurrences if replace_all else 1
     updated_content = content.replace(old_text, new_text, replacement_count)
-    await asyncio.to_thread(write_text_file, target_file, updated_content, mode="w")
+    await async_write_text_file(target_file, updated_content, mode="w")
     logger.info(f"Replaced {replacement_count} occurrence(s) in {_display_path(target_file)}")
 
     return {
@@ -322,7 +322,7 @@ async def search_file_regex(
     except re.error as exc:
         raise ValueError(f"Invalid regular expression: {exc}") from exc
 
-    content = await asyncio.to_thread(read_text_file, target_file)
+    content = await async_read_text_file(target_file)
     matches: list[dict[str, Any]] = []
     truncated = False
 
@@ -597,15 +597,15 @@ async def fetch_url(
             readable_text,
         )
         stored_bytes = len(stored_content.encode("utf-8"))
-        await asyncio.to_thread(write_text_file, target_file, stored_content, mode="w")
+        await async_write_text_file(target_file, stored_content, mode="w")
         content_mode = "readable-html"
     elif looks_like_text(content_type, final_url):
         text_content = decode_text_payload(bytes(payload), charset)
         stored_bytes = len(text_content.encode("utf-8"))
-        await asyncio.to_thread(write_text_file, target_file, text_content, mode="w")
+        await async_write_text_file(target_file, text_content, mode="w")
         content_mode = "text"
     else:
-        stored_bytes = await asyncio.to_thread(write_bytes_file, target_file, bytes(payload))
+        stored_bytes = await async_write_bytes_file(target_file, bytes(payload))
         content_mode = "binary"
 
     logger.info(f"Fetched URL {normalized_url} into {_display_path(target_file)}")

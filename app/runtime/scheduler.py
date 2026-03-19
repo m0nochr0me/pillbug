@@ -23,6 +23,7 @@ from app.schema.tasks import (
     DelayedTaskSchedule,
     TaskSchedule,
 )
+from app.util.workspace import async_read_text_file, async_write_text_file
 
 __all__ = ("AgentTaskScheduler", "task_scheduler")
 
@@ -316,7 +317,7 @@ class AgentTaskScheduler:
                 self._tasks = {}
             return
 
-        raw_store = await asyncio.to_thread(self._store_path.read_text, encoding="utf-8")
+        raw_store = await async_read_text_file(self._store_path)
         store = AgentTaskStore.model_validate_json(raw_store)
         async with self._lock:
             self._tasks = {task.task_id: task for task in store.tasks}
@@ -325,7 +326,7 @@ class AgentTaskScheduler:
         store = AgentTaskStore(tasks=sorted(self._tasks.values(), key=lambda task: task.created_at))
         payload = store.model_dump_json(indent=2)
         await asyncio.to_thread(self._store_path.parent.mkdir, parents=True, exist_ok=True)
-        await asyncio.to_thread(self._store_path.write_text, payload, encoding="utf-8")
+        await async_write_text_file(self._store_path, payload, mode="w")
 
     async def _task_snapshot(self, task_id: str) -> AgentTaskDefinition | None:
         async with self._lock:
@@ -523,20 +524,22 @@ class AgentTaskScheduler:
                 "This is a one-shot delayed task. It will be cancelled after this execution, so action should be cancel."
             )
 
-        return "\n".join((
-            "Scheduled background task execution.",
-            f"task_id: {definition.task_id}",
-            f"task_name: {definition.name}",
-            f"task_type: {self._model_task_type(definition.schedule)}",
-            f"schedule: {schedule_description}",
-            f"session_id: {definition.resolved_session_id}",
-            "",
-            "Use MCP tools as needed to complete the task.",
-            response_contract,
-            "",
-            "Task prompt:",
-            definition.prompt,
-        ))
+        return "\n".join(
+            (
+                "Scheduled background task execution.",
+                f"task_id: {definition.task_id}",
+                f"task_name: {definition.name}",
+                f"task_type: {self._model_task_type(definition.schedule)}",
+                f"schedule: {schedule_description}",
+                f"session_id: {definition.resolved_session_id}",
+                "",
+                "Use MCP tools as needed to complete the task.",
+                response_contract,
+                "",
+                "Task prompt:",
+                definition.prompt,
+            )
+        )
 
     def _schedule_description(self, schedule: TaskSchedule) -> str:
         if isinstance(schedule, CronTaskSchedule):

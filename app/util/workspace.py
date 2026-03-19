@@ -4,7 +4,12 @@ Workspace-oriented path and file helpers.
 
 from pathlib import Path
 
+import aiofile
+
 __all__ = (
+    "async_read_text_file",
+    "async_write_bytes_file",
+    "async_write_text_file",
     "display_path",
     "is_hidden_path",
     "read_text_file",
@@ -31,6 +36,24 @@ def resolve_path_within_root(path: str | Path, workspace_root: Path) -> Path:
         raise ValueError(f"Path escapes workspace root: {path}")
 
     return resolved
+
+
+async def async_read_text_file(path: Path) -> str:
+    async with aiofile.AIOFile(path, "rb") as file:
+        payload = await file.read()
+    return bytes(payload).decode("utf-8", errors="replace")
+
+
+async def async_write_text_file(path: Path, content: str, *, mode: str) -> int:
+    async with aiofile.AIOFile(path, mode, encoding="utf-8") as file:
+        await file.write(content)
+    return len(content)
+
+
+async def async_write_bytes_file(path: Path, content: bytes, *, mode: str = "wb") -> int:
+    async with aiofile.AIOFile(path, mode) as file:
+        await file.write(content)
+    return len(content)
 
 
 def read_text_file(path: Path) -> str:

@@ -11,6 +11,7 @@ from typing import Final
 from app.core.config import settings
 from app.core.log import logger
 from app.schema.url_shortener import ShortUrlRecord, ShortUrlStore
+from app.util.workspace import async_read_text_file, async_write_text_file
 
 __all__ = ("LocalUrlShortener", "local_url_shortener")
 
@@ -101,7 +102,7 @@ class LocalUrlShortener:
                 self._tokens_by_url = {}
             return
 
-        raw_store = await asyncio.to_thread(self._store_path.read_text, encoding="utf-8")
+        raw_store = await async_read_text_file(self._store_path)
         store = ShortUrlStore.model_validate_json(raw_store)
 
         async with self._lock:
@@ -112,7 +113,7 @@ class LocalUrlShortener:
         store = ShortUrlStore(urls=sorted(self._records_by_token.values(), key=lambda record: record.created_at))
         payload = store.model_dump_json(indent=2)
         await asyncio.to_thread(self._store_path.parent.mkdir, parents=True, exist_ok=True)
-        await asyncio.to_thread(self._store_path.write_text, payload, encoding="utf-8")
+        await async_write_text_file(self._store_path, payload, mode="w")
 
     def _allocate_token(self, url: str) -> str:
         digest = base64.urlsafe_b64encode(hashlib.sha256(url.encode(_URL_ENCODING)).digest())
