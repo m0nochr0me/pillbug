@@ -15,3 +15,9 @@ uv run python -m app
 
 If `PB_TELEGRAM_ALLOWED_CHAT_IDS` is set, the plugin only accepts inbound updates from those Telegram chat IDs.
 Messages from other chat IDs are ignored and logged as warnings.
+
+On startup the plugin also refreshes the bot command list so Telegram only shows `/start` and `/clear`.
+`/start` is handled locally by the plugin and replies with `ok` without invoking the LLM.
+
+Inbound Telegram photos, videos, documents, audio files, and voice messages are downloaded into the Pillbug workspace under `downloads/telegram/<chat_id>/`.
+The resulting workspace-relative path is included in the inbound message text and metadata so the runtime can reference the saved file.
