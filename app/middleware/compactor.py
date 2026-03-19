@@ -16,15 +16,15 @@ class CompactorMiddleware(Middleware):
         self.cleanup_stages = tuple(normalized_stages)
         self._stage_functions = tuple(build_compaction_stage(stage) for stage in self.cleanup_stages)
 
-    def _compact_text(self, text: str) -> str:
+    async def _compact_text(self, text: str) -> str:
         compacted = text
         for stage_function in self._stage_functions:
-            compacted = stage_function(compacted)
+            compacted = await stage_function(compacted)
         return compacted
 
-    def _compact_structured_value(self, value: object) -> tuple[object, int, int, int, bool]:
+    async def _compact_structured_value(self, value: object) -> tuple[object, int, int, int, bool]:
         if isinstance(value, str):
-            compacted = self._compact_text(value)
+            compacted = await self._compact_text(value)
             return compacted, 1, len(value), len(compacted), compacted != value
 
         if isinstance(value, list):
@@ -41,7 +41,7 @@ class CompactorMiddleware(Middleware):
                     item_before,
                     item_after,
                     item_changed,
-                ) = self._compact_structured_value(item)
+                ) = await self._compact_structured_value(item)
                 items.append(compacted_item)
                 string_count += item_count
                 chars_before += item_before
@@ -64,7 +64,7 @@ class CompactorMiddleware(Middleware):
                     item_before,
                     item_after,
                     item_changed,
-                ) = self._compact_structured_value(item)
+                ) = await self._compact_structured_value(item)
                 compacted_dict[key] = compacted_item
                 string_count += item_count
                 chars_before += item_before
@@ -93,7 +93,7 @@ class CompactorMiddleware(Middleware):
                 updated_content.append(block)
                 continue
 
-            compacted_text = self._compact_text(block.text)
+            compacted_text = await self._compact_text(block.text)
             updated_content.append(block.model_copy(update={"text": compacted_text}))
             content_string_count += 1
             content_chars_before += len(block.text)
@@ -113,7 +113,7 @@ class CompactorMiddleware(Middleware):
                 structured_chars_before,
                 structured_chars_after,
                 structured_changed,
-            ) = self._compact_structured_value(structured_content)
+            ) = await self._compact_structured_value(structured_content)
 
         total_string_count = content_string_count + structured_string_count
         total_chars_before = content_chars_before + structured_chars_before

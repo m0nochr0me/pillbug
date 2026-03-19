@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 import uvicorn
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import RedirectResponse
 from fastmcp import Context, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.server import create_proxy
@@ -18,6 +20,7 @@ from fastmcp.server import create_proxy
 from app import __project__, __version__
 from app.core.config import settings
 from app.core.log import logger, uvicorn_log_config
+from app.core.url_shortener import local_url_shortener
 from app.middleware.compactor import CompactorMiddleware
 from app.runtime.channels import get_channel_plugin
 from app.runtime.scheduler import task_scheduler
@@ -619,10 +622,29 @@ if (mcp_config_file := settings.BASE_DIR / "mcp.json").is_file():
         mcp.mount(proxy, namespace=server.name)
 
 
-mcp_app = mcp.http_app(
+_mcp_http_app = mcp.http_app(
     transport="streamable-http",
     json_response=True,
 )
+
+mcp_app = FastAPI(
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+    lifespan=_mcp_http_app.lifespan,
+)
+
+
+@mcp_app.get(f"{settings.mcp_shortener_route_prefix()}/{{token}}", include_in_schema=False)
+async def redirect_short_url(token: str) -> RedirectResponse:
+    original_url = await local_url_shortener.resolve(token)
+    if original_url is None:
+        raise HTTPException(status_code=404, detail="Short URL not found")
+
+    return RedirectResponse(url=original_url, status_code=307)
+
+
+mcp_app.mount("/", _mcp_http_app)
 
 
 def create_mcp_server() -> uvicorn.Server:

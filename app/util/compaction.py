@@ -3,9 +3,9 @@ Compaction helpers for MCP tool responses.
 """
 
 import re
-from collections.abc import Callable, Sequence
-from urllib.parse import urlsplit
+from collections.abc import Awaitable, Callable, Sequence
 
+from app.core.url_shortener import local_url_shortener
 from app.util.text import full_cleanup_text, slight_cleanup_text
 
 __all__ = (
@@ -14,12 +14,13 @@ __all__ = (
     "validate_compaction_stages",
 )
 
-type CompactionStage = Callable[[str], str]
+type CompactionStage = Callable[[str], Awaitable[str]]
 
-_URL_PATTERN = re.compile(r"(?:(?:https?://)|(?:www\.))[^\s<>'\"]+")
+_URL_PATTERN = re.compile(
+    r"(?:(?:https?://)|(?:www\.))"
+    r"[^\s<>'\"]+"
+)
 _REGEX_SUB_PREFIX = "rsub::"
-_MAX_URL_LENGTH = 64
-_SHORTENED_URL_SUFFIX = "...[url shortened]"
 
 
 def _normalize_stage(stage: str) -> str:
@@ -29,32 +30,33 @@ def _normalize_stage(stage: str) -> str:
     return normalized_stage
 
 
-def _shorten_url(url: str, *, max_length: int = _MAX_URL_LENGTH) -> str:
-    if len(url) <= max_length:
-        return url
+def _wrap_sync_stage(stage_function: Callable[[str], str]) -> CompactionStage:
+    async def runner(text: str) -> str:
+        return stage_function(text)
 
-    parsed = urlsplit(url if "://" in url else f"https://{url}")
-    origin = parsed.netloc or url.split("/", maxsplit=1)[0]
-    prefix = f"{parsed.scheme}://{origin}" if parsed.scheme and parsed.netloc else origin
+    return runner
 
-    budget = max_length - len(prefix) - len(_SHORTENED_URL_SUFFIX)
-    if budget <= 1:
-        return f"{prefix}{_SHORTENED_URL_SUFFIX}"
 
-    remainder = (
-        f"{parsed.path or ''}"
-        f"{f'?{parsed.query}' if parsed.query else ''}"
-        f"{f'#{parsed.fragment}' if parsed.fragment else ''}"
+async def _shorten_urls(text: str) -> str:
+    urls: list[str] = []
+    seen_urls: set[str] = set()
+
+    for match in _URL_PATTERN.finditer(text):
+        url = match.group(0)
+        if url in seen_urls:
+            continue
+
+        seen_urls.add(url)
+        urls.append(url)
+
+    if not urls:
+        return text
+
+    shortened_urls = await local_url_shortener.shorten_many(tuple(urls))
+    return _URL_PATTERN.sub(
+        lambda match: shortened_urls.get(match.group(0), match.group(0)),
+        text,
     )
-    if not remainder:
-        return f"{prefix}{_SHORTENED_URL_SUFFIX}"
-
-    visible = remainder[: max(budget, 0)]
-    return f"{prefix}{visible}{_SHORTENED_URL_SUFFIX}"
-
-
-def _shorten_urls(text: str) -> str:
-    return _URL_PATTERN.sub(lambda match: _shorten_url(match.group(0)), text)
 
 
 def _build_regex_sub_stage(stage: str) -> CompactionStage:
@@ -71,17 +73,20 @@ def _build_regex_sub_stage(stage: str) -> CompactionStage:
     except re.error as exc:
         raise ValueError(f"Invalid regex substitution pattern: {exc}") from exc
 
-    return lambda text: regex.sub(replacement, text)
+    async def runner(text: str) -> str:
+        return regex.sub(replacement, text)
+
+    return runner
 
 
 def build_compaction_stage(stage: str) -> CompactionStage:
     normalized_stage = _normalize_stage(stage)
 
     if normalized_stage == "slight":
-        return slight_cleanup_text
+        return _wrap_sync_stage(slight_cleanup_text)
 
     if normalized_stage == "full":
-        return full_cleanup_text
+        return _wrap_sync_stage(full_cleanup_text)
 
     if normalized_stage == "url_shorten":
         return _shorten_urls
@@ -95,10 +100,10 @@ def build_compaction_stage(stage: str) -> CompactionStage:
     )
 
 
-def apply_compaction_stages(text: str, stages: Sequence[str]) -> str:
+async def apply_compaction_stages(text: str, stages: Sequence[str]) -> str:
     compacted = text
     for stage in stages:
-        compacted = build_compaction_stage(stage)(compacted)
+        compacted = await build_compaction_stage(stage)(compacted)
     return compacted
 
 

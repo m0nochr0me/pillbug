@@ -48,6 +48,10 @@ class Settings(BaseSettings):
 
     MCP_HOST: str = "127.0.0.1"
     MCP_PORT: int = 8000
+    MCP_SHORTENER_BASE_URL: str | None = None
+    MCP_SHORTENER_ROUTE_PREFIX: str = "/u"
+    MCP_SHORTENER_TOKEN_LENGTH: int = 10
+    MCP_SHORTENER_STORE_PATH: Path = BASE_DIR / "short_urls.json"
 
     MCP_DEFAULT_PAGE_SIZE: int = 200
     MCP_MAX_PAGE_SIZE: int = 1000
@@ -110,6 +114,32 @@ class Settings(BaseSettings):
             auth = f":{quote(self.REDIS_PASSWORD, safe='')}@"
 
         return f"redis://{auth}{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
+
+    def mcp_shortener_base_url(self) -> str:
+        if self.MCP_SHORTENER_BASE_URL:
+            return self.MCP_SHORTENER_BASE_URL.rstrip("/")
+
+        host = self.MCP_HOST.strip()
+        if host in {"", "0.0.0.0", "::"}:
+            host = "127.0.0.1"
+        elif ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+
+        return f"http://{host}:{self.MCP_PORT}"
+
+    def mcp_shortener_route_prefix(self) -> str:
+        prefix = self.MCP_SHORTENER_ROUTE_PREFIX.strip()
+        if not prefix:
+            raise ValueError("PB_MCP_SHORTENER_ROUTE_PREFIX must not be empty")
+
+        if not prefix.startswith("/"):
+            prefix = f"/{prefix}"
+
+        prefix = prefix.rstrip("/")
+        if not prefix:
+            raise ValueError("PB_MCP_SHORTENER_ROUTE_PREFIX must not resolve to the root path")
+
+        return prefix
 
 
 try:
