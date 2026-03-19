@@ -32,9 +32,7 @@ def _parse_chat_ids(value: str) -> list[int]:
         try:
             chat_ids.append(int(stripped_item))
         except ValueError as exc:
-            raise ValueError(
-                "PB_TELEGRAM_ALLOWED_CHAT_IDS must be a comma-separated list of integer chat IDs"
-            ) from exc
+            raise ValueError("PB_TELEGRAM_ALLOWED_CHAT_IDS must be a comma-separated list of integer chat IDs") from exc
 
     return chat_ids
 
@@ -159,6 +157,8 @@ class TelegramChannel(BaseChannel):
                         limit=self._settings.poll_limit,
                         allowed_updates=list(self._settings.allowed_updates),
                     )
+                    # slight delay to prevent tight loop if Telegram returns updates immediately
+                    await asyncio.sleep(0.1)
                 except asyncio.CancelledError:
                     raise
                 except TimeoutError:
