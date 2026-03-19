@@ -3,16 +3,12 @@ Composition MCP Server
 """
 
 import asyncio
-import hashlib
-import mimetypes
 import os
 import re
 from collections.abc import Callable
 from contextlib import suppress
-from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urljoin, urlparse
 
 import aiohttp
 import uvicorn
@@ -30,7 +26,23 @@ from app.middleware.compactor import CompactorMiddleware
 from app.runtime.channels import get_channel_plugin
 from app.runtime.scheduler import task_scheduler
 from app.schema.todo import TodoItem, TodoListSnapshot
-from app.util.compaction import apply_compaction_stages
+from app.util.web import (
+    build_fetch_output_path,
+    decode_text_payload,
+    extract_readable_html,
+    looks_like_html,
+    looks_like_text,
+    render_readable_html_document,
+)
+from app.util.workspace import (
+    display_path,
+    is_hidden_path,
+    read_text_file,
+    resolve_path_within_root,
+    truncate_text,
+    write_bytes_file,
+    write_text_file,
+)
 
 __all__ = ("create_mcp_server", "mcp", "mcp_app")
 
@@ -38,225 +50,13 @@ mcp = FastMCP(f"{__project__}-composition-server")
 
 _TODO_LIST_STATE_KEY = "todo_list"
 
-_FETCH_URL_FILENAME_SAFE_PATTERN = re.compile(r"[^A-Za-z0-9._-]+")
-_FETCH_URL_POSITIVE_HINT_PATTERN = re.compile(
-    r"\b(article|body|content|entry|main|page|post|prose|story|text)\b",
-    flags=re.IGNORECASE,
-)
-_FETCH_URL_NEGATIVE_HINT_PATTERN = re.compile(
-    r"\b(ad|ads|aside|banner|breadcrumb|comment|cookie|footer|header|menu|modal|nav|related|share|sidebar|"
-    r"social|subscribe|toolbar)\b",
-    flags=re.IGNORECASE,
-)
-
-
-class _ReadableHtmlParser(HTMLParser):
-    _BLOCK_TAGS = frozenset(
-        {
-            "article",
-            "blockquote",
-            "dd",
-            "div",
-            "dl",
-            "dt",
-            "figcaption",
-            "figure",
-            "footer",
-            "h1",
-            "h2",
-            "h3",
-            "h4",
-            "h5",
-            "h6",
-            "header",
-            "hr",
-            "li",
-            "main",
-            "ol",
-            "p",
-            "pre",
-            "section",
-            "table",
-            "tr",
-            "ul",
-        }
-    )
-    _SKIP_TAGS = frozenset({"canvas", "iframe", "noscript", "script", "style", "svg", "template"})
-    _NEGATIVE_TAGS = frozenset({"aside", "button", "dialog", "footer", "form", "header", "menu", "nav"})
-    _POSITIVE_TAGS = frozenset({"article", "main"})
-
-    def __init__(self, base_url: str) -> None:
-        super().__init__(convert_charrefs=True)
-        self._base_url = base_url
-        self._stack: list[tuple[str, bool, bool, bool]] = []
-        self._skip_depth = 0
-        self._negative_depth = 0
-        self._positive_depth = 0
-        self._body_fragments: list[str] = []
-        self._focused_fragments: list[str] = []
-        self._title_fragments: list[str] = []
-        self._in_title = False
-        self._link_stack: list[tuple[str | None, list[str]]] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        normalized_tag = tag.lower()
-        attr_map = {name.lower(): value or "" for name, value in attrs}
-
-        if normalized_tag == "title":
-            self._in_title = True
-
-        attr_text = " ".join(
-            part
-            for part in (attr_map.get("class"), attr_map.get("id"), attr_map.get("role"), attr_map.get("aria-label"))
-            if part
-        )
-        positive = normalized_tag in self._POSITIVE_TAGS or attr_map.get("role", "").strip().lower() == "main"
-        positive = positive or bool(_FETCH_URL_POSITIVE_HINT_PATTERN.search(attr_text))
-        negative = normalized_tag in self._NEGATIVE_TAGS or bool(_FETCH_URL_NEGATIVE_HINT_PATTERN.search(attr_text))
-        skip = normalized_tag in self._SKIP_TAGS
-        positive = positive and not negative
-
-        self._stack.append((normalized_tag, positive, negative, skip))
-
-        if skip:
-            self._skip_depth += 1
-        if negative:
-            self._negative_depth += 1
-        if positive:
-            self._positive_depth += 1
-
-        if normalized_tag == "a":
-            href = attr_map.get("href", "").strip() or None
-            self._link_stack.append((href, []))
-            return
-
-        if normalized_tag == "img":
-            alt_text = re.sub(r"\s+", " ", attr_map.get("alt", "")).strip()
-            if alt_text:
-                self._append_text(f"[Image: {alt_text}]")
-            return
-
-        if normalized_tag == "br":
-            self._append_break()
-        elif normalized_tag == "li":
-            self._append_break(prefix="- ")
-
-    def handle_endtag(self, tag: str) -> None:
-        normalized_tag = tag.lower()
-
-        if normalized_tag == "title":
-            self._in_title = False
-
-        if normalized_tag == "a" and self._link_stack:
-            href, link_text_parts = self._link_stack.pop()
-            link_text = self._normalize_inline_text("".join(link_text_parts))
-            resolved_href = urljoin(self._base_url, href) if href else ""
-
-            if resolved_href and link_text and resolved_href != link_text:
-                self._append_text(f"{link_text} ({resolved_href})")
-            elif link_text:
-                self._append_text(link_text)
-            elif resolved_href:
-                self._append_text(resolved_href)
-
-        if normalized_tag in self._BLOCK_TAGS:
-            self._append_break()
-
-        self._pop_stack(normalized_tag)
-
-    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        self.handle_starttag(tag, attrs)
-        self.handle_endtag(tag)
-
-    def handle_data(self, data: str) -> None:
-        if self._in_title:
-            self._title_fragments.append(data)
-            return
-
-        normalized = self._normalize_inline_text(data)
-        if not normalized or self._skip_depth:
-            return
-
-        if self._link_stack:
-            self._link_stack[-1][1].append(f"{normalized} ")
-            return
-
-        self._append_text(normalized)
-
-    def render(self) -> tuple[str | None, str]:
-        body_text = self._normalize_output("".join(self._body_fragments))
-        focused_text = self._normalize_output("".join(self._focused_fragments))
-        title = self._normalize_output("".join(self._title_fragments)) or None
-
-        if len(focused_text) >= max(400, len(body_text) // 5):
-            return title, focused_text
-
-        return title, body_text
-
-    def _append_break(self, prefix: str = "") -> None:
-        if self._skip_depth or self._negative_depth:
-            return
-
-        for target in self._targets():
-            target.append("\n\n")
-            if prefix:
-                target.append(prefix)
-
-    def _append_text(self, text: str) -> None:
-        normalized = self._normalize_inline_text(text)
-        if not normalized or self._skip_depth or self._negative_depth:
-            return
-
-        for target in self._targets():
-            target.append(f"{normalized} ")
-
-    def _targets(self) -> tuple[list[str], ...]:
-        if self._positive_depth:
-            return self._body_fragments, self._focused_fragments
-        return (self._body_fragments,)
-
-    def _pop_stack(self, tag: str) -> None:
-        while self._stack:
-            stack_tag, positive, negative, skip = self._stack.pop()
-            if skip:
-                self._skip_depth = max(self._skip_depth - 1, 0)
-            if negative:
-                self._negative_depth = max(self._negative_depth - 1, 0)
-            if positive:
-                self._positive_depth = max(self._positive_depth - 1, 0)
-            if stack_tag == tag:
-                return
-
-    @staticmethod
-    def _normalize_inline_text(text: str) -> str:
-        return re.sub(r"\s+", " ", text).strip()
-
-    @staticmethod
-    def _normalize_output(text: str) -> str:
-        compacted = re.sub(r"[ \t]+\n", "\n", text)
-        compacted = re.sub(r"\n[ \t]+", "\n", compacted)
-        compacted = re.sub(r"[ \t]{2,}", " ", compacted)
-        compacted = re.sub(r"\s+([,.;:!?])", r"\1", compacted)
-        compacted = re.sub(r"\n{3,}", "\n\n", compacted)
-        return compacted.strip()
-
 
 def _display_path(path: Path) -> str:
-    if path == settings.WORKSPACE_ROOT:
-        return "."
-
-    return str(path.relative_to(settings.WORKSPACE_ROOT))
+    return display_path(path, settings.WORKSPACE_ROOT)
 
 
 def _resolve_workspace_path(path: str | Path) -> Path:
-    raw_path = Path(path)
-    candidate = raw_path if raw_path.is_absolute() else settings.WORKSPACE_ROOT / raw_path
-    resolved = candidate.resolve()
-
-    if not resolved.is_relative_to(settings.WORKSPACE_ROOT):
-        raise ValueError(f"Path escapes workspace root: {path}")
-
-    return resolved
+    return resolve_path_within_root(path, settings.WORKSPACE_ROOT)
 
 
 def _validate_page_size(page_size: int) -> int:
@@ -287,159 +87,12 @@ def _validate_fetch_url_max_bytes(max_bytes: int) -> int:
     return min(max_bytes, settings.MCP_FETCH_URL_MAX_BYTES)
 
 
-def _read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8", errors="replace")
-
-
-def _write_text(path: Path, content: str, *, mode: str) -> int:
-    with path.open(mode, encoding="utf-8") as file:
-        return file.write(content)
-
-
-def _write_bytes(path: Path, content: bytes) -> int:
-    return path.write_bytes(content)
-
-
-def _is_hidden(relative_path: Path) -> bool:
-    return any(part.startswith(".") for part in relative_path.parts)
-
-
-def _truncate_output(
-    text: str,
-    limit: int = settings.MCP_MAX_COMMAND_OUTPUT_CHARS,
-) -> tuple[str, bool]:
-    if len(text) <= limit:
-        return text, False
-
-    omitted_chars = len(text) - limit
-    suffix = f"\n... truncated {omitted_chars} characters"
-    truncated = text[: max(limit - len(suffix), 0)] + suffix
-    return truncated, True
-
-
 def _get_command_shell() -> str:
     shell = os.environ.get("SHELL")
     if shell and Path(shell).is_file():
         return shell
 
     return "/bin/sh"
-
-
-def _sanitize_fetch_url_filename(value: str, fallback: str) -> str:
-    normalized = _FETCH_URL_FILENAME_SAFE_PATTERN.sub("-", value.strip().lower()).strip("-._")
-    return normalized or fallback
-
-
-def _looks_like_html(content_type: str, url: str) -> bool:
-    normalized_content_type = content_type.lower()
-    if normalized_content_type in {"application/xhtml+xml", "text/html"}:
-        return True
-
-    return Path(urlparse(url).path).suffix.lower() in {".htm", ".html", ".xhtml"}
-
-
-def _looks_like_text(content_type: str, url: str) -> bool:
-    normalized_content_type = content_type.lower()
-    if normalized_content_type.startswith("text/"):
-        return True
-
-    if normalized_content_type in {
-        "application/javascript",
-        "application/json",
-        "application/ld+json",
-        "application/sql",
-        "application/xml",
-        "application/x-yaml",
-        "application/yaml",
-        "image/svg+xml",
-    }:
-        return True
-
-    return Path(urlparse(url).path).suffix.lower() in {
-        ".css",
-        ".csv",
-        ".js",
-        ".json",
-        ".md",
-        ".rst",
-        ".svg",
-        ".toml",
-        ".txt",
-        ".xml",
-        ".yaml",
-        ".yml",
-    }
-
-
-def _decode_text_payload(payload: bytes, charset: str | None) -> str:
-    encodings = [charset, "utf-8", "utf-16", "latin-1"]
-    for encoding in encodings:
-        if not encoding:
-            continue
-        try:
-            return payload.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-
-    return payload.decode("utf-8", errors="replace")
-
-
-def _guess_fetch_url_extension(content_type: str, url: str, *, readable_html: bool) -> str:
-    if readable_html:
-        return ".md"
-
-    guessed_extension = mimetypes.guess_extension(content_type.lower(), strict=False)
-    if guessed_extension:
-        return guessed_extension
-
-    path_extension = Path(urlparse(url).path).suffix.lower()
-    if path_extension:
-        return path_extension
-
-    if _looks_like_text(content_type, url):
-        return ".txt"
-
-    return ".bin"
-
-
-def _build_fetch_url_output_path(url: str, content_type: str, *, readable_html: bool) -> Path:
-    parsed_url = urlparse(url)
-    host = _sanitize_fetch_url_filename(parsed_url.netloc or parsed_url.hostname or "resource", "resource")
-    stem = _sanitize_fetch_url_filename(Path(parsed_url.path).stem or "index", "index")
-    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:12]
-    extension = _guess_fetch_url_extension(content_type, url, readable_html=readable_html)
-    output_dir = _resolve_workspace_path(settings.MCP_FETCH_URL_OUTPUT_DIR)
-    return output_dir / f"{host}-{stem}-{digest}{extension}"
-
-
-def _render_readable_html_document(title: str | None, source_url: str, body: str) -> str:
-    heading = title.strip() if title else "Web Page"
-    normalized_body = body.strip()
-    duplicate_heading_prefix = f"{heading}\n\n"
-    if normalized_body == heading:
-        normalized_body = ""
-    elif normalized_body.startswith(duplicate_heading_prefix):
-        normalized_body = normalized_body.removeprefix(duplicate_heading_prefix).lstrip()
-
-    lines = [f"# {heading}", "", f"Source: {source_url}", "", normalized_body]
-    return "\n".join(line for line in lines if line is not None).strip() + "\n"
-
-
-async def _extract_readable_html(payload: bytes, final_url: str, charset: str | None) -> tuple[str | None, str]:
-    html_text = _decode_text_payload(payload, charset)
-    parser = _ReadableHtmlParser(final_url)
-    parser.feed(html_text)
-    parser.close()
-
-    title, readable_text = parser.render()
-    if readable_text:
-        readable_text = await apply_compaction_stages(readable_text, ("url_shorten",))
-        return title, readable_text
-
-    fallback_text = re.sub(r"<[^>]+>", " ", html_text)
-    fallback_text = re.sub(r"\s+", " ", fallback_text).strip()
-    fallback_text = await apply_compaction_stages(fallback_text, ("url_shorten",))
-    return title, fallback_text
 
 
 def _parse_channel_target(channel: str) -> tuple[str, str]:
@@ -505,7 +158,7 @@ async def list_files(
 
         for entry in sorted(target_directory.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())):
             relative_path = entry.relative_to(settings.WORKSPACE_ROOT)
-            if not include_hidden and _is_hidden(relative_path):
+            if not include_hidden and is_hidden_path(relative_path):
                 continue
 
             entry_type = "directory" if entry.is_dir() else "file"
@@ -552,7 +205,7 @@ async def read_file(
     if not await asyncio.to_thread(target_file.is_file):
         raise ValueError(f"Path is not a file: {path}")
 
-    content = await asyncio.to_thread(_read_text, target_file)
+    content = await asyncio.to_thread(read_text_file, target_file)
     lines = content.splitlines(keepends=True)
     total_lines = len(lines)
     start_index = min(start_line - 1, total_lines)
@@ -592,7 +245,7 @@ async def write_new_file(
     elif not await asyncio.to_thread(target_file.parent.exists):
         raise ValueError(f"Parent directory does not exist: {_display_path(target_file.parent)}")
 
-    chars_written = await asyncio.to_thread(_write_text, target_file, content, mode="x")
+    chars_written = await asyncio.to_thread(write_text_file, target_file, content, mode="x")
     logger.info(f"Created file {_display_path(target_file)}")
 
     return {
@@ -624,7 +277,7 @@ async def replace_file_text(
     if not await asyncio.to_thread(target_file.is_file):
         raise ValueError(f"Path is not a file: {path}")
 
-    content = await asyncio.to_thread(_read_text, target_file)
+    content = await asyncio.to_thread(read_text_file, target_file)
     occurrences = content.count(old_text)
 
     if occurrences == 0:
@@ -635,7 +288,7 @@ async def replace_file_text(
 
     replacement_count = occurrences if replace_all else 1
     updated_content = content.replace(old_text, new_text, replacement_count)
-    await asyncio.to_thread(_write_text, target_file, updated_content, mode="w")
+    await asyncio.to_thread(write_text_file, target_file, updated_content, mode="w")
     logger.info(f"Replaced {replacement_count} occurrence(s) in {_display_path(target_file)}")
 
     return {
@@ -669,7 +322,7 @@ async def search_file_regex(
     except re.error as exc:
         raise ValueError(f"Invalid regular expression: {exc}") from exc
 
-    content = await asyncio.to_thread(_read_text, target_file)
+    content = await asyncio.to_thread(read_text_file, target_file)
     matches: list[dict[str, Any]] = []
     truncated = False
 
@@ -720,7 +373,7 @@ async def find_files(
                 continue
 
             relative_path = candidate.relative_to(settings.WORKSPACE_ROOT)
-            if not include_hidden and _is_hidden(relative_path):
+            if not include_hidden and is_hidden_path(relative_path):
                 continue
 
             matches.append(str(relative_path))
@@ -847,9 +500,9 @@ async def execute_command(
 
     stdout = stdout_bytes.decode("utf-8", errors="replace")
     stderr = stderr_bytes.decode("utf-8", errors="replace")
-    combined_output, combined_truncated = _truncate_output(stdout + stderr)
-    stdout, stdout_truncated = _truncate_output(stdout)
-    stderr, stderr_truncated = _truncate_output(stderr)
+    combined_output, combined_truncated = truncate_text(stdout + stderr, settings.MCP_MAX_COMMAND_OUTPUT_CHARS)
+    stdout, stdout_truncated = truncate_text(stdout, settings.MCP_MAX_COMMAND_OUTPUT_CHARS)
+    stderr, stderr_truncated = truncate_text(stderr, settings.MCP_MAX_COMMAND_OUTPUT_CHARS)
 
     logger.info(f"Executed command in {_display_path(target_directory)} with exit code {process.returncode}: {command}")
 
@@ -920,34 +573,39 @@ async def fetch_url(
             raise ValueError(f"Unable to fetch URL: {exc}") from exc
 
     shortened_urls = await local_url_shortener.shorten_many((normalized_url, final_url))
-    readable_html = _looks_like_html(content_type, final_url)
+    readable_html = looks_like_html(content_type, final_url)
 
     if output_path is not None:
         target_file = _resolve_workspace_path(output_path)
         if await asyncio.to_thread(target_file.exists) and not await asyncio.to_thread(target_file.is_file):
             raise ValueError(f"Path is not a file: {output_path}")
     else:
-        target_file = _build_fetch_url_output_path(final_url, content_type, readable_html=readable_html)
+        target_file = build_fetch_output_path(
+            final_url,
+            content_type,
+            _resolve_workspace_path(settings.MCP_FETCH_URL_OUTPUT_DIR),
+            readable_html=readable_html,
+        )
 
     await asyncio.to_thread(target_file.parent.mkdir, parents=True, exist_ok=True)
 
     if readable_html:
-        title, readable_text = await _extract_readable_html(bytes(payload), final_url, charset)
-        stored_content = _render_readable_html_document(
+        title, readable_text = await extract_readable_html(bytes(payload), final_url, charset)
+        stored_content = render_readable_html_document(
             title,
             shortened_urls.get(final_url, final_url),
             readable_text,
         )
         stored_bytes = len(stored_content.encode("utf-8"))
-        await asyncio.to_thread(_write_text, target_file, stored_content, mode="w")
+        await asyncio.to_thread(write_text_file, target_file, stored_content, mode="w")
         content_mode = "readable-html"
-    elif _looks_like_text(content_type, final_url):
-        text_content = _decode_text_payload(bytes(payload), charset)
+    elif looks_like_text(content_type, final_url):
+        text_content = decode_text_payload(bytes(payload), charset)
         stored_bytes = len(text_content.encode("utf-8"))
-        await asyncio.to_thread(_write_text, target_file, text_content, mode="w")
+        await asyncio.to_thread(write_text_file, target_file, text_content, mode="w")
         content_mode = "text"
     else:
-        stored_bytes = await asyncio.to_thread(_write_bytes, target_file, bytes(payload))
+        stored_bytes = await asyncio.to_thread(write_bytes_file, target_file, bytes(payload))
         content_mode = "binary"
 
     logger.info(f"Fetched URL {normalized_url} into {_display_path(target_file)}")
