@@ -603,6 +603,7 @@ async def manage_agent_task(
     raise ValueError(f"Unsupported action: {action}")
 
 
+# Load MCP server configuration from app/mcp.json if it exists, and mount configured servers
 if (mcp_config_file := settings.BASE_DIR / "mcp.json").is_file():
     logger.info(f"Loading MCP config from {mcp_config_file}")
     from app.schema.mcp_config import MCPConfig
@@ -610,15 +611,8 @@ if (mcp_config_file := settings.BASE_DIR / "mcp.json").is_file():
     mcp_config = MCPConfig.model_validate_json(mcp_config_file.read_text(encoding="utf-8"))
 
     for server in mcp_config.servers.values():
-        mcp.mount(
-            create_proxy(
-                StreamableHttpTransport(
-                    server.url,
-                    headers=server.headers,
-                ),
-            ),
-            namespace=server.name,
-        )
+        proxy = create_proxy(StreamableHttpTransport(server.url, headers=server.headers))
+        mcp.mount(proxy, namespace=server.name)
 
 
 mcp_app = mcp.http_app(
