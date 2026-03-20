@@ -17,6 +17,18 @@ class ChatResponse(BaseModel):
     )
 
 
+class InboundAttachment(BaseModel):
+    path: str = Field(description="Workspace-relative or workspace-contained absolute path to the attachment.")
+    mime_type: str | None = Field(default=None, description="Declared MIME type for the attachment, if known.")
+    display_name: str | None = Field(default=None, description="Preferred display name for the attachment upload.")
+    source: str | None = Field(default=None, description="Attachment origin such as telegram, local, or fetched-url.")
+    kind: str | None = Field(
+        default=None, description="Channel-specific content kind such as photo, document, or audio."
+    )
+
+    model_config = ConfigDict(extra="ignore")
+
+
 class ChatSessionSnapshot(BaseModel):
     session_id: str = Field(description="The stable session identifier used by the runtime.")
     updated_at: datetime = Field(

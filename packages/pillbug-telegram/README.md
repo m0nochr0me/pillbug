@@ -21,3 +21,10 @@ On startup the plugin also refreshes the bot command list so Telegram only shows
 
 Inbound Telegram photos, videos, documents, audio files, and voice messages are downloaded into the Pillbug workspace under `downloads/telegram/<chat_id>/`.
 The resulting workspace-relative path is included in the inbound message text and metadata so the runtime can reference the saved file.
+
+When a downloaded attachment is a supported Gemini multimodal input, Pillbug also uploads it with the chat request.
+Current multimodal forwarding is limited to PDFs, audio files, images, and plaintext or Markdown files.
+Other attachment types, such as video, are still saved into the workspace and referenced in text only.
+
+The forwarding path is now channel-agnostic: any inbound message metadata that includes `inbound_attachments` entries with workspace paths can be consumed by the Gemini layer.
+That means future channels, local workspace file pickers, or URL-download flows can reuse the same multimodal path without depending on Telegram-specific metadata keys.

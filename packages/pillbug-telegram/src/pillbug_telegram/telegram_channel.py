@@ -533,6 +533,15 @@ class TelegramChannel(BaseChannel):
                 ),
                 "metadata": {
                     **base_metadata,
+                    "inbound_attachments": [
+                        {
+                            "path": workspace_path,
+                            "mime_type": normalized_mime_type,
+                            "display_name": normalized_file_name,
+                            "source": "telegram",
+                            "kind": content_type,
+                        }
+                    ],
                     "telegram_attachment_download_path": workspace_path,
                     "telegram_attachment_bytes_saved": bytes_saved,
                 },

@@ -158,7 +158,10 @@ class ApplicationLoop:
         session = await self._get_session(batch.session_key)
 
         try:
-            response = await session.send_message(processed_message.model_input)
+            response = await session.send_message(
+                processed_message.model_input,
+                message_metadata=[message.metadata for message in batch.messages],
+            )
         except Exception:
             logger.exception(f"Failed to process inbound message for session={batch.session_key}")
             await channel.send_response(
@@ -170,7 +173,12 @@ class ApplicationLoop:
         if response.usage_metadata is not None:
             logger.info(f"Completed response for {batch.session_key}: {response.usage_metadata.model_dump_json()}")
 
-        await channel.send_response(batch.last_message, response.text)
+        response_text = response.text.strip()
+        if not response_text:
+            response_text = "I could not produce a text response right now. Please try again."
+            logger.warning(f"Model response was blank for {batch.session_key}; using runtime fallback text")
+
+        await channel.send_response(batch.last_message, response_text)
 
     async def _get_session(self, session_key: str) -> GeminiChatSession:
         session = self._sessions.get(session_key)

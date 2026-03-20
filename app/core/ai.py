@@ -2,10 +2,13 @@
 AI client
 """
 
+import asyncio
+import mimetypes
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import cast
+from pathlib import Path
+from typing import Any, cast
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
@@ -14,17 +17,113 @@ from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
 from google import genai
 from google.genai import types
+from pydantic import ValidationError
 
 from app.core.config import settings
 from app.core.log import logger
 from app.runtime.channels import get_available_channels_context
-from app.schema.ai import ChatResponse, ChatSessionSnapshot, Skill
+from app.schema.ai import ChatResponse, ChatSessionSnapshot, InboundAttachment, Skill
+from app.util.workspace import resolve_path_within_root
 
 __all__ = (
     "GeminiChatService",
     "GeminiChatSession",
     "chat_service",
 )
+
+_TEXT_ATTACHMENT_MIME_TYPES = {
+    "text/markdown": "text/markdown",
+    "text/plain": "text/plain",
+    "text/x-markdown": "text/markdown",
+}
+_ATTACHMENT_MIME_TYPE_OVERRIDES = {
+    ".markdown": "text/markdown",
+    ".md": "text/markdown",
+    ".pdf": "application/pdf",
+    ".txt": "text/plain",
+}
+_EMPTY_MODEL_RESPONSE_FALLBACK = "I could not produce a text response right now. Please try again."
+
+
+def _normalize_supported_attachment_mime_type(mime_type: str) -> str | None:
+    normalized_mime_type = mime_type.strip().lower()
+    if not normalized_mime_type:
+        return None
+    if normalized_mime_type.startswith("audio/"):
+        return normalized_mime_type
+    if normalized_mime_type.startswith("image/"):
+        return normalized_mime_type
+    if normalized_mime_type == "application/pdf":
+        return normalized_mime_type
+    return _TEXT_ATTACHMENT_MIME_TYPES.get(normalized_mime_type)
+
+
+def _supported_attachment_mime_type(attachment_path: Path, attachment: InboundAttachment) -> str | None:
+    candidates: list[str] = []
+
+    if attachment.mime_type:
+        candidates.append(attachment.mime_type)
+
+    suffix_override = _ATTACHMENT_MIME_TYPE_OVERRIDES.get(attachment_path.suffix.lower())
+    if suffix_override is not None:
+        candidates.append(suffix_override)
+
+    guessed_mime_type, _ = mimetypes.guess_type(attachment_path.name)
+    if guessed_mime_type is not None:
+        candidates.append(guessed_mime_type)
+
+    if attachment.kind == "photo":
+        candidates.append("image/jpeg")
+
+    for candidate in candidates:
+        if normalized_candidate := _normalize_supported_attachment_mime_type(candidate):
+            return normalized_candidate
+
+    return None
+
+
+def _legacy_attachment_from_metadata(metadata: dict[str, Any]) -> InboundAttachment | None:
+    attachment_path = metadata.get("telegram_attachment_download_path")
+    if not isinstance(attachment_path, str) or not attachment_path.strip():
+        return None
+
+    return InboundAttachment(
+        path=attachment_path,
+        mime_type=metadata.get("telegram_attachment_mime_type")
+        if isinstance(metadata.get("telegram_attachment_mime_type"), str)
+        else None,
+        display_name=(
+            metadata.get("telegram_attachment_original_file_name")
+            if isinstance(metadata.get("telegram_attachment_original_file_name"), str)
+            else None
+        ),
+        source="telegram",
+        kind=metadata.get("telegram_attachment_type")
+        if isinstance(metadata.get("telegram_attachment_type"), str)
+        else None,
+    )
+
+
+def _extract_inbound_attachments(metadata: dict[str, Any]) -> list[InboundAttachment]:
+    attachments: list[InboundAttachment] = []
+    raw_attachments = metadata.get("inbound_attachments")
+
+    raw_values: list[object] = []
+    if isinstance(raw_attachments, list | tuple):
+        raw_values.extend(raw_attachments)
+    elif isinstance(raw_attachments, dict):
+        raw_values.append(raw_attachments)
+
+    for raw_value in raw_values:
+        try:
+            attachments.append(InboundAttachment.model_validate(raw_value))
+        except ValidationError as exc:
+            logger.warning(f"Skipping invalid inbound attachment metadata entry: {exc}")
+
+    if not attachments and (legacy_attachment := _legacy_attachment_from_metadata(metadata)) is not None:
+        attachments.append(legacy_attachment)
+
+    return attachments
 
 
 class GeminiChatService:
@@ -87,14 +186,16 @@ class GeminiChatService:
     async def get_base_context(self) -> str:
         now = datetime.now(ZoneInfo(settings.TIMEZONE))
 
-        return "\n".join((
-            "---",
-            f"datetime: {now:%Y-%b-%d %H:%M:%S}",
-            f"timezone: {settings.TIMEZONE}",
-            f"workspace: {settings.WORKSPACE_ROOT}",
-            f"available_channels: {', '.join(await get_available_channels_context())}",
-            "---\n",
-        ))
+        return "\n".join(
+            (
+                "---",
+                f"datetime: {now:%Y-%b-%d %H:%M:%S}",
+                f"timezone: {settings.TIMEZONE}",
+                f"workspace: {settings.WORKSPACE_ROOT}",
+                f"available_channels: {', '.join(await get_available_channels_context())}",
+                "---\n",
+            )
+        )
 
     async def discover_skills(self) -> list[Skill]:
         """
@@ -169,10 +270,13 @@ class GeminiChatSession:
     async def send_message(
         self,
         message: str,
+        message_metadata: list[dict[str, Any]] | None = None,
     ) -> ChatResponse:
+        message_parts = await self._build_message_parts(message, message_metadata)
+
         async with self._mcp_client as mcp_client, self._service.get_system_instruction() as system_instruction:
             response = await self._chat.send_message(
-                message=message,
+                message=message_parts,
                 config=types.GenerateContentConfig(
                     system_instruction=system_instruction,
                     temperature=settings.GEMINI_TEMPERATURE,
@@ -193,10 +297,106 @@ class GeminiChatSession:
                 usage_metadata=response.usage_metadata,
             )
 
+        latest_model_response = self._get_latest_model_response_text()
+        if latest_model_response.strip():
+            return ChatResponse(
+                text=latest_model_response,
+                usage_metadata=response.usage_metadata,
+            )
+
+        logger.warning(f"Gemini returned no text for session={self._session_id}; responding with fallback text instead")
+
         return ChatResponse(
-            text=self._get_latest_model_response_text(),
+            text=_EMPTY_MODEL_RESPONSE_FALLBACK,
             usage_metadata=response.usage_metadata,
         )
+
+    async def _build_message_parts(
+        self,
+        message: str,
+        message_metadata: list[dict[str, Any]] | None,
+    ) -> list[types.Part]:
+        message_parts = [types.Part.from_text(text=message)]
+        if not message_metadata:
+            return message_parts
+
+        seen_attachment_paths: set[str] = set()
+        forwarded_attachment_count = 0
+        skipped_attachment_count = 0
+        for metadata in message_metadata:
+            for attachment in _extract_inbound_attachments(metadata):
+                attachment_part = await self._build_attachment_part(attachment, seen_attachment_paths)
+                if attachment_part is not None:
+                    message_parts.append(attachment_part)
+                    forwarded_attachment_count += 1
+                else:
+                    skipped_attachment_count += 1
+
+        if forwarded_attachment_count or skipped_attachment_count:
+            logger.info(
+                f"Prepared inbound Gemini attachments for session={self._session_id} forwarded={forwarded_attachment_count} skipped={skipped_attachment_count}"
+            )
+
+        return message_parts
+
+    async def _build_attachment_part(
+        self,
+        attachment: InboundAttachment,
+        seen_attachment_paths: set[str],
+    ) -> types.Part | None:
+        normalized_attachment_path = attachment.path.strip()
+        if not normalized_attachment_path or normalized_attachment_path in seen_attachment_paths:
+            if normalized_attachment_path:
+                logger.info(
+                    f"Skipping duplicate inbound attachment for Gemini session={self._session_id} path={normalized_attachment_path}"
+                )
+            return None
+
+        try:
+            attachment_path = resolve_path_within_root(normalized_attachment_path, settings.WORKSPACE_ROOT)
+        except ValueError:
+            logger.warning(
+                f"Skipping inbound attachment outside workspace for Gemini session={self._session_id} path={normalized_attachment_path}"
+            )
+            return None
+
+        if not await asyncio.to_thread(attachment_path.is_file):
+            logger.warning(
+                f"Skipping missing inbound attachment for Gemini session={self._session_id} path={normalized_attachment_path}"
+            )
+            return None
+
+        mime_type = _supported_attachment_mime_type(attachment_path, attachment)
+        if mime_type is None:
+            logger.info(
+                f"Skipping unsupported inbound attachment for Gemini session={self._session_id} path={normalized_attachment_path} kind={attachment.kind} source={attachment.source}"
+            )
+            return None
+
+        upload_config: dict[str, str] = {"mime_type": mime_type}
+        if attachment.display_name and attachment.display_name.strip():
+            upload_config["display_name"] = attachment.display_name.strip()
+
+        try:
+            uploaded_file = await self._service.ai_client.aio.files.upload(file=attachment_path, config=upload_config)
+        except Exception:
+            logger.exception(
+                f"Failed to upload inbound attachment for Gemini session={self._session_id} path={normalized_attachment_path} source={attachment.source}"
+            )
+            return None
+
+        uploaded_file_uri = getattr(uploaded_file, "uri", None)
+        if not isinstance(uploaded_file_uri, str) or not uploaded_file_uri:
+            logger.warning(
+                f"Uploaded inbound attachment did not return a usable URI for session={self._session_id} path={normalized_attachment_path}"
+            )
+            return None
+
+        seen_attachment_paths.add(normalized_attachment_path)
+        logger.info(
+            f"Uploaded inbound attachment for Gemini session={self._session_id} path={normalized_attachment_path} mime_type={mime_type} source={attachment.source}"
+        )
+        return types.Part.from_uri(file_uri=uploaded_file_uri, mime_type=mime_type)
 
     async def _persist_history(self) -> None:
         try:
