@@ -2,10 +2,11 @@
 
 <p align="center"><img src="app/assets/pillbug_logo.svg" alt="Pillbug logo" width="220"></p>
 
-Pillbug is an async AI agent runtime.
+Pillbug is an async AI agent runtime built for isolated deployment.
 
 ## Highlights
 
+- One agent, one runtime, and one workspace per container
 - Async runtime with debounced inbound message handling
 - Built-in CLI channel plus factory-based external channel plugins
 - uv workspace-friendly plugin layout for optional channel packages
@@ -33,6 +34,20 @@ uv run python -m app.mcp
 ```
 
 On first run, Pillbug initializes `~/.pillbug/workspace/AGENTS.md`. That file is included in the system instruction for model requests.
+
+## Philosophy
+
+Pillbug is intentionally not a shared multi-agent super-app. The project is aimed at running isolated agents that can be composed at the deployment layer without collapsing into a single runtime.
+
+Current and intended direction:
+
+- Keep one agent, one runtime, and one workspace per container
+- Keep runtime state local to the container unless a feature explicitly needs network communication
+- Add cross-runtime cooperation through explicit A2A channels rather than shared sessions or shared workspaces
+- Expose telemetry and narrow control endpoints so a separate dashboard app can observe and operate agents from another container
+- Keep the runtime useful in headless deployments without requiring a bundled web UI
+
+This philosophy is expanded in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
 
 ## Architecture
 
