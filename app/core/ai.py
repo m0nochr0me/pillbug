@@ -194,7 +194,7 @@ class GeminiChatService:
                 f"workspace: {settings.WORKSPACE_ROOT}",
                 f"available_channels: {', '.join(await get_available_channels_context())}",
                 "---\n",
-            )
+            ),
         )
 
     async def discover_skills(self) -> list[Skill]:
@@ -378,7 +378,7 @@ class GeminiChatSession:
             upload_config["display_name"] = attachment.display_name.strip()
 
         try:
-            uploaded_file = await self._service.ai_client.aio.files.upload(file=attachment_path, config=upload_config)
+            uploaded_file = await self._service.ai_client.aio.files.upload(file=attachment_path, config=upload_config)  # pyright: ignore[reportArgumentType]
         except Exception:
             logger.exception(
                 f"Failed to upload inbound attachment for Gemini session={self._session_id} path={normalized_attachment_path} source={attachment.source}"
