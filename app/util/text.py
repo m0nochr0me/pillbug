@@ -47,21 +47,26 @@ def convert_ellipsis(text: str) -> str:
     return text.replace("...", "…")
 
 
+def deduplicate_whitespace(text: str) -> str:
+    """Replace multiple whitespace characters with a single space."""
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def slight_cleanup_text(text: str) -> str:
     """
-    Cleans up the text by normalizing Unicode characters and unquoting URL-encoded strings.
+    Cleans up the text by normalizing Unicode characters and unquoting URL-encoded strings and normalizing whitespace.
     """
     text = unicodedata.normalize("NFKD", text)
     text = "".join([c for c in text if not unicodedata.combining(c)])
     text = unquote(text)
+    text = deduplicate_whitespace(text)
     return text.strip()
 
 
 def full_cleanup_text(text: str) -> str:
     """
-    Preprocesses the text by removing unwanted characters and normalizing whitespace.
+    Preprocesses the text by removing unwanted characters.
     """
     text = slight_cleanup_text(text)
     text = re.sub(r"[!\"#$%&'()*+,-./:;<=>?@\[\\\]^_`{|}~]", "", text)
-    text = re.sub(r"\s+", " ", text)
     return text.strip()
