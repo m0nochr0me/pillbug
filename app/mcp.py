@@ -17,6 +17,7 @@ from fastapi.responses import RedirectResponse
 from fastmcp import Context, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.server import create_proxy
+from fastmcp.server.middleware.logging import LoggingMiddleware
 
 from app import __project__, __version__
 from app.core.config import settings
@@ -47,6 +48,7 @@ from app.util.workspace import (
 __all__ = ("create_mcp_server", "mcp", "mcp_app")
 
 mcp = FastMCP(f"{__project__}-composition-server")
+mcp.add_middleware(LoggingMiddleware(include_payloads=True, max_payload_length=1000))
 
 _TODO_LIST_STATE_KEY = "todo_list"
 
@@ -168,7 +170,7 @@ async def list_files(
                     "path": _display_path(entry),
                     "type": entry_type,
                     "size": entry.stat().st_size if entry.is_file() else None,
-                }
+                },
             )
 
         return entries
@@ -335,7 +337,7 @@ async def search_file_regex(
                     "end_column": match.end(),
                     "match": match.group(0),
                     "line_text": line,
-                }
+                },
             )
 
             if len(matches) >= max_results:
