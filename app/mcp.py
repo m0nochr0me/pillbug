@@ -26,6 +26,8 @@ from app.core.url_shortener import local_url_shortener
 from app.middleware.compactor import CompactorMiddleware
 from app.runtime.channels import get_channel_plugin
 from app.runtime.scheduler import task_scheduler
+from app.schema.control import AuthScope, AuthTokenBinding, RuntimeAuthConfiguration
+from app.schema.telemetry import RuntimeMetadata
 from app.schema.todo import TodoItem, TodoListSnapshot
 from app.util.web import (
     build_fetch_output_path,
@@ -128,6 +130,48 @@ def _serialize_todo_snapshot(action: str, snapshot: TodoListSnapshot) -> dict[st
         "explanation": snapshot.explanation,
         "updated_at": snapshot.updated_at.isoformat(),
     }
+
+
+def _build_runtime_metadata() -> RuntimeMetadata:
+    return RuntimeMetadata(
+        runtime_id=settings.runtime_id,
+        project=__project__,
+        version=__version__,
+        timezone=settings.TIMEZONE,
+        workspace_root=str(settings.WORKSPACE_ROOT),
+        enabled_channels=settings.enabled_channels(),
+    )
+
+
+def _build_runtime_auth_configuration() -> RuntimeAuthConfiguration:
+    token_bindings: list[AuthTokenBinding] = []
+    dashboard_token = settings.dashboard_bearer_token()
+    a2a_token = settings.a2a_bearer_token()
+
+    if dashboard_token is not None:
+        token_bindings.append(
+            AuthTokenBinding(
+                token_name="dashboard-bearer",
+                principal="dashboard",
+                scopes=(AuthScope.TELEMETRY, AuthScope.CONTROL),
+            )
+        )
+
+    if a2a_token is not None:
+        token_bindings.append(
+            AuthTokenBinding(
+                token_name="a2a-bearer",
+                principal="a2a",
+                scopes=(AuthScope.A2A,),
+            )
+        )
+
+    return RuntimeAuthConfiguration(
+        token_bindings=tuple(token_bindings),
+        telemetry_protected=dashboard_token is not None,
+        control_protected=dashboard_token is not None,
+        a2a_protected=a2a_token is not None,
+    )
 
 
 @mcp.resource("resource://info")
@@ -728,6 +772,9 @@ mcp_app = FastAPI(
     openapi_url=None,
     lifespan=_mcp_http_app.lifespan,
 )
+
+mcp_app.state.runtime_metadata = _build_runtime_metadata()
+mcp_app.state.runtime_auth_configuration = _build_runtime_auth_configuration()
 
 
 @mcp_app.get(f"{settings.mcp_shortener_route_prefix()}/{{token}}", include_in_schema=False)

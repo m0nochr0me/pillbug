@@ -98,6 +98,9 @@ Todo state is scoped to the active MCP session, so each active agent conversatio
 Common environment variables:
 
 - `PB_GEMINI_API_KEY` for Gemini access
+- `PB_RUNTIME_ID` to pin a stable runtime identifier explicitly; when omitted, Pillbug persists one at `~/.pillbug/runtime_id.txt`
+- `PB_DASHBOARD_BEARER_TOKEN` to protect the upcoming dashboard telemetry and control APIs with a single dashboard-scoped bearer token
+- `PB_A2A_BEARER_TOKEN` to reserve a distinct bearer token for future runtime-to-runtime A2A traffic
 - `PB_ENABLED_CHANNELS` to enable `cli` and registered external channels
 - `PB_CHANNEL_PLUGIN_FACTORIES` for `channel=package.module:factory` plugin mappings
 - `PB_SECURITY_PATTERNS_PATH` to tune inbound warning and block regexes loaded by the pipeline at runtime startup and on file change

@@ -63,6 +63,7 @@ async def main(*args) -> None:
         print(__banner__)
         if "cli" in settings.enabled_channels():
             print("CLI channel ready. Type /exit to quit.")
+        logger.info(f"Runtime identity: {settings.runtime_id}")
         logger.info(f"Active channels: {', '.join(settings.enabled_channels())}")
 
         application_loop = ApplicationLoop(chat_service=chat_service)
@@ -88,10 +89,12 @@ async def managed_scheduler() -> AsyncIterator[None]:
 
 
 def workspace_init() -> None:
+    settings.BASE_DIR.mkdir(parents=True, exist_ok=True)
     settings.WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
     settings.LOG_DIR.mkdir(parents=True, exist_ok=True)
     settings.SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     settings.TASKS_DIR.mkdir(parents=True, exist_ok=True)
+    settings.ensure_runtime_identity()
 
     ensure_security_patterns_file()
 

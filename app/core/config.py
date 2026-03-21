@@ -4,12 +4,16 @@ Config Maker
 
 # pyright: basic
 
+import re
 import sys
 from datetime import datetime
+from functools import cached_property
 from pathlib import Path
+from typing import Self
 from urllib.parse import quote
+from uuid import uuid4
 
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.schema.log_entry import LogEntry
@@ -17,8 +21,25 @@ from app.schema.log_entry import LogEntry
 __all__ = ("settings",)
 
 
+_RUNTIME_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$")
+_MIN_BEARER_TOKEN_LENGTH = 16
+
+
 def _split_csv(value: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
+def _validate_runtime_identifier(value: str, *, source: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"{source} must not be empty")
+
+    if not _RUNTIME_ID_PATTERN.fullmatch(normalized):
+        raise ValueError(
+            f"{source} must start with an alphanumeric character and only contain letters, numbers, '.', '_' or '-'"
+        )
+
+    return normalized
 
 
 class Settings(BaseSettings):
@@ -39,6 +60,11 @@ class Settings(BaseSettings):
     TASKS_STORE_PATH: Path = TASKS_DIR / "agent_tasks.json"
     SECURITY_PATTERNS_PATH: Path = BASE_DIR / "security_patterns.json"
     WORKSPACE_ROOT: Path = BASE_DIR / "workspace"
+
+    RUNTIME_ID: str | None = None
+    RUNTIME_ID_PATH: Path = BASE_DIR / "runtime_id.txt"
+    DASHBOARD_BEARER_TOKEN: SecretStr | None = None
+    A2A_BEARER_TOKEN: SecretStr | None = None
 
     GEMINI_MODEL: str = "gemini-3.1-pro-preview"
     GEMINI_TEMPERATURE: float = 1.0
@@ -86,9 +112,84 @@ class Settings(BaseSettings):
         case_sensitive=True,
     )
 
+    @field_validator("RUNTIME_ID")
+    @classmethod
+    def validate_runtime_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+
+        return _validate_runtime_identifier(value, source="PB_RUNTIME_ID")
+
+    @field_validator("DASHBOARD_BEARER_TOKEN", "A2A_BEARER_TOKEN", mode="before")
+    @classmethod
+    def validate_bearer_tokens(cls, value: str | SecretStr | None, info: ValidationInfo) -> str | None:
+        if value is None:
+            return None
+
+        token = value.get_secret_value() if isinstance(value, SecretStr) else str(value)
+        normalized = token.strip()
+        env_name = f"PB_{info.field_name}"
+
+        if not normalized:
+            raise ValueError(f"{env_name} must not be blank")
+
+        if len(normalized) < _MIN_BEARER_TOKEN_LENGTH:
+            raise ValueError(f"{env_name} must be at least {_MIN_BEARER_TOKEN_LENGTH} characters long")
+
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_auth_configuration(self) -> Self:
+        dashboard_token = self.dashboard_bearer_token()
+        a2a_token = self.a2a_bearer_token()
+
+        if dashboard_token and a2a_token and dashboard_token == a2a_token:
+            raise ValueError(
+                "PB_DASHBOARD_BEARER_TOKEN and PB_A2A_BEARER_TOKEN must differ so dashboard/control access stays isolated from A2A peer access"
+            )
+
+        return self
+
     def enabled_channels(self) -> tuple[str, ...]:
         enabled_channels = _split_csv(self.ENABLED_CHANNELS)
         return enabled_channels or ("cli",)
+
+    @cached_property
+    def runtime_id(self) -> str:
+        if self.RUNTIME_ID is not None:
+            return self.RUNTIME_ID
+
+        runtime_id_path = self.RUNTIME_ID_PATH
+        runtime_id_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if runtime_id_path.is_file():
+            stored_runtime_id = runtime_id_path.read_text(encoding="utf-8").strip()
+            return _validate_runtime_identifier(stored_runtime_id, source=str(runtime_id_path))
+
+        generated_runtime_id = f"pillbug-{uuid4().hex[:12]}"
+        try:
+            with runtime_id_path.open("x", encoding="utf-8") as runtime_id_file:
+                runtime_id_file.write(f"{generated_runtime_id}\n")
+        except FileExistsError:
+            pass
+
+        stored_runtime_id = runtime_id_path.read_text(encoding="utf-8").strip()
+        return _validate_runtime_identifier(stored_runtime_id, source=str(runtime_id_path))
+
+    def ensure_runtime_identity(self) -> str:
+        return self.runtime_id
+
+    def dashboard_bearer_token(self) -> str | None:
+        if self.DASHBOARD_BEARER_TOKEN is None:
+            return None
+
+        return self.DASHBOARD_BEARER_TOKEN.get_secret_value()
+
+    def a2a_bearer_token(self) -> str | None:
+        if self.A2A_BEARER_TOKEN is None:
+            return None
+
+        return self.A2A_BEARER_TOKEN.get_secret_value()
 
     def channel_plugin_factories(self) -> dict[str, str]:
         mappings: dict[str, str] = {}
