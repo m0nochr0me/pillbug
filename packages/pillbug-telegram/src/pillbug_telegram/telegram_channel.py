@@ -11,9 +11,10 @@ from pydantic import field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from shingram.client import AsyncClient
 from shingram.events import Event, normalize
+from shingram.exceptions import TelegramAPIError
 
 from app.core.config import settings
-from app.core.log import logger
+from app.core.log import ThrottledExceptionLogger, logger
 from app.runtime.channels import BaseChannel, register_channel_conversation
 from app.schema.messages import InboundMessage
 from app.util.workspace import async_write_bytes_file, display_path
@@ -24,6 +25,7 @@ _DOWNLOADABLE_EVENT_TYPES = ("photo", "video", "document", "audio", "voice")
 _MAX_TELEGRAM_MESSAGE_CHARS = 4000
 _TELEGRAM_DOWNLOADS_DIR = settings.WORKSPACE_ROOT / "downloads" / "telegram"
 _FILENAME_SANITIZER = re.compile(r"[^A-Za-z0-9._-]+")
+_TRANSIENT_TELEGRAM_LOG_COOLDOWN_SECONDS = 60.0
 _BOT_COMMANDS = (
     {"command": "start", "description": "Check that the bot is ready"},
     {"command": "clear", "description": "Clear the current session"},
@@ -166,6 +168,18 @@ def _build_download_filename(
     return f"{message_prefix}_{safe_stem}{extension}"
 
 
+def _is_transient_telegram_error(exc: BaseException) -> bool:
+    if isinstance(exc, TimeoutError):
+        return True
+
+    if not isinstance(exc, TelegramAPIError):
+        return False
+
+    error_code = str(exc.error_code).upper()
+    description = str(exc.description).lower()
+    return error_code == "HTTP_ERROR" or "network error" in description or "timeout" in description
+
+
 def _render_attachment_text(
     *,
     content_type: str,
@@ -274,6 +288,11 @@ class TelegramChannel(BaseChannel):
         self._client = AsyncClient(self._settings.bot_token)
         self._offset = 0
         self._allowed_chat_ids = frozenset(self._settings.allowed_chat_ids or ())
+        self._failure_logger = ThrottledExceptionLogger(
+            subject="Telegram",
+            is_transient=_is_transient_telegram_error,
+            cooldown_seconds=_TRANSIENT_TELEGRAM_LOG_COOLDOWN_SECONDS,
+        )
 
     async def listen(self) -> AsyncIterator[InboundMessage]:
         if self._settings.delete_webhook_on_start:
@@ -304,8 +323,8 @@ class TelegramChannel(BaseChannel):
                     raise
                 except TimeoutError:
                     continue
-                except Exception:
-                    logger.exception("Telegram polling failed")
+                except Exception as exc:
+                    self._log_telegram_failure(action="polling failed", exc=exc, suppression_key="polling")
                     await asyncio.sleep(1)
                     continue
 
@@ -374,8 +393,12 @@ class TelegramChannel(BaseChannel):
     async def _configure_bot_commands(self) -> None:
         try:
             await self._client.call_async("setMyCommands", commands=list(_BOT_COMMANDS))
-        except Exception:
-            logger.exception("Failed to configure Telegram bot commands")
+        except Exception as exc:
+            self._log_telegram_failure(
+                action="bot command configuration failed",
+                exc=exc,
+                suppression_key="configure_bot_commands",
+            )
             return
 
         logger.info("Configured Telegram bot commands: /start, /clear")
@@ -404,8 +427,13 @@ class TelegramChannel(BaseChannel):
     async def _set_typing(self, chat_id: int) -> None:
         try:
             await self._client.call_async("sendChatAction", chat_id=chat_id, action="typing")
-        except Exception:
-            logger.exception(f"Failed to send Telegram typing status for chat_id={chat_id}")
+        except Exception as exc:
+            self._log_telegram_failure(
+                action="typing status failed",
+                exc=exc,
+                chat_id=chat_id,
+                suppression_key=f"typing:{chat_id}",
+            )
 
     async def _build_inbound_message(self, event: Event) -> InboundMessage | None:
         caption_text = self._caption_text(event)
@@ -547,8 +575,12 @@ class TelegramChannel(BaseChannel):
                 },
             }
         except Exception as exc:
-            logger.exception(
-                f"Failed to download Telegram attachment chat_id={event.chat_id} message_id={event.message_id}"
+            self._log_telegram_failure(
+                action="attachment download failed",
+                exc=exc,
+                chat_id=event.chat_id,
+                message_id=event.message_id,
+                suppression_key=f"attachment:{event.chat_id}:{event.message_id}",
             )
             return {
                 "text": _render_attachment_text(
@@ -565,6 +597,28 @@ class TelegramChannel(BaseChannel):
                     "telegram_attachment_download_error": str(exc),
                 },
             }
+
+    def _log_telegram_failure(
+        self,
+        *,
+        action: str,
+        exc: BaseException,
+        chat_id: int | None = None,
+        message_id: int | None = None,
+        suppression_key: str,
+    ) -> None:
+        context: dict[str, object] = {}
+        if chat_id is not None:
+            context["chat_id"] = chat_id
+        if message_id is not None:
+            context["message_id"] = message_id
+
+        self._failure_logger.log(
+            action=action,
+            exc=exc,
+            suppression_key=suppression_key,
+            context=context,
+        )
 
     def _download_target_path(
         self,
