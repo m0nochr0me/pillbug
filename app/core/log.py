@@ -6,6 +6,9 @@ Logging
 
 import logging
 import sys
+import time
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 
 import loguru
 from loguru import logger as _logger
@@ -14,12 +17,22 @@ from app.core.config import settings
 from app.schema.log_entry import LogEntry
 
 __all__ = (
+    "ThrottledExceptionLogger",
     "configure_standard_logging",
+    "format_exception_summary",
+    "format_failure_message",
     "log_serializer",
     "logger",
     "sink",
     "uvicorn_log_config",
 )
+
+
+@dataclass(slots=True)
+class _ThrottledErrorLogState:
+    error_summary: str
+    last_logged_at: float
+    suppressed_count: int = 0
 
 
 class InterceptHandler(logging.Handler):
@@ -86,6 +99,113 @@ def _normalize_external_logger(name: str) -> None:
     external_logger.handlers.clear()
     external_logger.propagate = True
     external_logger.setLevel(logging.NOTSET)
+
+
+def format_exception_summary(exc: BaseException) -> str:
+    parts = [f"type={type(exc).__name__}"]
+
+    for attr_name in ("error_code", "method", "status_code"):
+        attr_value = getattr(exc, attr_name, None)
+        if attr_value not in (None, ""):
+            parts.append(f"{attr_name}={attr_value}")
+
+    description = getattr(exc, "description", None)
+    if description not in (None, ""):
+        parts.append(f"description={description}")
+    else:
+        message = str(exc).strip()
+        if message:
+            parts.append(f"message={message}")
+
+    return " ".join(parts)
+
+
+def format_failure_message(
+    subject: str,
+    action: str,
+    *,
+    exc: BaseException | None = None,
+    error_summary: str | None = None,
+    context: Mapping[str, object] | None = None,
+) -> str:
+    details = error_summary or format_exception_summary(exc or RuntimeError(action))
+    parts = [f"{subject} {action}", details]
+
+    if context is not None:
+        for key, value in context.items():
+            if value is not None:
+                parts.append(f"{key}={value}")
+
+    return " ".join(parts)
+
+
+class ThrottledExceptionLogger:
+    def __init__(
+        self,
+        *,
+        subject: str,
+        is_transient: Callable[[BaseException], bool],
+        cooldown_seconds: float = 60.0,
+    ) -> None:
+        self._subject = subject
+        self._is_transient = is_transient
+        self._cooldown_seconds = cooldown_seconds
+        self._state_by_key: dict[str, _ThrottledErrorLogState] = {}
+
+    def log(
+        self,
+        *,
+        action: str,
+        exc: BaseException,
+        suppression_key: str,
+        context: Mapping[str, object] | None = None,
+    ) -> None:
+        if self._is_transient(exc):
+            self._log_transient_warning(
+                action=action,
+                exc=exc,
+                suppression_key=suppression_key,
+                context=context,
+            )
+            return
+
+        logger.exception(format_failure_message(self._subject, action, exc=exc, context=context))
+
+    def _log_transient_warning(
+        self,
+        *,
+        action: str,
+        exc: BaseException,
+        suppression_key: str,
+        context: Mapping[str, object] | None,
+    ) -> None:
+        error_summary = format_exception_summary(exc)
+        now = time.monotonic()
+        previous_state = self._state_by_key.get(suppression_key)
+
+        if (
+            previous_state is not None
+            and previous_state.error_summary == error_summary
+            and now - previous_state.last_logged_at < self._cooldown_seconds
+        ):
+            previous_state.suppressed_count += 1
+            return
+
+        if previous_state is not None and previous_state.suppressed_count > 0:
+            logger.warning(
+                format_failure_message(
+                    self._subject,
+                    f"{action} repeated {previous_state.suppressed_count} additional times",
+                    error_summary=previous_state.error_summary,
+                    context=context,
+                )
+            )
+
+        logger.warning(format_failure_message(self._subject, action, error_summary=error_summary, context=context))
+        self._state_by_key[suppression_key] = _ThrottledErrorLogState(
+            error_summary=error_summary,
+            last_logged_at=now,
+        )
 
 
 def log_serializer(record: loguru.Record) -> str:
