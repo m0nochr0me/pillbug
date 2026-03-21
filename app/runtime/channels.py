@@ -5,6 +5,7 @@ Channel management for Pillbug.
 import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from importlib import import_module
 from typing import Protocol, cast
 
@@ -32,6 +33,8 @@ class ChannelPlugin(Protocol):
         response_text: str,
     ) -> None: ...
 
+    def response_presence(self, inbound_message: InboundMessage) -> AbstractAsyncContextManager[None]: ...
+
     async def close(self) -> None: ...
 
 
@@ -58,6 +61,11 @@ class BaseChannel(ABC):
         response_text: str,
     ) -> None:
         raise NotImplementedError
+
+    @asynccontextmanager
+    async def response_presence(self, inbound_message: InboundMessage) -> AsyncIterator[None]:
+        del inbound_message
+        yield
 
     async def close(self) -> None:
         return None

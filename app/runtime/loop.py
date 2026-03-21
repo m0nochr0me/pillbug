@@ -158,10 +158,11 @@ class ApplicationLoop:
         session = await self._get_session(batch.session_key)
 
         try:
-            response = await session.send_message(
-                processed_message.model_input,
-                message_metadata=[message.metadata for message in batch.messages],
-            )
+            async with channel.response_presence(batch.last_message):
+                response = await session.send_message(
+                    processed_message.model_input,
+                    message_metadata=[message.metadata for message in batch.messages],
+                )
         except Exception:
             logger.exception(f"Failed to process inbound message for session={batch.session_key}")
             await channel.send_response(

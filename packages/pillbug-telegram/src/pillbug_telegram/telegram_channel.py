@@ -4,6 +4,7 @@ import asyncio
 import mimetypes
 import re
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Annotated
 
@@ -26,6 +27,8 @@ _MAX_TELEGRAM_MESSAGE_CHARS = 4000
 _TELEGRAM_DOWNLOADS_DIR = settings.WORKSPACE_ROOT / "downloads" / "telegram"
 _FILENAME_SANITIZER = re.compile(r"[^A-Za-z0-9._-]+")
 _TRANSIENT_TELEGRAM_LOG_COOLDOWN_SECONDS = 60.0
+_TYPING_INTERVAL_SECONDS = 5.0
+_MAX_TYPING_ACTIONS = 10
 _BOT_COMMANDS = (
     {"command": "start", "description": "Check that the bot is ready"},
     {"command": "clear", "description": "Clear the current session"},
@@ -359,6 +362,24 @@ class TelegramChannel(BaseChannel):
         reply_to_message_id = inbound_message.metadata.get("telegram_message_id")
         await self._send_text(chat_id=chat_id, response_text=response_text, reply_to_message_id=reply_to_message_id)
 
+    @asynccontextmanager
+    async def response_presence(self, inbound_message: InboundMessage) -> AsyncIterator[None]:
+        chat_id = inbound_message.metadata.get("telegram_chat_id")
+        if not isinstance(chat_id, int):
+            yield
+            return
+
+        typing_task = asyncio.create_task(
+            self._send_typing_presence(chat_id),
+            name=f"telegram-typing:{chat_id}",
+        )
+        try:
+            yield
+        finally:
+            typing_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await typing_task
+
     async def close(self) -> None:
         await self._client.close()
 
@@ -421,7 +442,6 @@ class TelegramChannel(BaseChannel):
             await self._send_text(chat_id=event.chat_id, response_text="ok", reply_to_message_id=event.message_id)
             return None
 
-        await self._set_typing(event.chat_id)
         return await self._build_inbound_message(event)
 
     async def _set_typing(self, chat_id: int) -> None:
@@ -434,6 +454,14 @@ class TelegramChannel(BaseChannel):
                 chat_id=chat_id,
                 suppression_key=f"typing:{chat_id}",
             )
+
+    async def _send_typing_presence(self, chat_id: int) -> None:
+        for attempt in range(_MAX_TYPING_ACTIONS):
+            await self._set_typing(chat_id)
+            if attempt == _MAX_TYPING_ACTIONS - 1:
+                return
+
+            await asyncio.sleep(_TYPING_INTERVAL_SECONDS)
 
     async def _build_inbound_message(self, event: Event) -> InboundMessage | None:
         caption_text = self._caption_text(event)
