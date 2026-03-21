@@ -175,11 +175,11 @@ def _build_runtime_auth_configuration() -> RuntimeAuthConfiguration:
 
 
 @mcp.resource("resource://info")
-def get_greeting() -> str:
+def get_runtime_info() -> str:
     """
-    Provides an info about the CLI application.
+    Provides a runtime info
     """
-    return f"{__project__} v{__version__} - AI assistant for terminal"
+    return _build_runtime_metadata().model_dump_json()
 
 
 @mcp.tool
