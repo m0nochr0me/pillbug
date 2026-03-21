@@ -33,7 +33,10 @@ class ChannelPlugin(Protocol):
         response_text: str,
     ) -> None: ...
 
-    def response_presence(self, inbound_message: InboundMessage) -> AbstractAsyncContextManager[None]: ...
+    def response_presence(
+        self,
+        inbound_message: InboundMessage,
+    ) -> AbstractAsyncContextManager[None]: ...
 
     async def close(self) -> None: ...
 
@@ -63,7 +66,10 @@ class BaseChannel(ABC):
         raise NotImplementedError
 
     @asynccontextmanager
-    async def response_presence(self, inbound_message: InboundMessage) -> AsyncIterator[None]:
+    async def response_presence(
+        self,
+        inbound_message: InboundMessage,
+    ) -> AsyncIterator[None]:
         del inbound_message
         yield
 
@@ -105,11 +111,19 @@ class CliChannel(BaseChannel):
                 metadata={"source": "stdin"},
             )
 
-    async def send_message(self, conversation_id: str, message_text: str) -> None:
+    async def send_message(
+        self,
+        conversation_id: str,
+        message_text: str,
+    ) -> None:
         del conversation_id
         await asyncio.to_thread(print, f"{self._assistant_prefix}{message_text}")
 
-    async def send_response(self, inbound_message: InboundMessage, response_text: str) -> None:
+    async def send_response(
+        self,
+        inbound_message: InboundMessage,
+        response_text: str,
+    ) -> None:
         await self.send_message(inbound_message.conversation_id, response_text)
 
 
@@ -120,7 +134,6 @@ _active_channels: dict[str, ChannelPlugin] = {}
 _known_channel_conversations: dict[str, set[str]] = {}
 _channel_conversation_sync_tasks: dict[str, asyncio.Task[None]] = {}
 _KNOWN_CHANNEL_CONVERSATIONS_CACHE_KEY_PREFIX = "runtime:channel-conversations"
-_KNOWN_CHANNEL_CONVERSATIONS_CACHE_TTL_SECONDS = settings.CACHE_TTL
 
 
 def _known_channel_conversations_cache_key(channel_name: str) -> str:
@@ -144,11 +157,14 @@ async def _sync_known_channel_conversations(channel_name: str) -> None:
     await cache.set(
         _known_channel_conversations_cache_key(channel_name),
         known_conversations,
-        ttl=_KNOWN_CHANNEL_CONVERSATIONS_CACHE_TTL_SECONDS,
+        ttl=settings.CACHE_TTL,
     )
 
 
-def _track_channel_conversation_sync_task(channel_name: str, task: asyncio.Task[None]) -> None:
+def _track_channel_conversation_sync_task(
+    channel_name: str,
+    task: asyncio.Task[None],
+) -> None:
     _channel_conversation_sync_tasks[channel_name] = task
 
     def cleanup(done_task: asyncio.Task[None]) -> None:
@@ -200,7 +216,11 @@ def _get_channel_factories() -> dict[str, ChannelFactory]:
     return factories
 
 
-def get_channel_plugin(channel_name: str, *, create: bool = False) -> ChannelPlugin | None:
+def get_channel_plugin(
+    channel_name: str,
+    *,
+    create: bool = False,
+) -> ChannelPlugin | None:
     channel = _active_channels.get(channel_name)
     if channel is not None or not create:
         return channel
@@ -223,7 +243,10 @@ def unregister_channel_plugin(channel_name: str) -> None:
     _active_channels.pop(channel_name, None)
 
 
-def register_channel_conversation(channel_name: str, conversation_id: str) -> None:
+def register_channel_conversation(
+    channel_name: str,
+    conversation_id: str,
+) -> None:
     normalized_conversation_id = conversation_id.strip()
     if not normalized_conversation_id:
         return
