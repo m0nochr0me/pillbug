@@ -22,7 +22,8 @@ from pydantic import ValidationError
 from app.core.config import settings
 from app.core.log import logger
 from app.runtime.channels import get_available_channels_context
-from app.schema.ai import ChatResponse, ChatSessionSnapshot, InboundAttachment, Skill
+from app.schema.ai import ChatResponse, ChatSessionSnapshot, ChatSessionUsageTotals, InboundAttachment, Skill
+from app.util.base_dir import get_module_root
 from app.util.workspace import resolve_path_within_root
 
 __all__ = (
@@ -130,20 +131,28 @@ class GeminiChatService:
     def __init__(self) -> None:
         self.ai_client = genai.Client(api_key=settings.GEMINI_API_KEY)
         self._sessions_dir = settings.SESSIONS_DIR
+        self._prompts_dir = get_module_root("app") / "prompts"
 
     def create_session(
         self,
         session_id: str,
         history: list[types.Content] | None = None,
+        usage_totals: ChatSessionUsageTotals | None = None,
     ) -> GeminiChatSession:
-        return GeminiChatSession(self, session_id=session_id, history=history)
+        return GeminiChatSession(self, session_id=session_id, history=history, usage_totals=usage_totals)
 
     async def restore_session(self, session_id: str) -> GeminiChatSession:
-        history = await self._load_session_history(session_id)
+        snapshot = await self._load_session_snapshot(session_id)
+        history = snapshot.history if snapshot is not None else None
+        usage_totals = snapshot.usage_totals if snapshot is not None else None
         if history:
             logger.info(f"Restored session history for {session_id} with {len(history)} messages")
 
-        return self.create_session(session_id=session_id, history=history or None)
+        return self.create_session(
+            session_id=session_id,
+            history=history or None,
+            usage_totals=usage_totals,
+        )
 
     async def reset_session(self, session_id: str) -> GeminiChatSession:
         await self._delete_session_history(session_id)
@@ -153,27 +162,26 @@ class GeminiChatService:
         self,
         session_id: str,
         history: list[types.Content],
+        usage_totals: ChatSessionUsageTotals,
     ) -> None:
         self._sessions_dir.mkdir(parents=True, exist_ok=True)
-        snapshot = ChatSessionSnapshot(session_id=session_id, history=history)
+        snapshot = ChatSessionSnapshot(session_id=session_id, history=history, usage_totals=usage_totals)
         session_path = self._get_session_path(session_id)
 
         async with aiofile.AIOFile(session_path, "w", encoding="utf-8") as session_file:
             await session_file.write(snapshot.model_dump_json(indent=2))
 
-    async def _load_session_history(self, session_id: str) -> list[types.Content] | None:
+    async def _load_session_snapshot(self, session_id: str) -> ChatSessionSnapshot | None:
         session_path = self._get_session_path(session_id)
         if not session_path.is_file():
             return None
 
         try:
             async with aiofile.AIOFile(session_path, "r", encoding="utf-8") as session_file:
-                snapshot = ChatSessionSnapshot.model_validate_json(str(await session_file.read()))
+                return ChatSessionSnapshot.model_validate_json(str(await session_file.read()))
         except Exception:
             logger.exception(f"Failed to restore session history from {session_path}")
             return None
-
-        return snapshot.history
 
     async def _delete_session_history(self, session_id: str) -> None:
         session_path = self._get_session_path(session_id)
@@ -182,6 +190,18 @@ class GeminiChatService:
 
     def _get_session_path(self, session_id: str):
         return self._sessions_dir / quote(session_id, safe="")
+
+    async def read_prompt_text(self, prompt_name: str) -> str:
+        normalized_prompt_name = Path(prompt_name).name
+        if normalized_prompt_name != prompt_name:
+            raise ValueError(f"Prompt name must not contain directory segments: {prompt_name}")
+
+        prompt_path = self._prompts_dir / normalized_prompt_name
+        if not prompt_path.is_file():
+            raise FileNotFoundError(f"Prompt file not found: {prompt_path}")
+
+        async with aiofile.AIOFile(prompt_path, "r", encoding="utf-8") as prompt_file:
+            return str(await prompt_file.read())
 
     async def get_base_context(self) -> str:
         now = datetime.now(ZoneInfo(settings.TIMEZONE))
@@ -254,9 +274,13 @@ class GeminiChatSession:
         service: GeminiChatService,
         session_id: str,
         history: list[types.Content] | None = None,
+        usage_totals: ChatSessionUsageTotals | None = None,
     ) -> None:
         self._service = service
         self._session_id = session_id
+        self._usage_totals = (
+            usage_totals.model_copy(deep=True) if usage_totals is not None else ChatSessionUsageTotals()
+        )
         self._mcp_client = Client(
             StreamableHttpTransport(
                 f"http://{settings.MCP_HOST}:{settings.MCP_PORT}/mcp",
@@ -290,6 +314,7 @@ class GeminiChatSession:
             )
 
         full_response = response.text or self._extract_parts_text(response.parts)
+        self._usage_totals.add_usage_metadata(response.usage_metadata)
         await self._persist_history()
         if full_response.strip():
             return ChatResponse(
@@ -400,9 +425,19 @@ class GeminiChatSession:
 
     async def _persist_history(self) -> None:
         try:
-            await self._service.save_session_history(self._session_id, self._get_curated_history())
+            await self._service.save_session_history(
+                self._session_id,
+                self._get_curated_history(),
+                self._usage_totals,
+            )
         except Exception:
             logger.exception(f"Failed to persist session history for {self._session_id}")
+
+    def get_usage_totals(self) -> ChatSessionUsageTotals:
+        return self._usage_totals.model_copy(deep=True)
+
+    def render_usage_report(self) -> str:
+        return self._usage_totals.to_display_text()
 
     def _get_curated_history(self) -> list[types.Content]:
         history = self._chat.get_history(curated=True)

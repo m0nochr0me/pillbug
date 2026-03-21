@@ -14,6 +14,8 @@ from app.runtime.channels import (
 from app.runtime.pipeline import InboundProcessingPipeline
 from app.schema.messages import InboundBatch, InboundMessage, ProcessedInboundMessage
 
+_SUMMARIZE_PROMPT_NAME = "summarize.prompt.md"
+
 
 @dataclass(slots=True)
 class _ChannelClosed:
@@ -143,10 +145,7 @@ class ApplicationLoop:
         batch = processed_message.batch
         channel = self._channel_by_name[batch.channel_name]
 
-        if self._is_clear_command(batch.raw_text):
-            self._sessions[batch.session_key] = await self._chat_service.reset_session(batch.session_key)
-            await channel.send_response(batch.last_message, "Session cleared. Started a new chat session.")
-            logger.info(f"Cleared session history for {batch.session_key}")
+        if await self._handle_command(batch, channel):
             return
 
         if processed_message.security.blocked:
@@ -157,11 +156,68 @@ class ApplicationLoop:
 
         session = await self._get_session(batch.session_key)
 
+        await self._send_session_response(
+            channel=channel,
+            batch=batch,
+            session=session,
+            model_input=processed_message.model_input,
+            message_metadata=[message.metadata for message in batch.messages],
+        )
+
+    async def _handle_command(self, batch: InboundBatch, channel: ChannelPlugin) -> bool:
+        command = self._recognized_command(batch.raw_text)
+        if command is None:
+            return False
+
+        if command == "/clear":
+            self._sessions[batch.session_key] = await self._chat_service.reset_session(batch.session_key)
+            await channel.send_response(batch.last_message, "Session cleared. Started a new chat session.")
+            logger.info(f"Cleared session history for {batch.session_key}")
+            return True
+
+        session = await self._get_session(batch.session_key)
+
+        if command == "/usage":
+            await channel.send_response(batch.last_message, session.render_usage_report())
+            logger.info(f"Reported session token usage for {batch.session_key}")
+            return True
+
+        if command == "/summarize":
+            try:
+                summarize_prompt = await self._chat_service.read_prompt_text(_SUMMARIZE_PROMPT_NAME)
+            except Exception:
+                logger.exception(f"Failed to load summarize prompt for {batch.session_key}")
+                await channel.send_response(
+                    batch.last_message,
+                    "I could not load the summarize prompt right now. Please try again.",
+                )
+                return True
+
+            logger.info(f"Running summarize prompt for {batch.session_key}")
+            await self._send_session_response(
+                channel=channel,
+                batch=batch,
+                session=session,
+                model_input=summarize_prompt,
+            )
+            return True
+
+        return False
+
+    async def _send_session_response(
+        self,
+        *,
+        channel: ChannelPlugin,
+        batch: InboundBatch,
+        session: GeminiChatSession,
+        model_input: str,
+        message_metadata: list[dict[str, object]] | None = None,
+    ) -> None:
         try:
             async with channel.response_presence(batch.last_message):
                 response = await session.send_message(
-                    processed_message.model_input,
-                    message_metadata=[message.metadata for message in batch.messages],
+                    model_input,
+                    message_metadata=message_metadata,
                 )
         except Exception:
             logger.exception(f"Failed to process inbound message for session={batch.session_key}")
@@ -190,8 +246,12 @@ class ApplicationLoop:
         self._sessions[session_key] = session
         return session
 
-    def _is_clear_command(self, raw_text: str) -> bool:
-        return raw_text.strip().lower() == "/clear"
+    def _recognized_command(self, raw_text: str) -> str | None:
+        normalized_text = raw_text.strip().lower()
+        if normalized_text in {"/clear", "/summarize", "/usage"}:
+            return normalized_text
+
+        return None
 
     def _render_security_rejection(self, processed_message: ProcessedInboundMessage) -> str:
         reasons = "; ".join(processed_message.security.reasons)
