@@ -174,7 +174,7 @@ def _build_runtime_auth_configuration() -> RuntimeAuthConfiguration:
     )
 
 
-@mcp.resource("resource://info")
+@mcp.resource("resource://runtime_info")
 def get_runtime_info() -> str:
     """
     Provides a runtime info
