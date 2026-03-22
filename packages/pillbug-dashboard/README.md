@@ -22,18 +22,18 @@ Example:
 
 ```json
 {
-	"runtimes": [
-		{
-			"runtime_id": "runtime-a",
-			"label": "Build runtime A",
-			"base_url": "http://runtime-a:8000",
-			"dashboard_bearer_token": "dashboard-token-a"
-		},
-		{
-			"runtime_id": "runtime-b",
-			"base_url": "http://runtime-b:8000"
-		}
-	]
+ "runtimes": [
+  {
+   "runtime_id": "runtime-a",
+   "label": "Build runtime A",
+   "base_url": "http://runtime-a:8000",
+   "dashboard_bearer_token": "dashboard-token-a"
+  },
+  {
+   "runtime_id": "runtime-b",
+   "base_url": "http://runtime-b:8000"
+  }
+ ]
 }
 ```
 
