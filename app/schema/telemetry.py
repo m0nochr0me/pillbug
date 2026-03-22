@@ -167,7 +167,7 @@ class TaskRunTelemetry(BaseModel):
 class AgentTaskTelemetryEntry(BaseModel):
     task_id: str = Field(min_length=1, description="Stable task identifier.")
     name: str = Field(min_length=1, description="Operator-visible task name.")
-    schedule_kind: Literal["cron", "delayed"] = Field(description="Normalized schedule kind for the task.")
+    schedule_kind: Literal["cron", "delayed", "perpetual"] = Field(description="Normalized schedule kind for the task.")
     enabled: bool = Field(default=True, description="Whether the task is currently enabled.")
     revision: int = Field(ge=1, description="Current task definition revision.")
     created_at: datetime = Field(description="UTC timestamp when the task was created.")
