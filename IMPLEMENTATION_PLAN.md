@@ -145,7 +145,7 @@ Acceptance criteria:
 
 ## Phase 4: A2A Channel MVP
 
-Implement A2A as a channel plugin so cross-runtime collaboration stays aligned with the existing message pipeline.
+Implement [A2A Protocol](https://a2a-protocol.org/latest/specification/) as a channel plugin so cross-runtime collaboration stays aligned with the existing message pipeline.
 
 Channel behavior:
 
