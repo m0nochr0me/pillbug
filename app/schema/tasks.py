@@ -74,7 +74,7 @@ class AgentTaskDefinition(BaseModel):
 
     @property
     def resolved_session_id(self) -> str:
-        return self.session_id
+        return f"{self.session_id}"
 
 
 class AgentTaskStore(BaseModel):
