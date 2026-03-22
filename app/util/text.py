@@ -49,7 +49,7 @@ def convert_ellipsis(text: str) -> str:
 
 def deduplicate_whitespace(text: str) -> str:
     """Replace multiple whitespace characters with a single space."""
-    return re.sub(r"\s+", " ", text).strip()
+    return re.sub(r"\s{3,}", " ", text).strip()
 
 
 def slight_cleanup_text(text: str) -> str:

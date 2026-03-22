@@ -7,6 +7,7 @@ from typing import Any
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from app.util.base_dir import get_module_root
+from app.util.text import deduplicate_whitespace
 
 __all__ = ("jinja_env", "render_template")
 
@@ -18,4 +19,5 @@ jinja_env = Environment(
 
 
 def render_template(template_name: str, /, **context: Any) -> str:
-    return jinja_env.get_template(template_name).render(**context)
+    rendered = jinja_env.get_template(template_name).render(**context)
+    return deduplicate_whitespace(rendered)
