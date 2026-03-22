@@ -30,6 +30,17 @@
     <main class="responsive dashboard-main">
       {% block content %}{% endblock %}
     </main>
+    <div id="dashboard-confirm-overlay" class="overlay blur"></div>
+    <dialog id="dashboard-confirm-dialog" class="dashboard-confirm-dialog no-round" aria-labelledby="dashboard-confirm-title">
+      <p class="eyebrow">CONFIRM ACTION</p>
+      <h5 id="dashboard-confirm-title">Confirm action</h5>
+      <div id="dashboard-confirm-message" class="muted-copy"></div>
+      <nav class="right-align no-space dashboard-confirm-actions">
+        <button id="dashboard-confirm-cancel" type="button" class="transparent link">Cancel</button>
+        <button id="dashboard-confirm-submit" type="button" class="transparent link">Confirm</button>
+      </nav>
+    </dialog>
+    <script defer src="{{ url_for('static', path='/js/app/confirm-dialog.js') }}"></script>
     {% block scripts %}{% endblock %}
   </body>
 </html>

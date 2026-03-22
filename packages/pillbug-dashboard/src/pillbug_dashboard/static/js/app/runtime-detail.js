@@ -61,6 +61,13 @@
         },
       },
       methods: {
+        async confirmAction(options) {
+          if (!window.PillbugDashboardConfirm || typeof window.PillbugDashboardConfirm.open !== "function") {
+            return false;
+          }
+
+          return window.PillbugDashboardConfirm.open(options);
+        },
         statusLabel(status) {
           if (status && status.healthy) {
             return "Healthy";
@@ -155,7 +162,13 @@
           }
         },
         async clearSession(session) {
-          const confirmed = window.confirm(`Clear session ${session.session_key}? Pending messages in the runtime buffer will be dropped.`);
+          const confirmed = await this.confirmAction({
+            title: `Clear ${session.session_key}?`,
+            message: "Pending messages in the runtime buffer will be dropped for this tracked session.",
+            confirmLabel: "Clear session",
+            cancelLabel: "Cancel",
+            tone: "danger",
+          });
           if (!confirmed) {
             return;
           }
@@ -243,10 +256,26 @@
         },
         async requestRuntimeAction(action) {
           const prompts = {
-            drain: "Request runtime drain? New work will stop after the current queue clears.",
-            shutdown: "Request runtime shutdown? The remote process will begin stopping immediately.",
+            drain: {
+              title: "Request runtime drain?",
+              message: "New work will stop after the current queue clears.",
+              confirmLabel: "Request drain",
+              cancelLabel: "Cancel",
+            },
+            shutdown: {
+              title: "Request runtime shutdown?",
+              message: "The remote process will begin stopping immediately.",
+              confirmLabel: "Request shutdown",
+              cancelLabel: "Cancel",
+              tone: "danger",
+            },
           };
-          const confirmed = window.confirm(prompts[action] || "Proceed?");
+          const confirmed = await this.confirmAction(prompts[action] || {
+            title: "Proceed?",
+            message: "Confirm this runtime action.",
+            confirmLabel: "Confirm",
+            cancelLabel: "Cancel",
+          });
           if (!confirmed) {
             return;
           }

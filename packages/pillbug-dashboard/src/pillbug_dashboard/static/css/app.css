@@ -318,6 +318,32 @@ body.dashboard-shell th {
   border-left: 5px solid var(--error);
 }
 
+.dashboard-confirm-dialog {
+  width: min(28rem, calc(100vw - 2rem));
+  border: 1px solid rgba(77, 100, 98, 0.42);
+  background:
+    linear-gradient(180deg, rgba(20, 29, 35, 0.98), rgba(11, 16, 20, 0.98)),
+    linear-gradient(135deg, rgba(105, 240, 209, 0.08), rgba(127, 216, 255, 0.05));
+  box-shadow: 0 1.6rem 3rem rgba(0, 0, 0, 0.34);
+}
+
+.dashboard-confirm-dialog h5 {
+  margin-top: 0.25rem;
+  margin-bottom: 0.75rem;
+}
+
+.dashboard-confirm-dialog .muted-copy {
+  line-height: 1.65;
+}
+
+.dashboard-confirm-actions {
+  margin-top: 1.25rem;
+}
+
+.danger-text {
+  color: var(--error) !important;
+}
+
 .timeline-list {
   display: flex;
   flex-direction: column;

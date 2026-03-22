@@ -81,6 +81,13 @@
         },
       },
       methods: {
+        async confirmAction(options) {
+          if (!window.PillbugDashboardConfirm || typeof window.PillbugDashboardConfirm.open !== "function") {
+            return false;
+          }
+
+          return window.PillbugDashboardConfirm.open(options);
+        },
         statusLabel(runtime) {
           if (runtime.status && runtime.status.healthy) {
             return "Healthy";
@@ -212,7 +219,13 @@
             return;
           }
 
-          const confirmed = window.confirm(`Remove runtime ${registration.runtime_id} from the dashboard registry?`);
+          const confirmed = await this.confirmAction({
+            title: `Remove ${registration.runtime_id}?`,
+            message: "This removes the runtime from the local dashboard registry. It does not stop the remote Pillbug process.",
+            confirmLabel: "Remove",
+            cancelLabel: "Cancel",
+            tone: "danger",
+          });
           if (!confirmed) {
             return;
           }
