@@ -592,21 +592,15 @@ class AgentTaskScheduler:
                 "This is a one-shot delayed task. It will be cancelled after this execution, so action should be cancel."
             )
 
-        return "\n".join(
-            (
-                "Scheduled background task execution.",
-                f"task_id: {definition.task_id}",
-                f"task_name: {definition.name}",
-                f"task_type: {self._model_task_type(definition.schedule)}",
-                f"schedule: {schedule_description}",
-                f"session_id: {definition.resolved_session_id}",
-                "",
-                "Use MCP tools as needed to complete the task.",
-                response_contract,
-                "",
-                "Task prompt:",
-                definition.prompt,
-            )
+        return self._chat_service.render_prompt_text(
+            "task.prompt.md",
+            task_id=definition.task_id,
+            task_name=definition.name,
+            task_type=self._model_task_type(definition.schedule),
+            schedule_description=schedule_description,
+            session_id=definition.resolved_session_id,
+            response_contract=response_contract,
+            task_prompt=definition.prompt,
         )
 
     def _schedule_description(self, schedule: TaskSchedule) -> str:

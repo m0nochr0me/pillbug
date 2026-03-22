@@ -266,7 +266,7 @@ class ApplicationLoop:
 
         if command == "/summarize":
             try:
-                summarize_prompt = await self._chat_service.read_prompt_text(_SUMMARIZE_PROMPT_NAME)
+                summarize_prompt = self._chat_service.render_prompt_text(_SUMMARIZE_PROMPT_NAME)
             except Exception:
                 logger.exception(f"Failed to load summarize prompt for {batch.session_key}")
                 await channel.send_response(

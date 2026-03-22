@@ -20,6 +20,7 @@ from google.genai import types
 from pydantic import ValidationError
 
 from app.core.config import settings
+from app.core.jinja import render_template
 from app.core.log import logger
 from app.runtime.channels import get_available_channels_context
 from app.schema.ai import ChatResponse, ChatSessionSnapshot, ChatSessionUsageTotals, InboundAttachment, Skill
@@ -44,6 +45,8 @@ _ATTACHMENT_MIME_TYPE_OVERRIDES = {
     ".txt": "text/plain",
 }
 _EMPTY_MODEL_RESPONSE_FALLBACK = "I could not produce a text response right now. Please try again."
+_MODEL_INPUT_PROMPT_NAME = "model_input.prompt.md"
+_SKILLS_PROMPT_NAME = "skills.prompt.md"
 
 
 def _normalize_supported_attachment_mime_type(mime_type: str) -> str | None:
@@ -131,7 +134,8 @@ class GeminiChatService:
     def __init__(self) -> None:
         self.ai_client = genai.Client(api_key=settings.GEMINI_API_KEY)
         self._sessions_dir = settings.SESSIONS_DIR
-        self._prompts_dir = get_module_root("app") / "prompts"
+        self._module_root = get_module_root("app")
+        self._prompts_dir = self._module_root / "prompts"
 
     def create_session(
         self,
@@ -191,7 +195,7 @@ class GeminiChatService:
     def _get_session_path(self, session_id: str):
         return self._sessions_dir / quote(session_id, safe="")
 
-    async def read_prompt_text(self, prompt_name: str) -> str:
+    def _resolve_prompt_path(self, prompt_name: str) -> Path:
         normalized_prompt_name = Path(prompt_name).name
         if normalized_prompt_name != prompt_name:
             raise ValueError(f"Prompt name must not contain directory segments: {prompt_name}")
@@ -200,8 +204,15 @@ class GeminiChatService:
         if not prompt_path.is_file():
             raise FileNotFoundError(f"Prompt file not found: {prompt_path}")
 
-        async with aiofile.AIOFile(prompt_path, "r", encoding="utf-8") as prompt_file:
-            return str(await prompt_file.read())
+        return prompt_path
+
+    async def read_prompt_text(self, prompt_name: str) -> str:
+        return self.render_prompt_text(prompt_name)
+
+    def render_prompt_text(self, prompt_name: str, **context: Any) -> str:
+        prompt_path = self._resolve_prompt_path(prompt_name)
+        template_name = prompt_path.relative_to(self._module_root).as_posix()
+        return render_template(template_name, **context)
 
     async def get_base_context(self) -> str:
         now = datetime.now(ZoneInfo(settings.TIMEZONE))
@@ -249,20 +260,19 @@ class GeminiChatService:
     @asynccontextmanager
     async def get_system_instruction(self) -> AsyncIterator[str | None]:
         async with aiofile.AIOFile(settings.WORKSPACE_ROOT / "AGENTS.md", "r", encoding="utf-8") as agents_file:
-            content = str(await agents_file.read())
-            content = await self.get_base_context() + "\n" + content
+            agents_md = str(await agents_file.read())
+            skills_prompt: str | None = None
             if skills := await self.discover_skills():
-                content += (
-                    "\n\n---\n\n"
-                    "## Available Skills\n\nThe following skills extend your capabilities. "
-                    "To use a skill, read its SKILL.md file using the `read_file` tool."
-                    "\n"
+                skills_prompt = self.render_prompt_text(
+                    _SKILLS_PROMPT_NAME,
+                    skills=skills,
                 )
-                for skill in skills:
-                    content += (
-                        f"### {skill.name}\n\n- Description: {skill.description}\n- Location: {skill.location}\n\n"
-                    )
-            yield content
+            yield self.render_prompt_text(
+                _MODEL_INPUT_PROMPT_NAME,
+                base_context=await self.get_base_context(),
+                agents_md=agents_md,
+                skills=skills_prompt.strip() if skills_prompt else None,
+            )
             return
 
         yield None
