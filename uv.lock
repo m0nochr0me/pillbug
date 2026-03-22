@@ -6,6 +6,7 @@ requires-python = ">=3.14"
 members = [
     "pillbug",
     "pillbug-a2a",
+    "pillbug-dashboard",
     "pillbug-telegram",
 ]
 
@@ -1052,6 +1053,9 @@ dependencies = [
 a2a = [
     { name = "pillbug-a2a" },
 ]
+dashboard = [
+    { name = "pillbug-dashboard" },
+]
 telegram = [
     { name = "pillbug-telegram" },
 ]
@@ -1075,12 +1079,13 @@ requires-dist = [
     { name = "jinja2", specifier = ">=3.1.6" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "pillbug-a2a", marker = "extra == 'a2a'", editable = "packages/pillbug-a2a" },
+    { name = "pillbug-dashboard", marker = "extra == 'dashboard'", editable = "packages/pillbug-dashboard" },
     { name = "pillbug-telegram", marker = "extra == 'telegram'", editable = "packages/pillbug-telegram" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pydocket", specifier = ">=0.18.2" },
     { name = "redis", specifier = ">=7.3.0" },
 ]
-provides-extras = ["a2a", "telegram"]
+provides-extras = ["a2a", "telegram", "dashboard"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1098,6 +1103,29 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "pillbug", editable = "." }]
+
+[[package]]
+name = "pillbug-dashboard"
+version = "0.1.0"
+source = { editable = "packages/pillbug-dashboard" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "jinja2" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "uvicorn" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = ">=0.135.1" },
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "jinja2", specifier = ">=3.1.6" },
+    { name = "pydantic", specifier = ">=2.0" },
+    { name = "pydantic-settings", specifier = ">=2.11.0" },
+    { name = "uvicorn", specifier = ">=0.35.0" },
+]
 
 [[package]]
 name = "pillbug-telegram"

@@ -37,6 +37,7 @@ dependencies = [
 [project.optional-dependencies]
 a2a = ["pillbug-a2a"]
 telegram = ["pillbug-telegram"]
+dashboard = ["pillbug-dashboard"]
 
 [project.urls]
 Homepage = "https://github.com/m0nochr0me/pillbug"
@@ -59,6 +60,7 @@ package = true
 [tool.uv.sources]
 pillbug-a2a = { workspace = true }
 pillbug-telegram = { workspace = true }
+pillbug-dashboard = { workspace = true }
 
 [tool.uv.workspace]
 members = ["packages/*"]
@@ -107,7 +109,4 @@ ignore = ["TC001", "TC002", "TC003", "E501", "RUF012", "C901"]
 unfixable = ["TC"]
 
 [dependency-groups]
-dev = [
-    "pre-commit>=4.5.1",
-    "ruff>=0.15.6",
-]
+dev = ["pre-commit>=4.5.1", "ruff>=0.15.6"]

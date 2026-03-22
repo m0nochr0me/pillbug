@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <link rel="preload" href="{{ url_for('static', path='/font/DepartureMono-Regular.woff2') }}" as="font" type="font/woff2" crossorigin>
+    <link href="{{ url_for('static', path='/css/beer.min.css') }}" rel="stylesheet" />
+    <link href="{{ url_for('static', path='/css/app.css') }}" rel="stylesheet" />
+    <script type="module" src="{{ url_for('static', path='/js/vendor/beer.min.js') }}"></script>
+    <script type="module" src="{{ url_for('static', path='/js/vendor/material-dynamic-colors.min.js') }}"></script>
+    <script defer src="{{ url_for('static', path='/js/vendor/vue.global.js') }}"></script>
+    {% block head %}{% endblock %}
+    <title>{{ page_title }} | Pillbug Dashboard</title>
+  </head>
+  <body class="dashboard-shell dark">
+    <header class="fixed blur dashboard-header">
+      <nav class="responsive dashboard-nav">
+        <a href="/runtimes" class="dashboard-brand">
+          <span class="dashboard-brand-mark">PB</span>
+          <span>
+            <strong>Pillbug Dashboard</strong>
+            <small>Remote runtime operator console</small>
+          </span>
+        </a>
+        <div class="max"></div>
+        <a href="/runtimes" class="dashboard-nav-link">Runtimes</a>
+      </nav>
+    </header>
+    <main class="responsive dashboard-main">
+      {% block content %}{% endblock %}
+    </main>
+    {% block scripts %}{% endblock %}
+  </body>
+</html>

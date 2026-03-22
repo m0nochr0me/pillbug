@@ -1,0 +1,284 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section id="runtime-detail-app" class="dashboard-page">
+    <article class="no-round hero-panel">
+      <div class="stack gap-4">
+        <div class="action-row wrap">
+          <a href="/runtimes" class="button border small">
+            <i>arrow_back</i>
+            <span>BACK</span>
+          </a>
+          <span class="status-pill" :class="statusClass(detail.status)">[[ statusLabel(detail.status) ]]</span>
+        </div>
+
+        <div class="stack gap-2">
+          <p class="eyebrow">[[ detail.registration.runtime_id ]]</p>
+          <h2>[[ detail.registration.label || detail.registration.runtime_id ]]</h2>
+          <a class="runtime-url" :href="detail.registration.base_url" target="_blank" rel="noreferrer">
+            [[ detail.registration.base_url ]]
+          </a>
+        </div>
+
+        <div class="metric-strip">
+          <div class="metric-card standout">
+            <span class="muted-label">Active sessions</span>
+            <strong>[[ detail.runtime ? detail.runtime.active_session_count : 0 ]]</strong>
+          </div>
+          <div class="metric-card">
+            <span class="muted-label">PENDING SESSIONS</span>
+            <strong>[[ detail.runtime ? detail.runtime.pending_session_count : 0 ]]</strong>
+          </div>
+          <div class="metric-card">
+            <span class="muted-label">TOTAL TASKS</span>
+            <strong>[[ scheduler.total_tasks || 0 ]]</strong>
+          </div>
+          <div class="metric-card">
+            <span class="muted-label">ENABLED TASKS</span>
+            <strong>[[ scheduler.enabled_tasks || 0 ]]</strong>
+          </div>
+          <div class="metric-card">
+            <span class="muted-label">RECENT ERRORS</span>
+            <strong>[[ detail.runtime ? detail.runtime.recent_error_count : 0 ]]</strong>
+          </div>
+        </div>
+      </div>
+    </article>
+
+    <div v-if="actionMessage" class="notice-banner no-round success-tone">
+      <strong>ACTION COMPLETE</strong>
+      <span>[[ actionMessage ]]</span>
+    </div>
+
+    <div v-if="errorMessage" class="notice-banner no-round error-tone">
+      <strong>DASHBOARD REQUEST FAILED.</strong>
+      <span>[[ errorMessage ]]</span>
+    </div>
+
+    <div class="grid dashboard-grid">
+      <article class="s12 l4 no-round panel-shell stack gap-5">
+        <div class="stack gap-2">
+          <p class="eyebrow">OPERATOR CONTROL</p>
+          <h4>SEND CONTROL MESSAGE</h4>
+        </div>
+
+        <form class="stack gap-3" @submit.prevent="sendMessage">
+          <div class="field label border">
+            <select v-model="messageForm.channel">
+              <option value="">Select a channel</option>
+              <option v-for="channel in availableChannels" :key="channel" :value="channel">[[ channel ]]</option>
+            </select>
+            <label>CH</label>
+          </div>
+
+          <div class="field label border">
+            <input v-model.trim="messageForm.conversation_id" type="text" autocomplete="off">
+            <label>CONV ID</label>
+          </div>
+
+          <div class="field label border">
+            <textarea v-model.trim="messageForm.message" rows="5"></textarea>
+            <label>MSG</label>
+          </div>
+
+          <button type="submit" class="fill" :disabled="pendingActionKey === 'send-message'">
+            <i>send</i>
+            <span>[[ pendingActionKey === 'send-message' ? '...' : 'SEND MESSAGE' ]]</span>
+          </button>
+        </form>
+
+        <hr class="large-divider">
+
+        <div class="stack gap-3">
+          <p class="eyebrow">RUNTIME ACTIONS</p>
+          <div class="action-row wrap">
+            <button type="button" class="border" :disabled="pendingActionKey === 'drain'" @click="requestRuntimeAction('drain')">
+              [[ pendingActionKey === 'drain' ? '...' : 'DRAIN' ]]
+            </button>
+            <button type="button" class="border danger-button" :disabled="pendingActionKey === 'shutdown'" @click="requestRuntimeAction('shutdown')">
+              [[ pendingActionKey === 'shutdown' ? '...' : 'SHUTDOWN' ]]
+            </button>
+            <button type="button" class="border" :disabled="refreshLoading" @click="refreshDetail(true)">
+              <span>[[ refreshLoading ? '...' : 'REFRESH' ]]</span>
+            </button>
+          </div>
+        </div>
+
+        <hr class="large-divider">
+
+        <div class="stack gap-2">
+          <p class="eyebrow">METADATA</p>
+          <div class="definition-list">
+            <div>
+              <span class="muted-label">RUNTIME ID</span>
+              <strong class="codeish">[[ detail.registration.runtime_id ]]</strong>
+            </div>
+            <div>
+              <span class="muted-label">AGENT</span>
+              <strong>[[ detail.runtime && detail.runtime.metadata ? (detail.runtime.metadata.agent_name || 'UNCONF') : 'UNKNOWN' ]]</strong>
+            </div>
+            <div>
+              <span class="muted-label">STARTED</span>
+              <strong>[[ formatTimestamp(detail.health && detail.health.started_at) ]]</strong>
+            </div>
+            <div>
+              <span class="muted-label">LAST</span>
+              <strong>[[ formatTimestamp(detail.health && detail.health.last_activity_at) ]]</strong>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <section class="s12 l8 stack gap-4">
+        <article class="no-round panel-shell stack gap-4">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">SESSIONS</p>
+              <h4>TRACKED CONVERSATIONS</h4>
+            </div>
+            <span class="status-pill fill">[[ sessions.length ]] SESS</span>
+          </div>
+
+          <div v-if="sessions.length" class="responsive">
+            <table class="stripes compact-table">
+              <thead>
+                <tr>
+                  <th>SESSION</th>
+                  <th>CHANNEL</th>
+                  <th>MESSAGES</th>
+                  <th>LAST ACT</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="session in sessions" :key="session.session_key">
+                  <td>
+                    <strong>[[ session.session_key ]]</strong>
+                    <div class="muted-copy">[[ session.conversation_id ]]</div>
+                  </td>
+                  <td>[[ session.channel_name ]]</td>
+                  <td>[[ session.message_count ]]</td>
+                  <td>[[ formatTimestamp(session.last_activity_at) ]]</td>
+                  <td class="right-align">
+                    <button type="button" class="border small" :disabled="pendingActionKey === ('clear-' + session.session_key)" @click="clearSession(session)">
+                      [[ pendingActionKey === ('clear-' + session.session_key) ? 'C..' : 'CLR' ]]
+                    </button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p v-else class="muted-copy">NO SESSIONS</p>
+        </article>
+
+        <article class="no-round panel-shell stack gap-4">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">TASKS</p>
+              <h4>SCHEDULED WORK</h4>
+            </div>
+            <span class="status-pill fill primary">[[ scheduler.total_tasks || 0 ]] TOTAL</span>
+          </div>
+
+          <div v-if="tasks.length" class="responsive">
+            <table class="stripes compact-table">
+              <thead>
+                <tr>
+                  <th>TASK</th>
+                  <th>SCHEDULE</th>
+                  <th>STATE</th>
+                  <th>LAST RUN</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="task in tasks" :key="task.task_id">
+                  <td>
+                    <strong>[[ task.name ]]</strong>
+                    <div class="muted-copy">[[ task.task_id ]]</div>
+                  </td>
+                  <td>[[ task.schedule_kind ]]</td>
+                  <td>[[ task.enabled ? 'E' : 'D' ]]</td>
+                  <td>[[ formatTimestamp(task.last_run && task.last_run.finished_at) ]]</td>
+                  <td class="right-align">
+                    <div class="action-row wrap right-align">
+                      <button type="button" class="border small" :disabled="pendingActionKey === ('run-' + task.task_id)" @click="runTask(task)">
+                        [[ pendingActionKey === ('run-' + task.task_id) ? 'R..' : 'RUN' ]]
+                      </button>
+                      <button v-if="task.enabled" type="button" class="border small" :disabled="pendingActionKey === ('disable-' + task.task_id)" @click="toggleTask(task, false)">
+                        [[ pendingActionKey === ('disable-' + task.task_id) ? 'D..' : 'DIS' ]]
+                      </button>
+                      <button v-else type="button" class="border small" :disabled="pendingActionKey === ('enable-' + task.task_id)" @click="toggleTask(task, true)">
+                        [[ pendingActionKey === ('enable-' + task.task_id) ? 'E..' : 'ENA' ]]
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p v-else class="muted-copy">NO SCHEDULED TASKS</p>
+        </article>
+      </section>
+    </div>
+
+    <div class="grid dashboard-grid">
+      <article class="s12 l4 no-round panel-shell stack gap-4">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">A2A TOPOLOGY</p>
+          </div>
+        </div>
+
+        <div v-if="detail.a2a_peers.length" class="stack gap-2">
+          <div v-for="peer in detail.a2a_peers" :key="peer" class="topology-edge">
+            <strong>[[ detail.registration.runtime_id ]]</strong>
+            <span class="arrow-glyph">→</span>
+            <span>[[ peer ]]</span>
+          </div>
+        </div>
+        <p v-else class="muted-copy">NO OUTBOUND A2A DEST</p>
+
+        <hr class="large-divider">
+
+        <div class="stack gap-2">
+          <p class="eyebrow">AGENT CARD</p>
+          <p v-if="detail.agent_card" class="muted-copy">A2A DISCOVERY AVAILABLE</p>
+          <p v-else class="muted-copy">NO PUBLIC AGENT CARD</p>
+          <a v-if="detail.agent_card" class="button border small" :href="detail.registration.base_url + '/.well-known/agent-card.json'" target="_blank" rel="noreferrer">
+            VIEW AGENT CARD
+          </a>
+        </div>
+      </article>
+
+      <article class="s12 l8 no-round panel-shell stack gap-4">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">EVENTS</p>
+            <h4>RUNTIME ACTIVITY</h4>
+          </div>
+          <span class="status-pill secondary fill">[[ events.length ]] BUF</span>
+        </div>
+
+        <div v-if="events.length" class="timeline-list">
+          <div v-for="event in events" :key="event.event_id" class="timeline-item" :class="event.level || 'info'">
+            <div class="timeline-meta">
+              <strong>[[ event.event_type ]]</strong>
+              <span>[[ formatTimestamp(event.occurred_at) ]]</span>
+            </div>
+            <p>[[ event.message ]]</p>
+            <small class="muted-copy">[[ event.source ]]</small>
+          </div>
+        </div>
+        <p v-else class="muted-copy">NO TELEMETRY EVENTS</p>
+      </article>
+    </div>
+  </section>
+{% endblock %}
+
+{% block scripts %}
+  <script>
+    window.__PILLBUG_DASHBOARD_RUNTIME__ = {{ initial_runtime_json | safe }};
+  </script>
+  <script defer src="{{ url_for('static', path='/js/app/runtime-detail.js') }}"></script>
+{% endblock %}
