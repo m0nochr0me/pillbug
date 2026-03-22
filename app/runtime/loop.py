@@ -61,8 +61,84 @@ class ApplicationLoop:
         self._sessions: dict[str, GeminiChatSession] = {}
         self._pending_messages: dict[str, list[InboundMessage]] = {}
         self._flush_tasks: dict[str, asyncio.Task[None]] = {}
+        self._listener_tasks: list[asyncio.Task[None]] = []
         self._session_state_by_key: dict[str, _SessionTelemetryState] = {}
+        self._drain_requested = False
+        self._shutdown_requested = False
+        self._shutdown_event = asyncio.Event()
         runtime_telemetry.bind_application_loop(self)
+
+    @property
+    def is_draining(self) -> bool:
+        return self._drain_requested
+
+    @property
+    def is_shutdown_requested(self) -> bool:
+        return self._shutdown_requested
+
+    async def wait_for_shutdown(self) -> None:
+        await self._shutdown_event.wait()
+
+    async def clear_session(self, session_id: str) -> tuple[str, int]:
+        session_key = self._resolve_session_key(session_id)
+        dropped_message_count = self._drop_pending_messages_for_session(session_key)
+        self._sessions[session_key] = await self._chat_service.reset_session(session_key)
+
+        state = self._session_state_by_key.get(session_key)
+        now = _utcnow()
+        if state is not None:
+            state.last_command = "/clear"
+            state.last_response_at = now
+            state.last_activity_at = now
+            state.pending_message_count = self._pending_message_count_for_session(session_key)
+
+        channel_name = state.channel_name if state is not None else session_key.partition(":")[0]
+        logger.info(f"Cleared session history for {session_key} via control API")
+        await runtime_telemetry.record_event(
+            event_type="session.control.clear",
+            source="application-loop",
+            message="Session cleared through control API.",
+            data={
+                "session_key": session_key,
+                "channel": channel_name,
+                "dropped_pending_messages": dropped_message_count,
+            },
+        )
+        return session_key, dropped_message_count
+
+    async def request_drain(self, *, reason: str = "operator") -> bool:
+        if self._drain_requested:
+            return False
+
+        self._drain_requested = True
+        logger.info(f"Runtime drain requested reason={reason}")
+        await runtime_telemetry.record_event(
+            event_type="runtime.drain.requested",
+            source="application-loop",
+            message="Runtime drain requested.",
+            data={"reason": reason},
+        )
+
+        for listener_task in tuple(self._listener_tasks):
+            listener_task.cancel()
+
+        return True
+
+    async def request_shutdown(self, *, reason: str = "operator") -> bool:
+        if self._shutdown_requested:
+            return False
+
+        self._shutdown_requested = True
+        self._shutdown_event.set()
+        logger.info(f"Runtime shutdown requested reason={reason}")
+        await runtime_telemetry.record_event(
+            event_type="runtime.shutdown.requested",
+            source="application-loop",
+            message="Runtime shutdown requested.",
+            data={"reason": reason},
+        )
+        await self.request_drain(reason=reason)
+        return True
 
     async def run(self) -> None:
         if not self._channels:
@@ -83,6 +159,7 @@ class ApplicationLoop:
             asyncio.create_task(self._consume_channel(channel, queue), name=f"listen:{channel.name}")
             for channel in self._channels
         ]
+        self._listener_tasks = listener_tasks
         open_channels = len(listener_tasks)
 
         try:
@@ -110,6 +187,8 @@ class ApplicationLoop:
 
             with suppress(asyncio.CancelledError):
                 await asyncio.gather(*listener_tasks, return_exceptions=True)
+
+            self._listener_tasks = []
 
             for flush_task in self._flush_tasks.values():
                 flush_task.cancel()
@@ -398,6 +477,43 @@ class ApplicationLoop:
             for debounce_key, messages in self._pending_messages.items()
             if debounce_key.startswith(f"{session_key}:")
         )
+
+    def _resolve_session_key(self, session_id: str) -> str:
+        normalized_session_id = session_id.strip()
+        if not normalized_session_id:
+            raise ValueError("session_id must not be empty")
+
+        if normalized_session_id in self._sessions or normalized_session_id in self._session_state_by_key:
+            return normalized_session_id
+
+        matching_session_keys = {
+            session_key
+            for session_key, state in self._session_state_by_key.items()
+            if state.conversation_id == normalized_session_id
+        }
+
+        if len(matching_session_keys) == 1:
+            return next(iter(matching_session_keys))
+
+        if matching_session_keys:
+            raise ValueError("Session identifier is ambiguous; use the full session_key value from telemetry.")
+
+        raise ValueError(f"Session not found: {session_id}")
+
+    def _drop_pending_messages_for_session(self, session_key: str) -> int:
+        dropped_message_count = 0
+
+        for debounce_key in tuple(self._pending_messages):
+            if not debounce_key.startswith(f"{session_key}:"):
+                continue
+
+            dropped_message_count += len(self._pending_messages.pop(debounce_key, ()))
+            flush_task = self._flush_tasks.pop(debounce_key, None)
+            if flush_task is not None:
+                flush_task.cancel()
+
+        self._sync_pending_count(session_key)
+        return dropped_message_count
 
     def _sync_pending_count(self, session_key: str) -> None:
         state = self._session_state_by_key.get(session_key)

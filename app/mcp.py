@@ -27,9 +27,15 @@ from app.core.log import logger, uvicorn_log_config
 from app.core.telemetry import runtime_telemetry
 from app.core.url_shortener import local_url_shortener
 from app.middleware.compactor import CompactorMiddleware
-from app.runtime.channels import describe_channel_telemetry, get_channel_plugin
+from app.runtime.channels import describe_channel_telemetry, get_channel_plugin, register_channel_conversation
 from app.runtime.scheduler import task_scheduler
-from app.schema.control import AuthScope, AuthTokenBinding, RuntimeAuthConfiguration
+from app.schema.control import (
+    AuthScope,
+    AuthTokenBinding,
+    ControlMessageRequest,
+    OperatorResponse,
+    RuntimeAuthConfiguration,
+)
 from app.schema.telemetry import ChannelsTelemetrySnapshot, RuntimeMetadata
 from app.schema.todo import TodoItem, TodoListSnapshot
 from app.util.web import (
@@ -165,7 +171,7 @@ def _build_runtime_auth_configuration() -> RuntimeAuthConfiguration:
     return RuntimeAuthConfiguration(
         token_bindings=tuple(token_bindings),
         telemetry_protected=dashboard_token is not None,
-        control_protected=dashboard_token is not None,
+        control_protected=True,
         a2a_protected=a2a_token is not None,
     )
 
@@ -195,6 +201,77 @@ async def _authorize_telemetry(authorization: str | None) -> AuthScope | None:
         )
 
     return AuthScope.TELEMETRY
+
+
+async def _authorize_control(authorization: str | None) -> AuthScope:
+    expected_token = settings.dashboard_bearer_token()
+    if expected_token is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Control API requires PB_DASHBOARD_BEARER_TOKEN to be configured.",
+        )
+
+    presented_token = _extract_bearer_token(authorization)
+    if presented_token is None or not secrets.compare_digest(presented_token, expected_token):
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or invalid bearer token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return AuthScope.CONTROL
+
+
+def _operator_response(
+    *,
+    action: str,
+    message: str,
+    scope: AuthScope,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return OperatorResponse(
+        runtime_id=settings.runtime_id,
+        ok=True,
+        action=action,
+        message=message,
+        scope=scope,
+        details=details,
+    ).model_dump(mode="json")
+
+
+async def _audit_control_action(
+    request: Request,
+    *,
+    action: str,
+    scope: AuthScope,
+    message: str,
+    level: Literal["info", "warning", "error"] = "info",
+    details: dict[str, Any] | None = None,
+) -> None:
+    payload = {
+        "runtime_id": settings.runtime_id,
+        "scope": scope.value,
+        "action": action,
+        "path": str(request.url.path),
+        "client_host": request.client.host if request.client is not None else None,
+        **{key: value for key, value in (details or {}).items() if value is not None},
+    }
+    rendered_payload = json.dumps(payload, sort_keys=True, default=str)
+
+    if level == "error":
+        logger.error(f"Control action {message} {rendered_payload}")
+    elif level == "warning":
+        logger.warning(f"Control action {message} {rendered_payload}")
+    else:
+        logger.info(f"Control action {message} {rendered_payload}")
+
+    await runtime_telemetry.record_event(
+        event_type=f"control.{action}",
+        source="control-api",
+        level=level,
+        message=message,
+        data=payload,
+    )
 
 
 def _format_sse_event(
@@ -809,6 +886,12 @@ mcp_app = FastAPI(
 
 mcp_app.state.runtime_metadata = _build_runtime_metadata()
 mcp_app.state.runtime_auth_configuration = _build_runtime_auth_configuration()
+mcp_app.state.application_loop = None
+mcp_app.state.uvicorn_server = None
+
+
+def bind_application_loop(application_loop: Any | None) -> None:
+    mcp_app.state.application_loop = application_loop
 
 
 @mcp_app.get("/health")
@@ -896,6 +979,284 @@ async def stream_telemetry_events(
     )
 
 
+@mcp_app.post("/control/sessions/{session_id}/clear")
+async def clear_control_session(session_id: str, request: Request) -> dict[str, Any]:
+    scope = await _authorize_control(request.headers.get("authorization"))
+    application_loop = request.app.state.application_loop
+    if application_loop is None:
+        await _audit_control_action(
+            request,
+            action="session.clear",
+            scope=scope,
+            level="warning",
+            message="rejected",
+            details={"session_id": session_id, "reason": "application_loop_not_running"},
+        )
+        raise HTTPException(status_code=503, detail="Application loop is not running.")
+
+    try:
+        session_key, dropped_message_count = await application_loop.clear_session(session_id)
+    except ValueError as exc:
+        await _audit_control_action(
+            request,
+            action="session.clear",
+            scope=scope,
+            level="warning",
+            message="rejected",
+            details={"session_id": session_id, "error": str(exc)},
+        )
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    details = {
+        "session_id": session_key,
+        "dropped_pending_messages": dropped_message_count,
+    }
+    await _audit_control_action(
+        request,
+        action="session.clear",
+        scope=scope,
+        message="accepted",
+        details=details,
+    )
+    return _operator_response(
+        action="session.clear",
+        message=f"Cleared session {session_key}.",
+        scope=scope,
+        details=details,
+    )
+
+
+@mcp_app.post("/control/messages/send")
+async def post_control_message(payload: ControlMessageRequest, request: Request) -> dict[str, Any]:
+    scope = await _authorize_control(request.headers.get("authorization"))
+    channel_plugin = get_channel_plugin(payload.channel, create=True)
+    if channel_plugin is None:
+        await _audit_control_action(
+            request,
+            action="message.send",
+            scope=scope,
+            level="warning",
+            message="rejected",
+            details={"channel": payload.channel, "reason": "channel_unavailable"},
+        )
+        raise HTTPException(status_code=404, detail=f"Channel is not enabled or available: {payload.channel}")
+
+    try:
+        await channel_plugin.send_message(payload.conversation_id or "", payload.message)
+    except Exception as exc:
+        await _audit_control_action(
+            request,
+            action="message.send",
+            scope=scope,
+            level="error",
+            message="failed",
+            details={"channel": payload.channel, "conversation_id": payload.conversation_id, "error": str(exc)},
+        )
+        raise HTTPException(status_code=502, detail="Failed to send outbound control message.") from exc
+
+    if payload.conversation_id:
+        register_channel_conversation(payload.channel, payload.conversation_id)
+
+    details = {
+        "channel": payload.channel,
+        "conversation_id": payload.conversation_id,
+        "chars_sent": len(payload.message),
+    }
+    await _audit_control_action(
+        request,
+        action="message.send",
+        scope=scope,
+        message="accepted",
+        details=details,
+    )
+    return _operator_response(
+        action="message.send",
+        message="Outbound control message sent.",
+        scope=scope,
+        details=details,
+    )
+
+
+@mcp_app.post("/control/tasks/{task_id}/enable")
+async def enable_control_task(task_id: str, request: Request) -> dict[str, Any]:
+    scope = await _authorize_control(request.headers.get("authorization"))
+    try:
+        result = await task_scheduler.enable_task(task_id)
+    except ValueError as exc:
+        await _audit_control_action(
+            request,
+            action="task.enable",
+            scope=scope,
+            level="warning",
+            message="rejected",
+            details={"task_id": task_id, "error": str(exc)},
+        )
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    task = result["task"]
+    details = {"task_id": task_id, "changed": result["changed"], "enabled": task["enabled"]}
+    await _audit_control_action(
+        request,
+        action="task.enable",
+        scope=scope,
+        message="accepted",
+        details=details,
+    )
+    response_message = f"Enabled task {task_id}." if result["changed"] else f"Task {task_id} is already enabled."
+    return _operator_response(
+        action="task.enable",
+        message=response_message,
+        scope=scope,
+        details=details,
+    )
+
+
+@mcp_app.post("/control/tasks/{task_id}/disable")
+async def disable_control_task(task_id: str, request: Request) -> dict[str, Any]:
+    scope = await _authorize_control(request.headers.get("authorization"))
+    try:
+        result = await task_scheduler.disable_task(task_id)
+    except ValueError as exc:
+        await _audit_control_action(
+            request,
+            action="task.disable",
+            scope=scope,
+            level="warning",
+            message="rejected",
+            details={"task_id": task_id, "error": str(exc)},
+        )
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    task = result["task"]
+    details = {"task_id": task_id, "changed": result["changed"], "enabled": task["enabled"]}
+    await _audit_control_action(
+        request,
+        action="task.disable",
+        scope=scope,
+        message="accepted",
+        details=details,
+    )
+    response_message = f"Disabled task {task_id}." if result["changed"] else f"Task {task_id} is already disabled."
+    return _operator_response(
+        action="task.disable",
+        message=response_message,
+        scope=scope,
+        details=details,
+    )
+
+
+@mcp_app.post("/control/tasks/{task_id}/run-now")
+async def run_control_task_now(task_id: str, request: Request) -> dict[str, Any]:
+    scope = await _authorize_control(request.headers.get("authorization"))
+    try:
+        result = await task_scheduler.run_task_now(task_id)
+    except ValueError as exc:
+        await _audit_control_action(
+            request,
+            action="task.run-now",
+            scope=scope,
+            level="warning",
+            message="rejected",
+            details={"task_id": task_id, "error": str(exc)},
+        )
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    run_result = result["run"]
+    details = {
+        "task_id": task_id,
+        "action_result": run_result["action"],
+        "message": run_result["message"],
+    }
+    await _audit_control_action(
+        request,
+        action="task.run-now",
+        scope=scope,
+        message="accepted",
+        details=details,
+    )
+    return _operator_response(
+        action="task.run-now",
+        message=f"Ran task {task_id} immediately.",
+        scope=scope,
+        details=details,
+    )
+
+
+@mcp_app.post("/control/runtime/drain")
+async def drain_runtime(request: Request) -> dict[str, Any]:
+    scope = await _authorize_control(request.headers.get("authorization"))
+    application_loop = request.app.state.application_loop
+    if application_loop is None:
+        await _audit_control_action(
+            request,
+            action="runtime.drain",
+            scope=scope,
+            level="warning",
+            message="rejected",
+            details={"reason": "application_loop_not_running"},
+        )
+        raise HTTPException(status_code=503, detail="Application loop is not running.")
+
+    accepted = await application_loop.request_drain(reason="control-api")
+    details = {"already_draining": not accepted}
+    await _audit_control_action(
+        request,
+        action="runtime.drain",
+        scope=scope,
+        message="accepted",
+        details=details,
+    )
+    response_message = "Runtime drain requested." if accepted else "Runtime is already draining."
+    return _operator_response(
+        action="runtime.drain",
+        message=response_message,
+        scope=scope,
+        details=details,
+    )
+
+
+@mcp_app.post("/control/runtime/shutdown")
+async def shutdown_runtime(request: Request) -> dict[str, Any]:
+    scope = await _authorize_control(request.headers.get("authorization"))
+    application_loop = request.app.state.application_loop
+    server = request.app.state.uvicorn_server
+
+    if application_loop is None and server is None:
+        await _audit_control_action(
+            request,
+            action="runtime.shutdown",
+            scope=scope,
+            level="warning",
+            message="rejected",
+            details={"reason": "runtime_not_running"},
+        )
+        raise HTTPException(status_code=503, detail="Runtime is not running.")
+
+    accepted = await application_loop.request_shutdown(reason="control-api") if application_loop is not None else True
+    if server is not None:
+        server.should_exit = True
+
+    details = {
+        "already_requested": not accepted,
+        "application_loop_bound": application_loop is not None,
+        "server_bound": server is not None,
+    }
+    await _audit_control_action(
+        request,
+        action="runtime.shutdown",
+        scope=scope,
+        message="accepted",
+        details=details,
+    )
+    response_message = "Runtime shutdown requested." if accepted else "Runtime shutdown is already requested."
+    return _operator_response(
+        action="runtime.shutdown",
+        message=response_message,
+        scope=scope,
+        details=details,
+    )
+
+
 @mcp_app.get(f"{settings.mcp_shortener_route_prefix()}/{{token}}", include_in_schema=False)
 async def redirect_short_url(token: str) -> RedirectResponse:
     original_url = await local_url_shortener.resolve(token)
@@ -909,7 +1270,7 @@ mcp_app.mount("/", _mcp_http_app)
 
 
 def create_mcp_server() -> uvicorn.Server:
-    return uvicorn.Server(
+    server = uvicorn.Server(
         uvicorn.Config(
             mcp_app,
             host=settings.MCP_HOST,
@@ -918,6 +1279,8 @@ def create_mcp_server() -> uvicorn.Server:
             log_config=uvicorn_log_config,
         )
     )
+    mcp_app.state.uvicorn_server = server
+    return server
 
 
 async def wait_for_server_startup(

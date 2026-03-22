@@ -4,7 +4,7 @@ Schema definitions for authenticated operator and control surfaces.
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -58,6 +58,35 @@ class RuntimeAuthConfiguration(BaseModel):
     )
 
 
+class ControlMessageRequest(BaseModel):
+    channel: str = Field(min_length=1, description="Enabled channel name to use for the outbound operator message.")
+    conversation_id: str | None = Field(
+        default=None,
+        description="Optional explicit destination within the selected channel, such as a Telegram chat id.",
+    )
+    message: str = Field(min_length=1, description="Outbound message text to send.")
+
+    @model_validator(mode="after")
+    def normalize_values(self) -> Self:
+        self.channel = self.channel.strip()
+        self.message = self.message.strip()
+
+        if not self.channel:
+            raise ValueError("channel must not be blank")
+
+        if ":" in self.channel:
+            raise ValueError("channel must be provided without a destination suffix; use conversation_id instead")
+
+        if self.conversation_id is not None:
+            normalized_conversation_id = self.conversation_id.strip()
+            self.conversation_id = normalized_conversation_id or None
+
+        if not self.message:
+            raise ValueError("message must not be blank")
+
+        return self
+
+
 class OperatorResponse(BaseModel):
     runtime_id: str = Field(min_length=1, description="The stable runtime identifier that produced this response.")
     ok: bool = Field(default=True, description="Whether the requested operator action was accepted.")
@@ -67,4 +96,8 @@ class OperatorResponse(BaseModel):
     responded_at: datetime = Field(
         default_factory=_utcnow,
         description="UTC timestamp when the response payload was created.",
+    )
+    details: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional action-specific metadata that dashboards can use for follow-up UI state updates.",
     )

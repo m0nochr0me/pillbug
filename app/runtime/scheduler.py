@@ -7,7 +7,7 @@ import contextlib
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from docket import Cron, Docket, Perpetual, Worker
@@ -38,6 +38,10 @@ __all__ = ("AgentTaskScheduler", "task_scheduler")
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+class _TaskBehavior(Protocol):
+    def cancel(self) -> None: ...
 
 
 class AgentTaskScheduler:
@@ -148,6 +152,74 @@ class AgentTaskScheduler:
 
         return {
             "task": await self._serialize_task(definition),
+        }
+
+    async def enable_task(self, task_id: str) -> dict[str, Any]:
+        await self.ensure_started()
+        definition = await self._task_snapshot(task_id)
+        if definition is None:
+            raise ValueError(f"Task not found: {task_id}")
+
+        if definition.enabled:
+            return {
+                "task": await self._serialize_task(definition),
+                "changed": False,
+            }
+
+        result = await self.update_task(task_id, enabled=True)
+        await runtime_telemetry.record_event(
+            event_type="scheduler.task.enabled",
+            source="scheduler",
+            message="Scheduled task enabled through control API.",
+            data={"task_id": task_id, "name": definition.name},
+        )
+        return {
+            **result,
+            "changed": True,
+        }
+
+    async def disable_task(self, task_id: str) -> dict[str, Any]:
+        await self.ensure_started()
+        definition = await self._task_snapshot(task_id)
+        if definition is None:
+            raise ValueError(f"Task not found: {task_id}")
+
+        if not definition.enabled:
+            return {
+                "task": await self._serialize_task(definition),
+                "changed": False,
+            }
+
+        result = await self.update_task(task_id, enabled=False)
+        await runtime_telemetry.record_event(
+            event_type="scheduler.task.disabled",
+            source="scheduler",
+            message="Scheduled task disabled through control API.",
+            data={"task_id": task_id, "name": definition.name},
+        )
+        return {
+            **result,
+            "changed": True,
+        }
+
+    async def run_task_now(self, task_id: str) -> dict[str, Any]:
+        await self.ensure_started()
+        definition = await self._task_snapshot(task_id)
+        if definition is None:
+            raise ValueError(f"Task not found: {task_id}")
+
+        run_result = await self._run_task_definition(
+            definition=definition,
+            revision=definition.revision,
+            behavior=None,
+            allow_disabled=True,
+            apply_schedule_effects=False,
+            trigger="control",
+        )
+        latest_definition = await self._task_snapshot(task_id) or definition
+        return {
+            "task": await self._serialize_task(latest_definition),
+            "run": run_result,
         }
 
     async def create_task(
@@ -315,6 +387,31 @@ class AgentTaskScheduler:
             behavior.cancel()
             return {"action": "cancel", "message": "Task definition is stale or disabled."}
 
+        return await self._run_task_definition(
+            definition=definition,
+            revision=revision,
+            behavior=behavior,
+            allow_disabled=False,
+            apply_schedule_effects=True,
+            trigger="scheduler",
+        )
+
+    async def _run_task_definition(
+        self,
+        *,
+        definition: AgentTaskDefinition,
+        revision: int,
+        behavior: _TaskBehavior | None,
+        allow_disabled: bool,
+        apply_schedule_effects: bool,
+        trigger: Literal["scheduler", "control"],
+    ) -> dict[str, str]:
+        task_id = definition.task_id
+        if not allow_disabled and (not definition.enabled or definition.revision != revision):
+            if behavior is not None:
+                behavior.cancel()
+            return {"action": "cancel", "message": "Task definition is stale or disabled."}
+
         started_at = _utcnow()
         raw_response = ""
         parsed_message = ""
@@ -325,7 +422,12 @@ class AgentTaskScheduler:
             event_type="scheduler.task.run.started",
             source="scheduler",
             message="Scheduled task execution started.",
-            data={"task_id": task_id, "revision": revision, "schedule_kind": definition.schedule.kind},
+            data={
+                "task_id": task_id,
+                "revision": revision,
+                "schedule_kind": definition.schedule.kind,
+                "trigger": trigger,
+            },
         )
 
         try:
@@ -346,15 +448,20 @@ class AgentTaskScheduler:
                 source="scheduler",
                 level="error",
                 message="Scheduled task execution failed.",
-                data={"task_id": task_id, "revision": revision, "error": error},
+                data={"task_id": task_id, "revision": revision, "error": error, "trigger": trigger},
             )
             raise
         finally:
             latest = await self._task_snapshot(task_id)
-            if latest is None or not latest.enabled or latest.revision != revision:
+            if behavior is not None and (latest is None or not latest.enabled or latest.revision != revision):
                 behavior.cancel()
 
-            if isinstance(definition.schedule, DelayedTaskSchedule) and action == "cancel":
+            if (
+                apply_schedule_effects
+                and behavior is not None
+                and isinstance(definition.schedule, DelayedTaskSchedule)
+                and action == "cancel"
+            ):
                 behavior.cancel()
                 await self._disable_task(task_id, revision)
 
@@ -376,7 +483,7 @@ class AgentTaskScheduler:
                     event_type="scheduler.task.run.completed",
                     source="scheduler",
                     message="Scheduled task execution completed.",
-                    data={"task_id": task_id, "revision": revision, "action": action},
+                    data={"task_id": task_id, "revision": revision, "action": action, "trigger": trigger},
                 )
 
     async def _load_store(self) -> None:

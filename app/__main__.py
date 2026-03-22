@@ -67,7 +67,16 @@ async def main(*args) -> None:
         logger.info(f"Active channels: {', '.join(settings.enabled_channels())}")
 
         application_loop = ApplicationLoop(chat_service=chat_service)
-        await application_loop.run()
+        mcp_module = import_module("app.mcp")
+        mcp_module.bind_application_loop(application_loop)
+
+        try:
+            await application_loop.run()
+            if application_loop.is_draining and not application_loop.is_shutdown_requested:
+                logger.info("Application loop drained; waiting for shutdown request.")
+                await application_loop.wait_for_shutdown()
+        finally:
+            mcp_module.bind_application_loop(None)
 
 
 def entrypoint() -> None:
