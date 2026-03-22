@@ -102,9 +102,11 @@ Common environment variables:
 - `PB_RUNTIME_ID` to pin a stable runtime identifier explicitly; when omitted, Pillbug persists one at `~/.pillbug/runtime_id.txt`
 - `PB_AGENT_NAME` to attach an operator-facing agent label to runtime telemetry
 - `PB_DASHBOARD_BEARER_TOKEN` to protect the dashboard telemetry APIs and the upcoming control APIs with a single dashboard-scoped bearer token
-- `PB_A2A_BEARER_TOKEN` to reserve a distinct bearer token for future runtime-to-runtime A2A traffic
+- `PB_A2A_BEARER_TOKEN` to protect runtime-to-runtime A2A ingress with a peer-scoped bearer token
 - `PB_ENABLED_CHANNELS` to enable `cli` and registered external channels
 - `PB_CHANNEL_PLUGIN_FACTORIES` for `channel=package.module:factory` plugin mappings
+- `PB_A2A_SELF_BASE_URL` to advertise the externally reachable base URL peers should use for replies
+- `PB_A2A_PEERS_JSON` to register known peer runtimes and their base URLs for outbound A2A delivery
 - `PB_SECURITY_PATTERNS_PATH` to tune inbound warning and block regexes loaded by the pipeline at runtime startup and on file change
 - `PB_WORKSPACE_ROOT` to change the runtime workspace location
 - `PB_INBOUND_DEBOUNCE_SECONDS` to tune message batching behavior
@@ -159,6 +161,9 @@ exports a factory callable.
 The repository now includes `packages/pillbug-telegram`, a Telegram long-polling channel implemented with `shingram`.
 The root package exposes that plugin through the `telegram` extra, so the runtime only installs it when requested.
 
+The repository also includes `packages/pillbug-a2a`, an HTTP-based runtime-to-runtime channel.
+It keeps cross-runtime traffic in the normal inbound message pipeline instead of introducing remote tool execution.
+
 Example setup:
 
 ```bash
@@ -168,6 +173,21 @@ export PB_CHANNEL_PLUGIN_FACTORIES=telegram=pillbug_telegram.telegram_channel:cr
 export PB_TELEGRAM_BOT_TOKEN=your_bot_token
 uv run python -m app
 ```
+
+Example A2A setup:
+
+```bash
+uv sync --extra a2a
+export PB_ENABLED_CHANNELS=cli,a2a
+export PB_CHANNEL_PLUGIN_FACTORIES=a2a=pillbug_a2a.a2a_channel:create_channel
+export PB_A2A_SELF_BASE_URL=http://runtime-a:8000
+export PB_A2A_BEARER_TOKEN=shared-a2a-bearer-token
+export PB_A2A_PEERS_JSON='[{"runtime_id":"runtime-b","base_url":"http://runtime-b:8000"}]'
+uv run python -m app
+```
+
+Outbound A2A targets use the form `a2a:runtime-id/conversation-id`.
+Inbound peer traffic is accepted on `POST /a2a/messages` and converted into normal `InboundMessage` values before the application loop processes it.
 
 Optional Telegram-specific settings:
 

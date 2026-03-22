@@ -7,10 +7,10 @@ import json
 import os
 import re
 import secrets
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import aiohttp
 import uvicorn
@@ -36,6 +36,7 @@ from app.schema.control import (
     OperatorResponse,
     RuntimeAuthConfiguration,
 )
+from app.schema.messages import A2AEnvelope
 from app.schema.telemetry import ChannelsTelemetrySnapshot, RuntimeMetadata
 from app.schema.todo import TodoItem, TodoListSnapshot
 from app.util.web import (
@@ -220,6 +221,22 @@ async def _authorize_control(authorization: str | None) -> AuthScope:
         )
 
     return AuthScope.CONTROL
+
+
+async def _authorize_a2a(authorization: str | None) -> AuthScope:
+    expected_token = settings.a2a_bearer_token()
+    if expected_token is None:
+        return AuthScope.A2A
+
+    presented_token = _extract_bearer_token(authorization)
+    if presented_token is None or not secrets.compare_digest(presented_token, expected_token):
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or invalid bearer token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return AuthScope.A2A
 
 
 def _operator_response(
@@ -1255,6 +1272,70 @@ async def shutdown_runtime(request: Request) -> dict[str, Any]:
         scope=scope,
         details=details,
     )
+
+
+@mcp_app.post("/a2a/messages")
+async def post_a2a_message(envelope: A2AEnvelope, request: Request) -> dict[str, Any]:
+    await _authorize_a2a(request.headers.get("authorization"))
+
+    try:
+        channel_plugin = get_channel_plugin("a2a", create=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    if channel_plugin is None:
+        raise HTTPException(status_code=404, detail="A2A channel is not enabled.")
+
+    enqueue_envelope = getattr(channel_plugin, "enqueue_envelope", None)
+    if not callable(enqueue_envelope):
+        raise HTTPException(status_code=503, detail="Configured A2A channel does not support HTTP ingress.")
+
+    enqueue_envelope_callable = cast(
+        "Callable[..., Awaitable[Any]]",
+        enqueue_envelope,
+    )
+
+    try:
+        inbound_message = await enqueue_envelope_callable(
+            envelope,
+            client_host=request.client.host if request.client is not None else None,
+        )
+    except ValueError as exc:
+        await runtime_telemetry.record_event(
+            event_type="a2a.message.rejected",
+            source="a2a-http",
+            level="warning",
+            message="Rejected inbound A2A envelope.",
+            data={
+                "sender_runtime_id": envelope.sender_runtime_id,
+                "target_runtime_id": envelope.target_runtime_id,
+                "conversation_id": envelope.conversation_id,
+                "error": str(exc),
+            },
+        )
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    await runtime_telemetry.record_event(
+        event_type="a2a.message.accepted",
+        source="a2a-http",
+        message="Accepted inbound A2A envelope.",
+        data={
+            "sender_runtime_id": envelope.sender_runtime_id,
+            "target_runtime_id": envelope.target_runtime_id,
+            "conversation_id": envelope.conversation_id,
+            "local_conversation_id": inbound_message.conversation_id,
+            "intent": envelope.intent.value,
+            "message_id": envelope.message_id,
+        },
+    )
+    return {
+        "ok": True,
+        "runtime_id": settings.runtime_id,
+        "accepted": True,
+        "channel": "a2a",
+        "local_conversation_id": inbound_message.conversation_id,
+        "message_id": envelope.message_id,
+    }
 
 
 @mcp_app.get(f"{settings.mcp_shortener_route_prefix()}/{{token}}", include_in_schema=False)

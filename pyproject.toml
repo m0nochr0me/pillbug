@@ -35,6 +35,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+a2a = ["pillbug-a2a"]
 telegram = ["pillbug-telegram"]
 
 [project.urls]
@@ -56,6 +57,7 @@ pillbug = "app.__main__:entrypoint"
 package = true
 
 [tool.uv.sources]
+pillbug-a2a = { workspace = true }
 pillbug-telegram = { workspace = true }
 
 [tool.uv.workspace]

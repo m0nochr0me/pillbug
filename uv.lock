@@ -5,6 +5,7 @@ requires-python = ">=3.14"
 [manifest]
 members = [
     "pillbug",
+    "pillbug-a2a",
     "pillbug-telegram",
 ]
 
@@ -1048,6 +1049,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+a2a = [
+    { name = "pillbug-a2a" },
+]
 telegram = [
     { name = "pillbug-telegram" },
 ]
@@ -1070,18 +1074,30 @@ requires-dist = [
     { name = "google-genai", specifier = ">=1.67.0" },
     { name = "jinja2", specifier = ">=3.1.6" },
     { name = "loguru", specifier = ">=0.7.3" },
+    { name = "pillbug-a2a", marker = "extra == 'a2a'", editable = "packages/pillbug-a2a" },
     { name = "pillbug-telegram", marker = "extra == 'telegram'", editable = "packages/pillbug-telegram" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pydocket", specifier = ">=0.18.2" },
     { name = "redis", specifier = ">=7.3.0" },
 ]
-provides-extras = ["telegram"]
+provides-extras = ["a2a", "telegram"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "pre-commit", specifier = ">=4.5.1" },
     { name = "ruff", specifier = ">=0.15.6" },
 ]
+
+[[package]]
+name = "pillbug-a2a"
+version = "0.1.0"
+source = { editable = "packages/pillbug-a2a" }
+dependencies = [
+    { name = "pillbug" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pillbug", editable = "." }]
 
 [[package]]
 name = "pillbug-telegram"

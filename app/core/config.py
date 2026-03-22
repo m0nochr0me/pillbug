@@ -140,7 +140,36 @@ class Settings(BaseSettings):
         return normalized
 
     @model_validator(mode="after")
-    def validate_auth_configuration(self) -> Self:
+    def normalize_paths_and_validate_auth_configuration(self) -> Self:
+        explicitly_configured_fields = set(self.model_fields_set)
+
+        if "LOG_DIR" not in explicitly_configured_fields:
+            self.LOG_DIR = self.BASE_DIR / "logs"
+
+        if "SESSIONS_DIR" not in explicitly_configured_fields:
+            self.SESSIONS_DIR = self.BASE_DIR / "sessions"
+
+        if "TASKS_DIR" not in explicitly_configured_fields:
+            self.TASKS_DIR = self.BASE_DIR / "tasks"
+
+        if "TASKS_STORE_PATH" not in explicitly_configured_fields:
+            self.TASKS_STORE_PATH = self.TASKS_DIR / "agent_tasks.json"
+
+        if "SECURITY_PATTERNS_PATH" not in explicitly_configured_fields:
+            self.SECURITY_PATTERNS_PATH = self.BASE_DIR / "security_patterns.json"
+
+        if "WORKSPACE_ROOT" not in explicitly_configured_fields:
+            self.WORKSPACE_ROOT = self.BASE_DIR / "workspace"
+
+        if "RUNTIME_ID_PATH" not in explicitly_configured_fields:
+            self.RUNTIME_ID_PATH = self.BASE_DIR / "runtime_id.txt"
+
+        if "MCP_SHORTENER_STORE_PATH" not in explicitly_configured_fields:
+            self.MCP_SHORTENER_STORE_PATH = self.BASE_DIR / "short_urls.json"
+
+        if "MCP_FETCH_URL_OUTPUT_DIR" not in explicitly_configured_fields:
+            self.MCP_FETCH_URL_OUTPUT_DIR = self.WORKSPACE_ROOT / "fetched"
+
         dashboard_token = self.dashboard_bearer_token()
         a2a_token = self.a2a_bearer_token()
 
