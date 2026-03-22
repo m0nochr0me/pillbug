@@ -13,6 +13,7 @@ from app.core.cache import cache
 from app.core.config import settings
 from app.core.log import logger
 from app.schema.messages import InboundMessage
+from app.schema.telemetry import ChannelTelemetryEntry
 
 
 class ChannelPlugin(Protocol):
@@ -288,6 +289,30 @@ async def get_available_channels_context() -> list[str]:
                 channels.append(_channel_send_target(channel))
 
     return channels
+
+
+async def describe_channel_telemetry() -> list[ChannelTelemetryEntry]:
+    channel_entries: list[ChannelTelemetryEntry] = []
+
+    for channel_name in settings.enabled_channels():
+        channel = _active_channels.get(channel_name)
+        known_destinations = sorted(
+            _known_channel_conversations.get(channel_name, set())
+            | await _get_cached_channel_conversations(channel_name)
+        )
+
+        channel_entries.append(
+            ChannelTelemetryEntry(
+                name=channel_name,
+                destination_kind=channel.destination_kind if channel is not None else "unknown",
+                enabled=True,
+                active=channel is not None,
+                known_destinations=tuple(known_destinations),
+                known_destination_count=len(known_destinations),
+            )
+        )
+
+    return channel_entries
 
 
 def load_channel_plugins() -> list[ChannelPlugin]:

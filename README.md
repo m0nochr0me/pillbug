@@ -14,6 +14,7 @@ Pillbug is an async AI agent runtime built for isolated deployment.
 - URL fetching tool with streamed size limits and readable HTML snapshots
 - Session-scoped todo planning tool for multi-step agent work
 - Embedded Docket worker for scheduled background AI tasks
+- Read-only HTTP telemetry endpoints plus an SSE event stream for external dashboards
 - Per-workspace `AGENTS.md` instructions seeded on first run
 
 ## Quick Start
@@ -99,7 +100,8 @@ Common environment variables:
 
 - `PB_GEMINI_API_KEY` for Gemini access
 - `PB_RUNTIME_ID` to pin a stable runtime identifier explicitly; when omitted, Pillbug persists one at `~/.pillbug/runtime_id.txt`
-- `PB_DASHBOARD_BEARER_TOKEN` to protect the upcoming dashboard telemetry and control APIs with a single dashboard-scoped bearer token
+- `PB_AGENT_NAME` to attach an operator-facing agent label to runtime telemetry
+- `PB_DASHBOARD_BEARER_TOKEN` to protect the dashboard telemetry APIs and the upcoming control APIs with a single dashboard-scoped bearer token
 - `PB_A2A_BEARER_TOKEN` to reserve a distinct bearer token for future runtime-to-runtime A2A traffic
 - `PB_ENABLED_CHANNELS` to enable `cli` and registered external channels
 - `PB_CHANNEL_PLUGIN_FACTORIES` for `channel=package.module:factory` plugin mappings
@@ -110,6 +112,23 @@ Common environment variables:
 - `PB_MCP_FETCH_URL_MAX_BYTES` to cap streamed URL downloads before they are saved
 - `PB_MCP_FETCH_URL_OUTPUT_DIR` to choose where fetched resources are written inside the workspace
 - `PB_MCP_FETCH_URL_TIMEOUT_SECONDS` to tune remote fetch timeouts
+
+## Telemetry API
+
+Pillbug now exposes read-only runtime telemetry alongside the MCP HTTP server.
+
+Available endpoints:
+
+- `GET /health`
+- `GET /telemetry/runtime`
+- `GET /telemetry/channels`
+- `GET /telemetry/sessions`
+- `GET /telemetry/tasks`
+- `GET /telemetry/events`
+
+`GET /telemetry/events` uses Server-Sent Events and emits an initial runtime snapshot followed by live runtime, session, channel, and scheduler events.
+
+When `PB_DASHBOARD_BEARER_TOKEN` is configured, these endpoints require `Authorization: Bearer <token>`.
 
 ## Scheduled Tasks
 

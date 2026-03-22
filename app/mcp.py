@@ -3,8 +3,10 @@ Composition MCP Server
 """
 
 import asyncio
+import json
 import os
 import re
+import secrets
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
@@ -12,8 +14,8 @@ from typing import Any, Literal
 
 import aiohttp
 import uvicorn
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import RedirectResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import RedirectResponse, StreamingResponse
 from fastmcp import Context, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.server import create_proxy
@@ -22,12 +24,13 @@ from fastmcp.server.middleware.logging import LoggingMiddleware
 from app import __project__, __version__
 from app.core.config import settings
 from app.core.log import logger, uvicorn_log_config
+from app.core.telemetry import runtime_telemetry
 from app.core.url_shortener import local_url_shortener
 from app.middleware.compactor import CompactorMiddleware
-from app.runtime.channels import get_channel_plugin
+from app.runtime.channels import describe_channel_telemetry, get_channel_plugin
 from app.runtime.scheduler import task_scheduler
 from app.schema.control import AuthScope, AuthTokenBinding, RuntimeAuthConfiguration
-from app.schema.telemetry import RuntimeMetadata
+from app.schema.telemetry import ChannelsTelemetrySnapshot, RuntimeMetadata
 from app.schema.todo import TodoItem, TodoListSnapshot
 from app.util.web import (
     build_fetch_output_path,
@@ -133,14 +136,7 @@ def _serialize_todo_snapshot(action: str, snapshot: TodoListSnapshot) -> dict[st
 
 
 def _build_runtime_metadata() -> RuntimeMetadata:
-    return RuntimeMetadata(
-        runtime_id=settings.runtime_id,
-        project=__project__,
-        version=__version__,
-        timezone=settings.TIMEZONE,
-        workspace_root=str(settings.WORKSPACE_ROOT),
-        enabled_channels=settings.enabled_channels(),
-    )
+    return runtime_telemetry.metadata()
 
 
 def _build_runtime_auth_configuration() -> RuntimeAuthConfiguration:
@@ -172,6 +168,44 @@ def _build_runtime_auth_configuration() -> RuntimeAuthConfiguration:
         control_protected=dashboard_token is not None,
         a2a_protected=a2a_token is not None,
     )
+
+
+def _extract_bearer_token(authorization: str | None) -> str | None:
+    if authorization is None:
+        return None
+
+    scheme, _, token = authorization.strip().partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        return None
+
+    return token.strip() or None
+
+
+async def _authorize_telemetry(authorization: str | None) -> AuthScope | None:
+    expected_token = settings.dashboard_bearer_token()
+    if expected_token is None:
+        return None
+
+    presented_token = _extract_bearer_token(authorization)
+    if presented_token is None or not secrets.compare_digest(presented_token, expected_token):
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or invalid bearer token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return AuthScope.TELEMETRY
+
+
+def _format_sse_event(
+    event_payload: dict[str, Any], *, event_name: str = "message", event_id: str | None = None
+) -> str:
+    lines: list[str] = []
+    if event_id:
+        lines.append(f"id: {event_id}")
+    lines.append(f"event: {event_name}")
+    lines.append(f"data: {json.dumps(event_payload, separators=(',', ':'))}")
+    return "\n".join(lines) + "\n\n"
 
 
 @mcp.resource("resource://runtime_info")
@@ -775,6 +809,91 @@ mcp_app = FastAPI(
 
 mcp_app.state.runtime_metadata = _build_runtime_metadata()
 mcp_app.state.runtime_auth_configuration = _build_runtime_auth_configuration()
+
+
+@mcp_app.get("/health")
+async def get_health_status(request: Request) -> dict[str, Any]:
+    await _authorize_telemetry(request.headers.get("authorization"))
+    return (await runtime_telemetry.build_health_status()).model_dump(mode="json")
+
+
+@mcp_app.get("/telemetry/runtime")
+async def get_runtime_telemetry(request: Request) -> dict[str, Any]:
+    await _authorize_telemetry(request.headers.get("authorization"))
+    return (await runtime_telemetry.build_runtime_snapshot(mcp_app.state.runtime_auth_configuration)).model_dump(
+        mode="json"
+    )
+
+
+@mcp_app.get("/telemetry/channels")
+async def get_channel_telemetry(request: Request) -> dict[str, Any]:
+    await _authorize_telemetry(request.headers.get("authorization"))
+    snapshot = ChannelsTelemetrySnapshot(
+        runtime_id=settings.runtime_id,
+        enabled_channels=settings.enabled_channels(),
+        channels=await describe_channel_telemetry(),
+    )
+    return snapshot.model_dump(mode="json")
+
+
+@mcp_app.get("/telemetry/sessions")
+async def get_session_telemetry(request: Request) -> dict[str, Any]:
+    await _authorize_telemetry(request.headers.get("authorization"))
+    return (await runtime_telemetry.build_sessions_snapshot()).model_dump(mode="json")
+
+
+@mcp_app.get("/telemetry/tasks")
+async def get_task_telemetry(request: Request) -> dict[str, Any]:
+    await _authorize_telemetry(request.headers.get("authorization"))
+    return (await runtime_telemetry.build_tasks_snapshot()).model_dump(mode="json")
+
+
+@mcp_app.get("/telemetry/events")
+async def stream_telemetry_events(
+    request: Request,
+    replay: int = 20,
+) -> StreamingResponse:
+    await _authorize_telemetry(request.headers.get("authorization"))
+    replay = max(0, min(replay, 100))
+
+    async def event_stream():
+        queue, replay_events = await runtime_telemetry.subscribe(replay=replay)
+        try:
+            initial_payload = (
+                await runtime_telemetry.build_runtime_snapshot(mcp_app.state.runtime_auth_configuration)
+            ).model_dump(mode="json")
+            yield _format_sse_event(initial_payload, event_name="runtime.snapshot")
+
+            for event in replay_events:
+                yield _format_sse_event(
+                    event.model_dump(mode="json"), event_name=event.event_type, event_id=event.event_id
+                )
+
+            while True:
+                if await request.is_disconnected():
+                    break
+
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except TimeoutError:
+                    yield ": keep-alive\n\n"
+                    continue
+
+                yield _format_sse_event(
+                    event.model_dump(mode="json"), event_name=event.event_type, event_id=event.event_id
+                )
+        finally:
+            await runtime_telemetry.unsubscribe(queue)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @mcp_app.get(f"{settings.mcp_shortener_route_prefix()}/{{token}}", include_in_schema=False)

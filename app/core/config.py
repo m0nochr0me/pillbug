@@ -63,6 +63,7 @@ class Settings(BaseSettings):
 
     RUNTIME_ID: str | None = None
     RUNTIME_ID_PATH: Path = BASE_DIR / "runtime_id.txt"
+    AGENT_NAME: str | None = None
     DASHBOARD_BEARER_TOKEN: SecretStr | None = None
     A2A_BEARER_TOKEN: SecretStr | None = None
 

@@ -15,6 +15,7 @@ from docket import Cron, Docket, Perpetual, Worker
 from app.core.ai import GeminiChatService, chat_service
 from app.core.config import settings
 from app.core.log import logger
+from app.core.telemetry import runtime_telemetry
 from app.schema.tasks import (
     AgentTaskDefinition,
     AgentTaskRunRecord,
@@ -22,6 +23,13 @@ from app.schema.tasks import (
     CronTaskSchedule,
     DelayedTaskSchedule,
     TaskSchedule,
+)
+from app.schema.telemetry import (
+    AgentTaskTelemetryEntry,
+    SchedulerTelemetrySnapshot,
+    TaskExecutionTelemetry,
+    TaskRunTelemetry,
+    TasksTelemetrySnapshot,
 )
 from app.util.workspace import async_read_text_file, async_write_text_file
 
@@ -47,6 +55,7 @@ class AgentTaskScheduler:
         self._worker: Worker | None = None
         self._worker_task: asyncio.Task[None] | None = None
         self._started = False
+        runtime_telemetry.bind_scheduler(self)
 
     async def ensure_started(self) -> None:
         if self._started:
@@ -78,6 +87,12 @@ class AgentTaskScheduler:
             self._worker = worker
             self._worker_task = asyncio.create_task(worker.run_forever(), name="pillbug:docket-worker")
             self._started = True
+            await runtime_telemetry.record_event(
+                event_type="scheduler.started",
+                source="scheduler",
+                message="Embedded task scheduler started.",
+                data={"backend": self._scheduler_backend(), "task_count": len(self._tasks)},
+            )
 
             try:
                 for definition in self._tasks.values():
@@ -108,6 +123,13 @@ class AgentTaskScheduler:
 
         if docket is not None:
             await docket.__aexit__(None, None, None)
+
+        await runtime_telemetry.record_event(
+            event_type="scheduler.stopped",
+            source="scheduler",
+            message="Embedded task scheduler stopped.",
+            data={"backend": self._scheduler_backend()},
+        )
 
     async def list_tasks(self) -> dict[str, Any]:
         await self.ensure_started()
@@ -164,6 +186,12 @@ class AgentTaskScheduler:
             await self._schedule_task(definition, replace=False)
 
         logger.info(f"Created scheduled agent task {definition.task_id}")
+        await runtime_telemetry.record_event(
+            event_type="scheduler.task.created",
+            source="scheduler",
+            message="Scheduled task created.",
+            data={"task_id": definition.task_id, "name": definition.name, "schedule_kind": definition.schedule.kind},
+        )
         return {
             "task": await self._serialize_task(definition),
         }
@@ -237,6 +265,18 @@ class AgentTaskScheduler:
             await self._cancel_task(updated.execution_key)
 
         logger.info(f"Updated scheduled agent task {task_id} to revision {updated.revision}")
+        await runtime_telemetry.record_event(
+            event_type="scheduler.task.updated",
+            source="scheduler",
+            message="Scheduled task updated.",
+            data={
+                "task_id": updated.task_id,
+                "name": updated.name,
+                "revision": updated.revision,
+                "enabled": updated.enabled,
+                "schedule_kind": updated.schedule.kind,
+            },
+        )
         return {
             "task": await self._serialize_task(updated),
         }
@@ -253,6 +293,12 @@ class AgentTaskScheduler:
 
         await self._cancel_task(definition.execution_key)
         logger.info(f"Deleted scheduled agent task {task_id}")
+        await runtime_telemetry.record_event(
+            event_type="scheduler.task.deleted",
+            source="scheduler",
+            message="Scheduled task deleted.",
+            data={"task_id": task_id, "name": definition.name},
+        )
         return {
             "task_id": task_id,
             "deleted": True,
@@ -275,6 +321,13 @@ class AgentTaskScheduler:
         action = self._default_task_action(definition.schedule.kind)
         error: str | None = None
 
+        await runtime_telemetry.record_event(
+            event_type="scheduler.task.run.started",
+            source="scheduler",
+            message="Scheduled task execution started.",
+            data={"task_id": task_id, "revision": revision, "schedule_kind": definition.schedule.kind},
+        )
+
         try:
             session = await self._chat_service.restore_session(definition.resolved_session_id)
             response = await session.send_message(self._build_model_input(definition))
@@ -288,6 +341,13 @@ class AgentTaskScheduler:
             }
         except Exception as exc:
             error = str(exc)
+            await runtime_telemetry.record_event(
+                event_type="scheduler.task.run.failed",
+                source="scheduler",
+                level="error",
+                message="Scheduled task execution failed.",
+                data={"task_id": task_id, "revision": revision, "error": error},
+            )
             raise
         finally:
             latest = await self._task_snapshot(task_id)
@@ -310,6 +370,14 @@ class AgentTaskScheduler:
                     error=error,
                 ),
             )
+
+            if error is None:
+                await runtime_telemetry.record_event(
+                    event_type="scheduler.task.run.completed",
+                    source="scheduler",
+                    message="Scheduled task execution completed.",
+                    data={"task_id": task_id, "revision": revision, "action": action},
+                )
 
     async def _load_store(self) -> None:
         if not await asyncio.to_thread(self._store_path.is_file):
@@ -622,6 +690,91 @@ class AgentTaskScheduler:
             "completed_at": execution.completed_at.isoformat() if execution.completed_at else None,
             "error": execution.error,
         }
+
+    def _scheduler_backend(self) -> str:
+        return settings.docket_url().partition("://")[0] or "memory"
+
+    async def _execution_telemetry_by_key(self) -> dict[str, TaskExecutionTelemetry]:
+        if self._docket is None:
+            return {}
+
+        snapshot = await self._docket.snapshot()
+        telemetry_by_key: dict[str, TaskExecutionTelemetry] = {}
+
+        for execution in [*snapshot.future, *snapshot.running]:
+            state = getattr(execution.state, "value", execution.state)
+            telemetry_by_key[execution.key] = TaskExecutionTelemetry(
+                key=execution.key,
+                state=str(state),
+                when=execution.when,
+                started_at=execution.started_at,
+                completed_at=execution.completed_at,
+                error=execution.error,
+            )
+
+        return telemetry_by_key
+
+    def _last_run_telemetry(self, definition: AgentTaskDefinition) -> TaskRunTelemetry | None:
+        if definition.last_run is None:
+            return None
+
+        return TaskRunTelemetry(
+            task_id=definition.task_id,
+            task_name=definition.name,
+            state=definition.last_run.state,
+            action=definition.last_run.action,
+            started_at=definition.last_run.started_at,
+            finished_at=definition.last_run.finished_at,
+            response_text=definition.last_run.response_text,
+            error=definition.last_run.error,
+        )
+
+    async def describe_tasks_telemetry(self) -> TasksTelemetrySnapshot:
+        definitions = await self._task_snapshots() if self._started or self._tasks else []
+        execution_by_key = await self._execution_telemetry_by_key() if self._started else {}
+
+        task_entries: list[AgentTaskTelemetryEntry] = []
+        recent_runs: list[TaskRunTelemetry] = []
+
+        for definition in definitions:
+            last_run = self._last_run_telemetry(definition)
+            if last_run is not None:
+                recent_runs.append(last_run)
+
+            task_entries.append(
+                AgentTaskTelemetryEntry(
+                    task_id=definition.task_id,
+                    name=definition.name,
+                    schedule_kind=definition.schedule.kind,
+                    enabled=definition.enabled,
+                    revision=definition.revision,
+                    created_at=definition.created_at,
+                    updated_at=definition.updated_at,
+                    last_run=last_run,
+                    execution=execution_by_key.get(definition.execution_key),
+                )
+            )
+
+        task_entries.sort(key=lambda entry: entry.updated_at, reverse=True)
+        recent_runs.sort(key=lambda run: run.finished_at, reverse=True)
+
+        scheduler_snapshot = SchedulerTelemetrySnapshot(
+            started=self._started,
+            backend=self._scheduler_backend(),
+            total_tasks=len(definitions),
+            enabled_tasks=sum(1 for definition in definitions if definition.enabled),
+            cron_tasks=sum(1 for definition in definitions if definition.schedule.kind == "cron"),
+            delayed_tasks=sum(1 for definition in definitions if definition.schedule.kind == "delayed"),
+            running_executions=sum(1 for execution in execution_by_key.values() if execution.state == "running"),
+            scheduled_executions=sum(1 for execution in execution_by_key.values() if execution.state != "running"),
+            recent_runs=recent_runs[:20],
+        )
+
+        return TasksTelemetrySnapshot(
+            runtime_id=settings.runtime_id,
+            scheduler=scheduler_snapshot,
+            tasks=task_entries,
+        )
 
 
 task_scheduler = AgentTaskScheduler(chat_service=chat_service)
