@@ -65,7 +65,17 @@ class Settings(BaseSettings):
     RUNTIME_ID_PATH: Path = BASE_DIR / "runtime_id.txt"
     AGENT_NAME: str | None = None
     DASHBOARD_BEARER_TOKEN: SecretStr | None = None
+
     A2A_BEARER_TOKEN: SecretStr | None = None
+    A2A_SELF_BASE_URL: str | None = None
+    A2A_INGRESS_PATH: str = "/a2a/messages"
+    A2A_OUTBOUND_TIMEOUT_SECONDS: float = 15.0
+    A2A_CONVERGENCE_MAX_HOPS: int = 2
+    A2A_AGENT_DESCRIPTION: str | None = None
+    A2A_PROVIDER_ORGANIZATION: str = "Pillbug"
+    A2A_PROVIDER_URL: str | None = None
+    A2A_DOCUMENTATION_URL: str | None = None
+    A2A_ICON_URL: str | None = None
 
     GEMINI_MODEL: str = "gemini-3.1-pro-preview"
     GEMINI_TEMPERATURE: float = 1.0
@@ -120,6 +130,22 @@ class Settings(BaseSettings):
             return None
 
         return _validate_runtime_identifier(value, source="PB_RUNTIME_ID")
+
+    @field_validator("A2A_CONVERGENCE_MAX_HOPS")
+    @classmethod
+    def validate_a2a_convergence_max_hops(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("PB_A2A_CONVERGENCE_MAX_HOPS must be at least 1")
+
+        return value
+
+    @field_validator("A2A_OUTBOUND_TIMEOUT_SECONDS")
+    @classmethod
+    def validate_a2a_outbound_timeout_seconds(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("PB_A2A_OUTBOUND_TIMEOUT_SECONDS must be greater than 0")
+
+        return value
 
     @field_validator("DASHBOARD_BEARER_TOKEN", "A2A_BEARER_TOKEN", mode="before")
     @classmethod

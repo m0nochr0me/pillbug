@@ -3,6 +3,7 @@ Composition MCP Server
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -15,13 +16,14 @@ from typing import Any, Literal, cast
 import aiohttp
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastmcp import Context, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.server import create_proxy
 from fastmcp.server.middleware.logging import LoggingMiddleware
 
 from app import __project__, __version__
+from app.core.agent_card import build_extended_agent_card, build_public_agent_card
 from app.core.config import settings
 from app.core.log import logger, uvicorn_log_config
 from app.core.telemetry import runtime_telemetry
@@ -237,6 +239,36 @@ async def _authorize_a2a(authorization: str | None) -> AuthScope:
         )
 
     return AuthScope.A2A
+
+
+def _ensure_a2a_discovery_available() -> None:
+    if "a2a" not in settings.enabled_channels():
+        raise HTTPException(status_code=404, detail="A2A discovery is not enabled on this runtime.")
+
+
+def _agent_card_response(request: Request, payload: dict[str, Any], *, cache_control: str) -> JSONResponse:
+    response_body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    etag = hashlib.sha256(response_body).hexdigest()
+
+    if request.headers.get("if-none-match") == etag:
+        return JSONResponse(
+            status_code=304,
+            content=None,
+            headers={
+                "Cache-Control": cache_control,
+                "ETag": etag,
+            },
+            media_type="application/a2a+json",
+        )
+
+    return JSONResponse(
+        content=payload,
+        media_type="application/a2a+json",
+        headers={
+            "Cache-Control": cache_control,
+            "ETag": etag,
+        },
+    )
 
 
 def _operator_response(
@@ -1271,6 +1303,33 @@ async def shutdown_runtime(request: Request) -> dict[str, Any]:
         message=response_message,
         scope=scope,
         details=details,
+    )
+
+
+@mcp_app.get("/.well-known/agent-card.json")
+async def get_public_agent_card(request: Request) -> JSONResponse:
+    _ensure_a2a_discovery_available()
+    card = build_public_agent_card()
+    return _agent_card_response(
+        request,
+        card.model_dump(mode="json", by_alias=True, exclude_none=True),
+        cache_control="public, max-age=300",
+    )
+
+
+@mcp_app.get("/extendedAgentCard")
+async def get_extended_agent_card(request: Request) -> JSONResponse:
+    _ensure_a2a_discovery_available()
+    await _authorize_a2a(request.headers.get("authorization"))
+
+    card = build_extended_agent_card()
+    if card is None:
+        raise HTTPException(status_code=404, detail="Extended Agent Card is not enabled on this runtime.")
+
+    return _agent_card_response(
+        request,
+        card.model_dump(mode="json", by_alias=True, exclude_none=True),
+        cache_control="private, max-age=60",
     )
 
 

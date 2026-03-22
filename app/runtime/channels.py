@@ -190,6 +190,37 @@ def _channel_send_target(channel: ChannelPlugin) -> str:
     return f"{channel.name}:<{channel.destination_kind}>"
 
 
+def _normalize_channel_context_destinations(destinations: object) -> tuple[str, ...]:
+    if not isinstance(destinations, list | tuple | set):
+        return ()
+
+    normalized_destinations: list[str] = []
+    for destination in destinations:
+        if not isinstance(destination, str):
+            continue
+
+        normalized_destination = destination.strip()
+        if normalized_destination:
+            normalized_destinations.append(normalized_destination)
+
+    return tuple(dict.fromkeys(normalized_destinations))
+
+
+def _channel_context_destinations(
+    channel: ChannelPlugin,
+    known_destinations: tuple[str, ...],
+) -> tuple[str, ...] | None:
+    context_destinations = getattr(channel, "context_destinations", None)
+    if not callable(context_destinations):
+        return None
+
+    try:
+        return _normalize_channel_context_destinations(context_destinations(known_destinations))
+    except Exception:
+        logger.exception(f"Failed to build available channel context for {channel.name}")
+        return None
+
+
 def _load_channel_factory(import_path: str) -> ChannelFactory:
     """
     Dynamically load a channel factory from an import path.
@@ -283,7 +314,10 @@ async def get_available_channels_context() -> list[str]:
                 _known_channel_conversations.get(channel_name, set())
                 | await _get_cached_channel_conversations(channel_name)
             )
-            if known_destinations:
+            context_destinations = _channel_context_destinations(channel, tuple(known_destinations))
+            if context_destinations:
+                channels.extend(f"{channel.name}:{destination}" for destination in context_destinations)
+            elif known_destinations:
                 channels.extend(f"{channel.name}:{destination}" for destination in known_destinations)
             else:
                 channels.append(_channel_send_target(channel))

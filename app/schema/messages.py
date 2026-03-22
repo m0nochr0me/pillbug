@@ -11,6 +11,8 @@ from uuid import uuid4
 from pydantic import BaseModel, Field, model_validator
 
 _RUNTIME_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$")
+_A2A_CONVERGENCE_METADATA_KEY = "pillbug_convergence"
+A2A_CONVERGENCE_EXTENSION_URI = "https://pillbug.dev/extensions/a2a-convergence/v1"
 
 
 def _utcnow() -> datetime:
@@ -103,6 +105,68 @@ class A2ATarget(BaseModel):
         return f"{self.runtime_id}/{self.conversation_id}"
 
 
+class A2AConvergenceState(BaseModel):
+    max_hops: int = Field(default=2, ge=1, le=32)
+    hop_count: int = Field(default=0, ge=0, le=32)
+    stop_requested: bool = False
+    stop_reason: str | None = None
+
+    @model_validator(mode="after")
+    def normalize_values(self) -> Self:
+        if self.stop_reason is not None:
+            self.stop_reason = self.stop_reason.strip() or None
+
+        if self.hop_count > self.max_hops:
+            raise ValueError("hop_count must not exceed max_hops")
+
+        return self
+
+    @property
+    def remaining_hops(self) -> int:
+        return max(self.max_hops - self.hop_count, 0)
+
+    def reply_block_reason(self, intent: A2AIntent) -> str | None:
+        if self.stop_requested:
+            return "stop_requested"
+
+        if intent in {A2AIntent.RESULT, A2AIntent.INFORM, A2AIntent.ERROR, A2AIntent.HEARTBEAT}:
+            return "terminal_intent"
+
+        if self.hop_count >= self.max_hops:
+            return "convergence_limit"
+
+        return None
+
+    def next_outbound(self, *, stop_requested: bool = False, stop_reason: str | None = None) -> Self:
+        if self.hop_count >= self.max_hops:
+            raise ValueError("A2A convergence limit reached; cannot emit another automatic outbound message")
+
+        return self.model_copy(
+            update={
+                "hop_count": self.hop_count + 1,
+                "stop_requested": self.stop_requested or stop_requested,
+                "stop_reason": (stop_reason.strip() or None) if stop_reason is not None else self.stop_reason,
+            }
+        )
+
+    def to_metadata(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+    def render_limit_message(self) -> str:
+        return (
+            "Convergence limit reached for this A2A exchange. "
+            f"Current hop is {self.hop_count} of {self.max_hops}. No further automatic replies will be sent."
+        )
+
+    @classmethod
+    def from_metadata(cls, metadata: dict[str, Any]) -> Self:
+        raw_state = metadata.get(_A2A_CONVERGENCE_METADATA_KEY)
+        if not isinstance(raw_state, dict):
+            return cls()
+
+        return cls.model_validate(raw_state)
+
+
 class A2AEnvelope(BaseModel):
     sender_runtime_id: str = Field(min_length=3, max_length=64)
     sender_agent_name: str | None = None
@@ -157,12 +221,29 @@ class A2AEnvelope(BaseModel):
     def local_conversation_id(self) -> str:
         return self.sender_target.as_conversation_target()
 
+    @property
+    def convergence_state(self) -> A2AConvergenceState:
+        return A2AConvergenceState.from_metadata(self.metadata)
+
     def render_inbound_text(self) -> str:
         sender_label = self.sender_runtime_id
         if self.sender_agent_name:
             sender_label = f"{sender_label} ({self.sender_agent_name})"
 
         lines = [f"A2A {self.intent.value} from {sender_label}", self.text]
+        convergence_state = self.convergence_state
+        lines.append(
+            f"Convergence: hop {convergence_state.hop_count}/{convergence_state.max_hops}; remaining automatic replies {convergence_state.remaining_hops}."
+        )
+
+        block_reason = convergence_state.reply_block_reason(self.intent)
+        if block_reason == "terminal_intent":
+            lines.append(
+                "This A2A message is informational or terminal. Process it locally, but do not send an automatic reply on the same exchange."
+            )
+        elif block_reason == "convergence_limit":
+            lines.append(convergence_state.render_limit_message())
+
         if self.attachments:
             attachment_summary = ", ".join(attachment.render_summary() for attachment in self.attachments[:5])
             if len(self.attachments) > 5:
@@ -174,6 +255,7 @@ class A2AEnvelope(BaseModel):
     def to_inbound_metadata(self) -> dict[str, Any]:
         envelope_payload = self.model_dump(mode="json")
         envelope_payload["local_conversation_id"] = self.local_conversation_id
+        convergence_state = self.convergence_state
         return {
             "source": "a2a",
             "a2a": envelope_payload,
@@ -182,6 +264,11 @@ class A2AEnvelope(BaseModel):
             "a2a_target_runtime_id": self.target_runtime_id,
             "a2a_message_id": self.message_id,
             "a2a_reply_to_message_id": self.reply_to_message_id,
+            _A2A_CONVERGENCE_METADATA_KEY: convergence_state.to_metadata(),
+            "a2a_hop_count": convergence_state.hop_count,
+            "a2a_max_hops": convergence_state.max_hops,
+            "a2a_stop_requested": convergence_state.stop_requested,
+            "a2a_stop_reason": convergence_state.stop_reason,
         }
 
     def to_inbound_message(

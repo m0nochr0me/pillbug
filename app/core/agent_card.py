@@ -1,0 +1,149 @@
+"""Helpers for building A2A Agent Card discovery payloads."""
+
+from app import __version__
+from app.core.config import settings
+from app.schema.agent_card import (
+    AgentCapabilities,
+    AgentCard,
+    AgentExtension,
+    AgentInterface,
+    AgentProvider,
+    AgentSkill,
+    HttpAuthSecurityScheme,
+    SecurityScheme,
+)
+from app.schema.messages import A2A_CONVERGENCE_EXTENSION_URI
+
+_CUSTOM_BINDING_NAME = "PILLBUG-A2A"
+_PROTOCOL_VERSION = "1.0"
+_TERMINAL_INTENTS = ("result", "inform", "error", "heartbeat")
+_RESPONSE_ELIGIBLE_INTENTS = ("ask", "delegate")
+
+
+def _normalized_base_url() -> str:
+    configured_base_url = (settings.A2A_SELF_BASE_URL or "").strip()
+    if configured_base_url:
+        return configured_base_url.rstrip("/")
+
+    return settings.mcp_shortener_base_url().rstrip("/")
+
+
+def _provider() -> AgentProvider | None:
+    organization = settings.A2A_PROVIDER_ORGANIZATION.strip()
+    provider_url = (settings.A2A_PROVIDER_URL or "").strip()
+    if not organization or not provider_url:
+        return None
+
+    return AgentProvider(organization=organization, url=provider_url)
+
+
+def _security_schemes() -> tuple[dict[str, SecurityScheme] | None, tuple[dict[str, tuple[str, ...]], ...] | None]:
+    if settings.a2a_bearer_token() is None:
+        return None, None
+
+    scheme_name = "a2aBearer"
+    return (
+        {
+            scheme_name: SecurityScheme(
+                http_auth_security_scheme=HttpAuthSecurityScheme(
+                    scheme="Bearer",
+                    bearer_format="Opaque",
+                    description="Bearer token required for authenticated Pillbug A2A peer access.",
+                )
+            )
+        },
+        ({scheme_name: ()},),
+    )
+
+
+def _communication_rules_extension(*, include_examples: bool) -> AgentExtension:
+    params: dict[str, object] = {
+        "maxHops": settings.A2A_CONVERGENCE_MAX_HOPS,
+        "responseEligibleIntents": list(_RESPONSE_ELIGIBLE_INTENTS),
+        "terminalIntents": list(_TERMINAL_INTENTS),
+        "onLimitReached": "return terminal notice and stop automatic replies",
+        "noAutomaticReplyOnTerminalIntent": True,
+    }
+    if include_examples:
+        params["stopNoticeExample"] = (
+            "Convergence limit reached for this A2A exchange. No further automatic replies will be sent."
+        )
+
+    return AgentExtension(
+        uri=A2A_CONVERGENCE_EXTENSION_URI,
+        description="Declares Pillbug's bounded autonomous exchange rules for cross-runtime messaging.",
+        required=False,
+        params=params,
+    )
+
+
+def _skills(*, include_extended_examples: bool) -> tuple[AgentSkill, ...]:
+    examples = [
+        "Summarize these runtime errors and return only the blocking risks.",
+        "Review this plan and send back the concrete issues that require operator action.",
+    ]
+    if include_extended_examples:
+        examples.append(
+            "If you are replying to a terminal result, use an explicit outbound tool only when a new exchange is required."
+        )
+
+    return (
+        AgentSkill(
+            id="isolated-task-collaboration",
+            name="Isolated Task Collaboration",
+            description=(
+                "Processes text-based requests from peer agents inside an isolated Pillbug runtime and returns bounded "
+                "cross-runtime results without shared local state."
+            ),
+            tags=("a2a", "automation", "delegation", "runtime"),
+            examples=tuple(examples),
+            input_modes=("text/plain",),
+            output_modes=("text/plain",),
+        ),
+    )
+
+
+def _card(*, include_extended_examples: bool) -> AgentCard:
+    base_url = _normalized_base_url()
+    security_schemes, security = _security_schemes()
+    description = (
+        settings.A2A_AGENT_DESCRIPTION or ""
+    ).strip() or f"Isolated Pillbug runtime {settings.runtime_id} for bounded cross-runtime collaboration."
+
+    return AgentCard(
+        name=(settings.AGENT_NAME or settings.runtime_id).strip(),
+        description=description,
+        supported_interfaces=(
+            AgentInterface(
+                url=f"{base_url}{settings.A2A_INGRESS_PATH}",
+                protocol_binding=_CUSTOM_BINDING_NAME,
+                protocol_version=_PROTOCOL_VERSION,
+            ),
+        ),
+        provider=_provider(),
+        version=__version__,
+        documentation_url=((settings.A2A_DOCUMENTATION_URL or "").strip() or None),
+        capabilities=AgentCapabilities(
+            streaming=False,
+            push_notifications=False,
+            extended_agent_card=settings.a2a_bearer_token() is not None,
+            extensions=(_communication_rules_extension(include_examples=include_extended_examples),),
+        ),
+        security_schemes=security_schemes,
+        security=security,
+        default_input_modes=("text/plain",),
+        default_output_modes=("text/plain",),
+        skills=_skills(include_extended_examples=include_extended_examples),
+        icon_url=((settings.A2A_ICON_URL or "").strip() or None),
+    )
+
+
+def build_public_agent_card() -> AgentCard:
+    return _card(include_extended_examples=False)
+
+
+def build_extended_agent_card() -> AgentCard | None:
+    if settings.a2a_bearer_token() is None:
+        return None
+
+    return _card(include_extended_examples=True)

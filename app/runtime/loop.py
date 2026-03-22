@@ -277,6 +277,35 @@ class ApplicationLoop:
     ) -> None:
         batch = processed_message.batch
         channel = self._channel_by_name[batch.channel_name]
+        response_policy = self._channel_response_policy(channel, batch.last_message)
+
+        if response_policy is not None and not getattr(response_policy, "should_process", True):
+            reply_text = getattr(response_policy, "reply_text", None)
+            if isinstance(reply_text, str) and reply_text.strip():
+                response_sent = await self._maybe_send_channel_response(
+                    channel=channel,
+                    inbound_message=batch.last_message,
+                    response_text=reply_text,
+                )
+                if response_sent:
+                    self._record_session_response(batch.session_key)
+                else:
+                    self._record_session_activity(batch.session_key)
+            else:
+                self._record_session_activity(batch.session_key)
+
+            await runtime_telemetry.record_event(
+                event_type="session.response.stopped",
+                source="application-loop",
+                message="Inbound message was stopped by channel response policy before model execution.",
+                data={
+                    "session_key": batch.session_key,
+                    "channel": batch.channel_name,
+                    "conversation_id": batch.conversation_id,
+                    "reason": getattr(response_policy, "reason", None),
+                },
+            )
+            return
 
         if await self._handle_command(batch, channel):
             return
@@ -284,7 +313,11 @@ class ApplicationLoop:
         if processed_message.security.blocked:
             self._record_blocked_batch(batch)
             rejection = self._render_security_rejection(processed_message)
-            await channel.send_response(batch.last_message, rejection)
+            await self._maybe_send_channel_response(
+                channel=channel,
+                inbound_message=batch.last_message,
+                response_text=rejection,
+            )
             logger.warning(f"Blocked inbound message from {batch.session_key}: {processed_message.security.reasons}")
             await runtime_telemetry.record_event(
                 event_type="session.message.blocked",
@@ -318,9 +351,17 @@ class ApplicationLoop:
 
         if command == "/clear":
             self._sessions[batch.session_key] = await self._chat_service.reset_session(batch.session_key)
-            await channel.send_response(batch.last_message, "Session cleared. Started a new chat session.")
+            response_sent = await self._maybe_send_channel_response(
+                channel=channel,
+                inbound_message=batch.last_message,
+                response_text="Session cleared. Started a new chat session.",
+            )
             logger.info(f"Cleared session history for {batch.session_key}")
-            self._record_command_response(batch, command)
+            if response_sent:
+                self._record_command_response(batch, command)
+            else:
+                self._record_command_invocation(batch, command)
+                self._record_session_activity(batch.session_key)
             await runtime_telemetry.record_event(
                 event_type="session.command.clear",
                 source="application-loop",
@@ -332,9 +373,17 @@ class ApplicationLoop:
         session = await self._get_session(batch.session_key)
 
         if command == "/usage":
-            await channel.send_response(batch.last_message, session.render_usage_report())
+            response_sent = await self._maybe_send_channel_response(
+                channel=channel,
+                inbound_message=batch.last_message,
+                response_text=session.render_usage_report(),
+            )
             logger.info(f"Reported session token usage for {batch.session_key}")
-            self._record_command_response(batch, command)
+            if response_sent:
+                self._record_command_response(batch, command)
+            else:
+                self._record_command_invocation(batch, command)
+                self._record_session_activity(batch.session_key)
             await runtime_telemetry.record_event(
                 event_type="session.command.usage",
                 source="application-loop",
@@ -348,9 +397,10 @@ class ApplicationLoop:
                 summarize_prompt = self._chat_service.render_prompt_text(_SUMMARIZE_PROMPT_NAME)
             except Exception:
                 logger.exception(f"Failed to load summarize prompt for {batch.session_key}")
-                await channel.send_response(
-                    batch.last_message,
-                    "I could not load the summarize prompt right now. Please try again.",
+                await self._maybe_send_channel_response(
+                    channel=channel,
+                    inbound_message=batch.last_message,
+                    response_text="I could not load the summarize prompt right now. Please try again.",
                 )
                 return True
 
@@ -391,9 +441,10 @@ class ApplicationLoop:
                 message="Model response generation failed.",
                 data={"session_key": batch.session_key, "channel": batch.channel_name},
             )
-            await channel.send_response(
-                batch.last_message,
-                "I could not process that message right now. Please try again.",
+            await self._maybe_send_channel_response(
+                channel=channel,
+                inbound_message=batch.last_message,
+                response_text="I could not process that message right now. Please try again.",
             )
             return
 
@@ -405,8 +456,15 @@ class ApplicationLoop:
             response_text = "I could not produce a text response right now. Please try again."
             logger.warning(f"Model response was blank for {batch.session_key}; using runtime fallback text")
 
-        await channel.send_response(batch.last_message, response_text)
-        self._record_session_response(batch.session_key)
+        response_sent = await self._maybe_send_channel_response(
+            channel=channel,
+            inbound_message=batch.last_message,
+            response_text=response_text,
+        )
+        if response_sent:
+            self._record_session_response(batch.session_key)
+        else:
+            self._record_session_activity(batch.session_key)
         await runtime_telemetry.record_event(
             event_type="session.response.completed",
             source="application-loop",
@@ -416,8 +474,49 @@ class ApplicationLoop:
                 "channel": batch.channel_name,
                 "message_count": batch.message_count,
                 "response_chars": len(response_text),
+                "response_sent": response_sent,
             },
         )
+
+    def _channel_response_policy(self, channel: ChannelPlugin, inbound_message: InboundMessage) -> object | None:
+        response_policy = getattr(channel, "response_policy", None)
+        if not callable(response_policy):
+            return None
+
+        try:
+            return response_policy(inbound_message)
+        except Exception:
+            logger.exception(f"Failed to resolve channel response policy for {channel.name}")
+            return None
+
+    async def _maybe_send_channel_response(
+        self,
+        *,
+        channel: ChannelPlugin,
+        inbound_message: InboundMessage,
+        response_text: str,
+    ) -> bool:
+        response_policy = self._channel_response_policy(channel, inbound_message)
+        if response_policy is not None and not getattr(response_policy, "should_reply", True):
+            reason = getattr(response_policy, "reason", None)
+            logger.info(
+                f"Suppressed automatic channel response for {inbound_message.session_key} channel={channel.name} reason={reason}"
+            )
+            await runtime_telemetry.record_event(
+                event_type="session.response.suppressed",
+                source="application-loop",
+                message="Automatic channel response was suppressed by channel policy.",
+                data={
+                    "session_key": inbound_message.session_key,
+                    "channel": channel.name,
+                    "conversation_id": inbound_message.conversation_id,
+                    "reason": reason,
+                },
+            )
+            return False
+
+        await channel.send_response(inbound_message, response_text)
+        return True
 
     async def _get_session(self, session_key: str) -> GeminiChatSession:
         session = self._sessions.get(session_key)
@@ -580,6 +679,14 @@ class ApplicationLoop:
         now = _utcnow()
         state.last_response_at = now
         state.last_activity_at = now
+        self._sync_pending_count(session_key)
+
+    def _record_session_activity(self, session_key: str) -> None:
+        state = self._session_state_by_key.get(session_key)
+        if state is None:
+            return
+
+        state.last_activity_at = _utcnow()
         self._sync_pending_count(session_key)
 
     def _record_session_error(self, session_key: str) -> None:

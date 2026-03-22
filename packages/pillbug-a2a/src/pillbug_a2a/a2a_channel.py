@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Any
 
 import aiohttp
@@ -12,7 +13,7 @@ from pydantic import BaseModel, Field, SecretStr, field_validator, model_validat
 from app.core.config import settings
 from app.core.log import logger
 from app.runtime.channels import BaseChannel
-from app.schema.messages import A2AEnvelope, A2AIntent, A2ATarget, InboundMessage
+from app.schema.messages import A2AConvergenceState, A2AEnvelope, A2AIntent, A2ATarget, InboundMessage
 
 _DEFAULT_INGRESS_PATH = "/a2a/messages"
 
@@ -86,6 +87,7 @@ class A2AChannelSettings(BaseModel):
     self_base_url: str | None = None
     ingress_path: str = _DEFAULT_INGRESS_PATH
     outbound_timeout_seconds: float = 15.0
+    convergence_max_hops: int = 2
     peers: tuple[A2APeerConfig, ...] = Field(default_factory=tuple)
 
     @field_validator("self_base_url")
@@ -107,6 +109,13 @@ class A2AChannelSettings(BaseModel):
             raise ValueError("outbound_timeout_seconds must be greater than zero")
         return value
 
+    @field_validator("convergence_max_hops")
+    @classmethod
+    def validate_convergence_max_hops(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("convergence_max_hops must be greater than zero")
+        return value
+
     @model_validator(mode="after")
     def validate_unique_peers(self) -> A2AChannelSettings:
         peer_ids = [peer.runtime_id for peer in self.peers]
@@ -118,14 +127,12 @@ class A2AChannelSettings(BaseModel):
     def from_env(cls) -> A2AChannelSettings:
         raw_settings: dict[str, Any] = {}
 
-        if raw_self_base_url := os.environ.get("PB_A2A_SELF_BASE_URL"):
-            raw_settings["self_base_url"] = raw_self_base_url
+        if settings.A2A_SELF_BASE_URL:
+            raw_settings["self_base_url"] = settings.A2A_SELF_BASE_URL
 
-        if raw_ingress_path := os.environ.get("PB_A2A_INGRESS_PATH"):
-            raw_settings["ingress_path"] = raw_ingress_path
-
-        if raw_timeout := os.environ.get("PB_A2A_OUTBOUND_TIMEOUT_SECONDS"):
-            raw_settings["outbound_timeout_seconds"] = float(raw_timeout)
+        raw_settings["ingress_path"] = settings.A2A_INGRESS_PATH
+        raw_settings["outbound_timeout_seconds"] = settings.A2A_OUTBOUND_TIMEOUT_SECONDS
+        raw_settings["convergence_max_hops"] = settings.A2A_CONVERGENCE_MAX_HOPS
 
         if raw_peers_json := os.environ.get("PB_A2A_PEERS_JSON"):
             raw_settings["peers"] = _parse_peers_json(raw_peers_json)
@@ -137,6 +144,14 @@ class A2AChannelSettings(BaseModel):
             if peer.runtime_id == runtime_id:
                 return peer
         return None
+
+
+@dataclass(slots=True)
+class A2AInboundPolicy:
+    should_process: bool = True
+    should_reply: bool = True
+    reason: str | None = None
+    reply_text: str | None = None
 
 
 class A2AChannel(BaseChannel):
@@ -184,6 +199,7 @@ class A2AChannel(BaseChannel):
         message_text: str,
     ) -> None:
         target = A2ATarget.parse(conversation_id)
+        convergence_state = A2AConvergenceState(max_hops=self._settings.convergence_max_hops)
         envelope = A2AEnvelope(
             sender_runtime_id=settings.runtime_id,
             sender_agent_name=settings.AGENT_NAME,
@@ -191,7 +207,7 @@ class A2AChannel(BaseChannel):
             conversation_id=target.conversation_id,
             intent=A2AIntent.ASK,
             text=message_text,
-            metadata=self._build_outbound_metadata(),
+            metadata=self._build_outbound_metadata(convergence_state=convergence_state),
         )
         await self._deliver_envelope(target.runtime_id, envelope)
 
@@ -202,6 +218,7 @@ class A2AChannel(BaseChannel):
     ) -> None:
         original_envelope = A2AEnvelope.from_inbound_metadata(inbound_message.metadata)
         fallback_base_url = self._fallback_sender_base_url(inbound_message)
+        convergence_state = original_envelope.convergence_state.next_outbound()
         envelope = A2AEnvelope(
             sender_runtime_id=settings.runtime_id,
             sender_agent_name=settings.AGENT_NAME,
@@ -210,13 +227,73 @@ class A2AChannel(BaseChannel):
             reply_to_message_id=original_envelope.message_id,
             intent=A2AIntent.RESULT,
             text=response_text,
-            metadata=self._build_outbound_metadata(reply_to_message_id=original_envelope.message_id),
+            metadata=self._build_outbound_metadata(
+                reply_to_message_id=original_envelope.message_id,
+                convergence_state=convergence_state,
+            ),
         )
         await self._deliver_envelope(
             original_envelope.sender_runtime_id,
             envelope,
             fallback_base_url=fallback_base_url,
         )
+
+    def response_policy(self, inbound_message: InboundMessage) -> A2AInboundPolicy:
+        envelope = A2AEnvelope.from_inbound_metadata(inbound_message.metadata)
+        block_reason = envelope.convergence_state.reply_block_reason(envelope.intent)
+
+        if block_reason == "terminal_intent":
+            return A2AInboundPolicy(should_process=True, should_reply=False, reason=block_reason)
+
+        if block_reason == "stop_requested":
+            return A2AInboundPolicy(should_process=True, should_reply=False, reason=block_reason)
+
+        if block_reason == "convergence_limit":
+            return A2AInboundPolicy(
+                should_process=False,
+                should_reply=True,
+                reason=block_reason,
+                reply_text=envelope.convergence_state.render_limit_message(),
+            )
+
+        return A2AInboundPolicy()
+
+    def context_destinations(self, known_destinations: tuple[str, ...]) -> tuple[str, ...]:
+        observed_targets = [destination for destination in known_destinations if destination]
+        observed_runtimes = {
+            runtime_id.strip()
+            for destination in observed_targets
+            for runtime_id, separator, _conversation_id in (destination.partition("/"),)
+            if separator and runtime_id.strip()
+        }
+
+        configured_placeholders = [
+            f"{peer.runtime_id}/<conversation_id>"
+            for peer in self._settings.peers
+            if peer.runtime_id not in observed_runtimes
+        ]
+
+        return tuple(observed_targets + configured_placeholders)
+
+    def instruction_context(self) -> dict[str, Any] | None:
+        if not self._settings.peers:
+            return None
+
+        peers: list[dict[str, str]] = []
+        for peer in self._settings.peers:
+            peers.append(
+                {
+                    "runtime_id": peer.runtime_id,
+                    "base_url": peer.base_url,
+                    "send_target": f"a2a:{peer.runtime_id}/<conversation_id>",
+                    "agent_card_url": f"{peer.base_url}/.well-known/agent-card.json",
+                }
+            )
+
+        return {
+            "convergence_max_hops": self._settings.convergence_max_hops,
+            "peers": tuple(peers),
+        }
 
     async def close(self) -> None:
         if self._closed:
@@ -228,13 +305,27 @@ class A2AChannel(BaseChannel):
             await self._http_session.close()
             self._http_session = None
 
-    def _build_outbound_metadata(self, *, reply_to_message_id: str | None = None) -> dict[str, Any]:
+    def _build_outbound_metadata(
+        self,
+        *,
+        reply_to_message_id: str | None = None,
+        convergence_state: A2AConvergenceState | None = None,
+    ) -> dict[str, Any]:
         metadata: dict[str, Any] = {"transport": "pillbug-a2a"}
         if self._settings.self_base_url is not None:
             metadata["sender_base_url"] = self._settings.self_base_url
+            metadata["agent_card_url"] = self._agent_card_url()
         if reply_to_message_id is not None:
             metadata["reply_to_message_id"] = reply_to_message_id
+        if convergence_state is not None:
+            metadata["pillbug_convergence"] = convergence_state.to_metadata()
         return metadata
+
+    def _agent_card_url(self) -> str | None:
+        if self._settings.self_base_url is None:
+            return None
+
+        return f"{self._settings.self_base_url}/.well-known/agent-card.json"
 
     def _fallback_sender_base_url(self, inbound_message: InboundMessage) -> str | None:
         raw_a2a = inbound_message.metadata.get("a2a")

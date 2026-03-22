@@ -107,6 +107,8 @@ Common environment variables:
 - `PB_CHANNEL_PLUGIN_FACTORIES` for `channel=package.module:factory` plugin mappings
 - `PB_A2A_SELF_BASE_URL` to advertise the externally reachable base URL peers should use for replies
 - `PB_A2A_PEERS_JSON` to register known peer runtimes and their base URLs for outbound A2A delivery
+- `PB_A2A_CONVERGENCE_MAX_HOPS` to bound automatic cross-runtime reply chains before Pillbug stops the exchange
+- `PB_A2A_AGENT_DESCRIPTION`, `PB_A2A_PROVIDER_ORGANIZATION`, `PB_A2A_PROVIDER_URL`, `PB_A2A_DOCUMENTATION_URL`, and `PB_A2A_ICON_URL` to populate the published A2A Agent Card
 - `PB_SECURITY_PATTERNS_PATH` to tune inbound warning and block regexes loaded by the pipeline at runtime startup and on file change
 - `PB_WORKSPACE_ROOT` to change the runtime workspace location
 - `PB_INBOUND_DEBOUNCE_SECONDS` to tune message batching behavior
@@ -182,12 +184,17 @@ export PB_ENABLED_CHANNELS=cli,a2a
 export PB_CHANNEL_PLUGIN_FACTORIES=a2a=pillbug_a2a.a2a_channel:create_channel
 export PB_A2A_SELF_BASE_URL=http://runtime-a:8000
 export PB_A2A_BEARER_TOKEN=shared-a2a-bearer-token
+export PB_A2A_CONVERGENCE_MAX_HOPS=6
 export PB_A2A_PEERS_JSON='[{"runtime_id":"runtime-b","base_url":"http://runtime-b:8000"}]'
 uv run python -m app
 ```
 
 Outbound A2A targets use the form `a2a:runtime-id/conversation-id`.
 Inbound peer traffic is accepted on `POST /a2a/messages` and converted into normal `InboundMessage` values before the application loop processes it.
+Automatic outbound replies are limited by `PB_A2A_CONVERGENCE_MAX_HOPS`, and Pillbug suppresses automatic follow-up messages for terminal A2A intents such as `result`, `inform`, `error`, and `heartbeat`.
+
+Agent Card discovery is published at `GET /.well-known/agent-card.json`.
+When `PB_A2A_BEARER_TOKEN` is configured, Pillbug also serves `GET /extendedAgentCard` behind the same bearer token and includes the convergence rules as an A2A extension.
 
 Optional Telegram-specific settings:
 

@@ -22,7 +22,7 @@ from pydantic import ValidationError
 from app.core.config import settings
 from app.core.jinja import render_template
 from app.core.log import logger
-from app.runtime.channels import get_available_channels_context
+from app.runtime.channels import get_available_channels_context, get_channel_plugin
 from app.schema.ai import ChatResponse, ChatSessionSnapshot, ChatSessionUsageTotals, InboundAttachment, Skill
 from app.util.base_dir import get_module_root
 from app.util.workspace import resolve_path_within_root
@@ -47,6 +47,7 @@ _ATTACHMENT_MIME_TYPE_OVERRIDES = {
 _EMPTY_MODEL_RESPONSE_FALLBACK = "I could not produce a text response right now. Please try again."
 _MODEL_INPUT_PROMPT_NAME = "model_input.prompt.md"
 _SKILLS_PROMPT_NAME = "skills.prompt.md"
+_CHANNEL_MEMO_PROMPTS = {"a2a": "a2a_channel_memo.prompt.md"}
 
 
 def _normalize_supported_attachment_mime_type(mime_type: str) -> str | None:
@@ -228,6 +229,40 @@ class GeminiChatService:
             ),
         )
 
+    def _render_channel_instruction_memo(self, channel_name: str, context: dict[str, Any]) -> str | None:
+        prompt_name = _CHANNEL_MEMO_PROMPTS.get(channel_name)
+        if prompt_name is None:
+            return None
+
+        rendered = self.render_prompt_text(prompt_name, **context).strip()
+        return rendered or None
+
+    async def get_channel_instruction_memos(self) -> list[str]:
+        memos: list[str] = []
+
+        for channel_name in settings.enabled_channels():
+            channel = get_channel_plugin(channel_name, create=True)
+            if channel is None:
+                continue
+
+            instruction_context = getattr(channel, "instruction_context", None)
+            if not callable(instruction_context):
+                continue
+
+            try:
+                context = instruction_context()
+            except Exception:
+                logger.exception(f"Failed to build instruction context for channel={channel_name}")
+                continue
+
+            if not isinstance(context, dict) or not context:
+                continue
+
+            if memo := self._render_channel_instruction_memo(channel_name, context):
+                memos.append(memo)
+
+        return memos
+
     async def discover_skills(self) -> list[Skill]:
         """
         Glob directories in the skills base dir, and treat each one as a skill
@@ -267,10 +302,12 @@ class GeminiChatService:
                     _SKILLS_PROMPT_NAME,
                     skills=skills,
                 )
+            channel_memos = await self.get_channel_instruction_memos()
             yield self.render_prompt_text(
                 _MODEL_INPUT_PROMPT_NAME,
                 base_context=await self.get_base_context(),
                 agents_md=agents_md,
+                channel_memos=tuple(channel_memos),
                 skills=skills_prompt.strip() if skills_prompt else None,
             )
             return
