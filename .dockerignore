@@ -13,3 +13,6 @@ scratch/
 
 .vscode/
 .github/
+.deploy/
+.tmp-workspace/
+.ruff-cache/

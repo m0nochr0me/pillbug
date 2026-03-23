@@ -1,7 +1,10 @@
+x-build-common: &build-common
+  context: .
+
 services:
   pillbug-a:
     build:
-      context: .
+      <<: *build-common
       args:
         PILLBUG_INSTALL_EXTRAS: a2a,telegram
     container_name: pillbug-a
@@ -21,7 +24,7 @@ services:
 
   pillbug-b:
     build:
-      context: .
+      <<: *build-common
       args:
         PILLBUG_INSTALL_EXTRAS: a2a
     container_name: pillbug-b
@@ -38,3 +41,30 @@ services:
       - type: bind
         source: /opt/ext/pillbug/runtime-b
         target: /var/lib/pillbug
+
+  pillbug-dashboard:
+    build:
+      <<: *build-common
+      args:
+        PILLBUG_INSTALL_EXTRAS: dashboard
+    container_name: pillbug-dashboard
+    hostname: pillbug-dashboard
+    depends_on:
+      - pillbug-a
+      - pillbug-b
+    env_file:
+      - ./deploy/dashboard.env
+    user: "1000:1000"
+    ports:
+      - "8010:8010"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: on-failure:5
+    entrypoint:
+      - uv
+      - run
+      - pillbug-dashboard
+    volumes:
+      - type: bind
+        source: /opt/ext/pillbug/dashboard
+        target: /var/lib/pillbug-dashboard
