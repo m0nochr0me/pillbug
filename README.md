@@ -194,6 +194,7 @@ Inbound peer traffic is accepted on `POST /a2a/messages` and converted into norm
 Automatic outbound replies are limited by `PB_A2A_CONVERGENCE_MAX_HOPS`, and Pillbug suppresses automatic follow-up messages for terminal A2A intents such as `result`, `inform`, `error`, and `heartbeat`.
 
 Agent Card discovery is published at `GET /.well-known/agent-card.json`.
+Published cards advertise the runtime's concrete built-in capabilities and also include any custom workspace skills discovered from `skills/*/SKILL.md`.
 When `PB_A2A_BEARER_TOKEN` is configured, Pillbug also serves `GET /extendedAgentCard` behind the same bearer token and includes the convergence rules as an A2A extension.
 
 Optional Telegram-specific settings:

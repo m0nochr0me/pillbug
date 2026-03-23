@@ -1,5 +1,7 @@
 """Helpers for building A2A Agent Card discovery payloads."""
 
+import re
+
 from app import __version__
 from app.core.config import settings
 from app.schema.agent_card import (
@@ -13,11 +15,14 @@ from app.schema.agent_card import (
     SecurityScheme,
 )
 from app.schema.messages import A2A_CONVERGENCE_EXTENSION_URI
+from app.util.skills import discover_workspace_skills
 
 _CUSTOM_BINDING_NAME = "PILLBUG-A2A"
 _PROTOCOL_VERSION = "1.0"
 _TERMINAL_INTENTS = ("result", "inform", "error", "heartbeat")
 _RESPONSE_ELIGIBLE_INTENTS = ("ask", "delegate")
+_DEFAULT_INPUT_MODES = ("text/plain",)
+_DEFAULT_OUTPUT_MODES = ("text/plain",)
 
 
 def _normalized_base_url() -> str:
@@ -77,30 +82,132 @@ def _communication_rules_extension(*, include_examples: bool) -> AgentExtension:
     )
 
 
-def _skills(*, include_extended_examples: bool) -> tuple[AgentSkill, ...]:
-    examples = [
-        "Summarize these runtime errors and return only the blocking risks.",
-        "Review this plan and send back the concrete issues that require operator action.",
+def _skill_id(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "-", value.strip().lower())
+    return normalized.strip("-") or "skill"
+
+
+def _builtin_skills(*, include_extended_examples: bool) -> tuple[AgentSkill, ...]:
+    channel_examples = [
+        "Send the final handoff to a2a:runtime-b/deploy-42 only if a new cross-runtime exchange is required.",
+        "Notify telegram:123456789 after the scheduled verification completes.",
     ]
     if include_extended_examples:
-        examples.append(
-            "If you are replying to a terminal result, use an explicit outbound tool only when a new exchange is required."
+        channel_examples.append(
+            "If you receive a terminal result, stop automatic replies and only use an outbound message tool when you need to start a fresh exchange."
         )
 
     return (
+        # AgentSkill(
+        #     id="workspace-inspection",
+        #     name="Workspace Inspection",
+        #     description=(
+        #         "Inspects the isolated runtime workspace by listing directories, reading files, and searching for "
+        #         "matching paths or text."
+        #     ),
+        #     tags=("workspace", "files", "search", "analysis"),
+        #     examples=(
+        #         "Read app/runtime/loop.py and explain how inbound batching works.",
+        #         "Find where scheduled tasks are persisted and summarize the data model.",
+        #     ),
+        #     input_modes=_DEFAULT_INPUT_MODES,
+        #     output_modes=_DEFAULT_OUTPUT_MODES,
+        # ),
+        # AgentSkill(
+        #     id="workspace-editing",
+        #     name="Workspace Editing",
+        #     description="Creates new UTF-8 files and applies targeted text changes within the isolated workspace.",
+        #     tags=("workspace", "editing", "files", "automation"),
+        #     examples=(
+        #         "Patch this module so empty task names are rejected before saving.",
+        #         "Add the new environment variable to the deployment README.",
+        #     ),
+        #     input_modes=_DEFAULT_INPUT_MODES,
+        #     output_modes=_DEFAULT_OUTPUT_MODES,
+        # ),
+        # AgentSkill(
+        #     id="command-execution",
+        #     name="Command Execution",
+        #     description=(
+        #         "Runs bounded shell commands inside the workspace and returns captured stdout, stderr, exit codes, "
+        #         "and timeout state."
+        #     ),
+        #     tags=("workspace", "shell", "validation", "automation"),
+        #     examples=(
+        #         "Run the lint command and report only the blocking failures.",
+        #         "List the optional uv extras configured for this repository.",
+        #     ),
+        #     input_modes=_DEFAULT_INPUT_MODES,
+        #     output_modes=_DEFAULT_OUTPUT_MODES,
+        # ),
         AgentSkill(
-            id="isolated-task-collaboration",
-            name="Isolated Task Collaboration",
+            id="web-context-fetching",
+            name="Web Context Fetching",
             description=(
-                "Processes text-based requests from peer agents inside an isolated Pillbug runtime and returns bounded "
-                "cross-runtime results without shared local state."
+                "Fetches remote resources into the workspace and converts HTML into readable markdown when possible "
+                "for later analysis."
             ),
-            tags=("a2a", "automation", "delegation", "runtime"),
-            examples=tuple(examples),
-            input_modes=("text/plain",),
-            output_modes=("text/plain",),
+            tags=("web", "research", "context", "fetch"),
+            examples=(
+                "Fetch this incident report URL and summarize the required operator actions.",
+                "Download the API reference page so you can compare it with our implementation.",
+            ),
+            input_modes=_DEFAULT_INPUT_MODES,
+            output_modes=_DEFAULT_OUTPUT_MODES,
+        ),
+        AgentSkill(
+            id="planning-and-scheduling",
+            name="Planning And Scheduling",
+            description=(
+                "Maintains session-scoped todo plans and manages scheduled background agent tasks for delayed or "
+                "recurring follow-up work."
+            ),
+            tags=("planning", "todo", "scheduler", "automation"),
+            examples=(
+                "Break this migration into a short todo list with one in-progress step.",
+                "Create a delayed background task to re-check runtime health in 30 minutes.",
+            ),
+            input_modes=_DEFAULT_INPUT_MODES,
+            output_modes=_DEFAULT_OUTPUT_MODES,
+        ),
+        AgentSkill(
+            id="cross-runtime-delegation",
+            name="Cross-Runtime Delegation",
+            description=(
+                "Coordinates bounded cross-runtime or channel-based follow-up by sending direct outbound messages to "
+                "configured destinations when a new exchange is required."
+            ),
+            tags=("a2a", "channels", "delegation", "handoff"),
+            examples=tuple(channel_examples),
+            input_modes=_DEFAULT_INPUT_MODES,
+            output_modes=_DEFAULT_OUTPUT_MODES,
         ),
     )
+
+
+def _workspace_agent_skills() -> tuple[AgentSkill, ...]:
+    return tuple(
+        AgentSkill(
+            id=f"workspace-skill-{_skill_id(skill.name)}",
+            name=skill.name,
+            description=skill.description,
+            tags=("workspace-skill", "custom"),
+            input_modes=_DEFAULT_INPUT_MODES,
+            output_modes=_DEFAULT_OUTPUT_MODES,
+        )
+        for skill in discover_workspace_skills(settings.WORKSPACE_ROOT)
+    )
+
+
+def _skills(*, include_extended_examples: bool) -> tuple[AgentSkill, ...]:
+    discovered_skills = _workspace_agent_skills()
+    combined_skills = _builtin_skills(include_extended_examples=include_extended_examples) + discovered_skills
+    unique_skills: dict[str, AgentSkill] = {}
+
+    for skill in combined_skills:
+        unique_skills.setdefault(skill.id, skill)
+
+    return tuple(unique_skills.values())
 
 
 def _card(*, include_extended_examples: bool) -> AgentCard:
@@ -131,8 +238,8 @@ def _card(*, include_extended_examples: bool) -> AgentCard:
         ),
         security_schemes=security_schemes,
         security=security,
-        default_input_modes=("text/plain",),
-        default_output_modes=("text/plain",),
+        default_input_modes=_DEFAULT_INPUT_MODES,
+        default_output_modes=_DEFAULT_OUTPUT_MODES,
         skills=_skills(include_extended_examples=include_extended_examples),
         icon_url=((settings.A2A_ICON_URL or "").strip() or None),
     )

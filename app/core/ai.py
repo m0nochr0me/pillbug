@@ -26,6 +26,7 @@ from app.runtime.channels import get_available_channels_context, get_channel_plu
 from app.runtime.session_binding import bind_mcp_session_to_runtime_session
 from app.schema.ai import ChatResponse, ChatSessionSnapshot, ChatSessionUsageTotals, InboundAttachment, Skill
 from app.util.base_dir import get_module_root
+from app.util.skills import discover_workspace_skills
 from app.util.workspace import resolve_path_within_root
 
 __all__ = (
@@ -268,30 +269,7 @@ class GeminiChatService:
         """
         Glob directories in the skills base dir, and treat each one as a skill
         """
-        if not (skills_base_dir := settings.WORKSPACE_ROOT / "skills").is_dir():
-            return []
-        skill_dirs = [d for d in skills_base_dir.iterdir() if d.is_dir()]
-        skills = []
-        for skill_dir in skill_dirs:
-            if not (skill_file := skill_dir / "SKILL.md").is_file():
-                logger.warning(f"Skipping skill directory {skill_dir} because it does not contain a SKILL.md file")
-                continue
-
-            async with aiofile.AIOFile(skill_file, "r", encoding="utf-8") as skill_md_file:
-                name = None
-                description = None
-                async for line in aiofile.LineReader(skill_md_file):
-                    if not line:
-                        raise StopAsyncIteration
-                    line = cast("str", line).strip()  # noqa: PLW2901
-                    if line.startswith("name:"):
-                        name = line[len("name:") :].strip()
-                    elif line.startswith("description:"):
-                        description = line[len("description:") :].strip()
-                    if name and description:
-                        skills.append(Skill(name=name, description=description, location=skill_dir))
-                        break
-        return skills
+        return await asyncio.to_thread(discover_workspace_skills, settings.WORKSPACE_ROOT)
 
     @asynccontextmanager
     async def get_system_instruction(self) -> AsyncIterator[str | None]:
