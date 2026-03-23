@@ -1106,6 +1106,7 @@ async def clear_control_session(session_id: str, request: Request) -> dict[str, 
 @mcp_app.post("/control/messages/send")
 async def post_control_message(payload: ControlMessageRequest, request: Request) -> dict[str, Any]:
     scope = await _authorize_control(request.headers.get("authorization"))
+    application_loop = request.app.state.application_loop
     channel_plugin = get_channel_plugin(payload.channel, create=True)
     if channel_plugin is None:
         await _audit_control_action(
@@ -1133,6 +1134,8 @@ async def post_control_message(payload: ControlMessageRequest, request: Request)
 
     if payload.conversation_id:
         register_channel_conversation(payload.channel, payload.conversation_id)
+        if application_loop is not None:
+            application_loop.track_outbound_conversation(payload.channel, payload.conversation_id)
 
     details = {
         "channel": payload.channel,

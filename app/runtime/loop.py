@@ -701,6 +701,24 @@ class ApplicationLoop:
         state.last_activity_at = _utcnow()
         self._sync_pending_count(session_key)
 
+    def track_outbound_conversation(self, channel_name: str, conversation_id: str) -> None:
+        normalized_channel_name = channel_name.strip()
+        normalized_conversation_id = conversation_id.strip()
+        if not normalized_channel_name or not normalized_conversation_id:
+            return
+
+        now = _utcnow()
+        session_key = f"{normalized_channel_name}:{normalized_conversation_id}"
+        state = self._session_state_for(
+            session_key=session_key,
+            channel_name=normalized_channel_name,
+            conversation_id=normalized_conversation_id,
+            user_id=None,
+            first_seen_at=now,
+        )
+        state.last_activity_at = now
+        self._sync_pending_count(session_key)
+
     async def describe_sessions_telemetry(self) -> SessionsTelemetrySnapshot:
         entries: list[SessionTelemetryEntry] = []
 

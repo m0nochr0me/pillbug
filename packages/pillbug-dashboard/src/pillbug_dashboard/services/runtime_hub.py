@@ -17,6 +17,22 @@ from pillbug_dashboard.services.registry import RegistryService
 from pillbug_dashboard.services.runtime_client import RuntimeClient, RuntimeClientError
 
 
+def _extract_a2a_runtime_id(destination: str) -> str | None:
+    normalized_destination = destination.strip()
+    if not normalized_destination:
+        return None
+
+    if normalized_destination.startswith("a2a:"):
+        normalized_destination = normalized_destination[4:].strip()
+
+    runtime_id, separator, _conversation_id = normalized_destination.partition("/")
+    if not separator:
+        return None
+
+    normalized_runtime_id = runtime_id.strip()
+    return normalized_runtime_id or None
+
+
 def _extract_a2a_peers(channels_payload: dict[str, Any] | None) -> tuple[str, ...]:
     if channels_payload is None:
         return ()
@@ -27,10 +43,10 @@ def _extract_a2a_peers(channels_payload: dict[str, Any] | None) -> tuple[str, ..
             continue
 
         for destination in channel.get("known_destinations", []):
-            if not isinstance(destination, str) or not destination.startswith("a2a:"):
+            if not isinstance(destination, str):
                 continue
 
-            runtime_id = destination[4:].split("/", 1)[0].strip()
+            runtime_id = _extract_a2a_runtime_id(destination)
             if runtime_id:
                 peers.add(runtime_id)
 

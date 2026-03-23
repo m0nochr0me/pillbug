@@ -239,7 +239,7 @@ class A2AChannel(BaseChannel):
             metadata=self._build_outbound_metadata(
                 reply_to_message_id=original_envelope.message_id,
                 convergence_state=convergence_state,
-                extra_metadata=origin_metadata,
+                extra_metadata=origin_metadata,  # pyright: ignore[reportArgumentType]
             ),
         )
         await self._deliver_envelope(
@@ -291,13 +291,13 @@ class A2AChannel(BaseChannel):
 
         peers: list[dict[str, str]] = []
         for peer in self._settings.peers:
-            peers.append(
+            peers.append(  # noqa: PERF401
                 {
                     "runtime_id": peer.runtime_id,
                     "base_url": peer.base_url,
                     "send_target": f"a2a:{peer.runtime_id}/<conversation_id>",
                     "agent_card_url": f"{peer.base_url}/.well-known/agent-card.json",
-                }
+                },
             )
 
         return {

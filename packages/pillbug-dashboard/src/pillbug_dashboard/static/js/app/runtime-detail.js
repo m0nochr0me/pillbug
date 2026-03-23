@@ -22,6 +22,9 @@
           actionMessage: "",
           errorMessage: "",
           refreshTimer: null,
+          detailRefreshTimer: null,
+          refreshInFlight: false,
+          refreshQueued: false,
           streamController: null,
           reconnectTimer: null,
           messageForm: {
@@ -104,10 +107,29 @@
             this.messageForm.channel = preferredChannel || "";
           }
         },
+        scheduleDetailRefresh(delayMs) {
+          if (this.detailRefreshTimer) {
+            window.clearTimeout(this.detailRefreshTimer);
+          }
+
+          this.detailRefreshTimer = window.setTimeout(() => {
+            this.detailRefreshTimer = null;
+            this.refreshDetail(false);
+          }, delayMs);
+        },
         async refreshDetail(showSpinner) {
+          if (this.refreshInFlight) {
+            this.refreshQueued = true;
+            if (showSpinner) {
+              this.refreshLoading = true;
+            }
+            return;
+          }
+
           if (showSpinner) {
             this.refreshLoading = true;
           }
+          this.refreshInFlight = true;
           this.errorMessage = "";
 
           try {
@@ -127,8 +149,14 @@
           } catch (error) {
             this.errorMessage = error instanceof Error ? error.message : "Unknown error";
           } finally {
+            this.refreshInFlight = false;
             if (showSpinner) {
               this.refreshLoading = false;
+            }
+
+            if (this.refreshQueued) {
+              this.refreshQueued = false;
+              this.scheduleDetailRefresh(0);
             }
           }
         },
@@ -361,11 +389,17 @@
 
           this.events.unshift(entry);
           this.events = this.events.slice(0, 120);
+          this.scheduleDetailRefresh(250);
         },
         stopEventStream() {
           if (this.streamController) {
             this.streamController.abort();
             this.streamController = null;
+          }
+
+          if (this.detailRefreshTimer) {
+            window.clearTimeout(this.detailRefreshTimer);
+            this.detailRefreshTimer = null;
           }
 
           if (this.reconnectTimer) {
