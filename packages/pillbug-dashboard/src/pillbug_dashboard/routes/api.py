@@ -109,6 +109,24 @@ async def get_runtime_detail(runtime_id: str, request: Request) -> RuntimeDetail
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.get("/runtimes/{runtime_id}/agent-card")
+async def get_runtime_agent_card(runtime_id: str, request: Request) -> dict[str, object]:
+    registration = _get_registration_or_404(request, runtime_id)
+
+    try:
+        agent_card = await _runtime_client(request).get_public_agent_card(registration.base_url)
+    except RuntimeClientError as exc:
+        raise HTTPException(status_code=exc.status_code or 502, detail=str(exc)) from exc
+
+    if agent_card is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Runtime {registration.runtime_id} does not expose a public agent card.",
+        )
+
+    return agent_card
+
+
 @router.get("/runtimes/{runtime_id}/events")
 async def stream_runtime_events(request: Request, runtime_id: str, replay: int = 20) -> StreamingResponse:
     registration = _get_registration_or_404(request, runtime_id)

@@ -38,6 +38,9 @@
         runtimeId() {
           return this.detail.registration.runtime_id;
         },
+        agentCardHref() {
+          return `/api/runtimes/${encodeURIComponent(this.runtimeId)}/agent-card`;
+        },
         sessions() {
           return this.detail.sessions && Array.isArray(this.detail.sessions.sessions)
             ? this.detail.sessions.sessions

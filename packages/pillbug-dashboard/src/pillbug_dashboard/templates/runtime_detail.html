@@ -244,7 +244,7 @@
           <p class="eyebrow">AGENT CARD</p>
           <p v-if="detail.agent_card" class="muted-copy">A2A DISCOVERY AVAILABLE</p>
           <p v-else class="muted-copy">NO PUBLIC AGENT CARD</p>
-          <a v-if="detail.agent_card" class="button border small" :href="detail.registration.base_url + '/.well-known/agent-card.json'" target="_blank" rel="noreferrer">
+          <a v-if="detail.agent_card" class="button border small" :href="agentCardHref" target="_blank" rel="noreferrer">
             VIEW AGENT CARD
           </a>
         </div>

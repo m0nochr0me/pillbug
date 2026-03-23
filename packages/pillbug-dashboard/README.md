@@ -11,7 +11,7 @@ local registry persistence, and browser-side polling or event subscription witho
 - Runtime registry CRUD backed by a local JSON file
 - Runtime overview page with health, task, and A2A topology summaries
 - Runtime detail page with session, task, and recent event views
-- Dashboard-side proxy routes for telemetry, narrow control actions, and runtime SSE streams
+- Dashboard-side proxy routes for telemetry, public agent-card fetches, narrow control actions, and runtime SSE streams
 - Static asset directories wired for local BeerCSS and Vue files
 
 ## Registry format
