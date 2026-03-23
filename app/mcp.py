@@ -31,6 +31,11 @@ from app.core.url_shortener import local_url_shortener
 from app.middleware.compactor import CompactorMiddleware
 from app.runtime.channels import describe_channel_telemetry, get_channel_plugin, register_channel_conversation
 from app.runtime.scheduler import task_scheduler
+from app.runtime.session_binding import (
+    get_runtime_session_for_mcp_session,
+    get_runtime_session_origin_metadata,
+    split_runtime_session_key,
+)
 from app.schema.control import (
     AuthScope,
     AuthTokenBinding,
@@ -38,7 +43,7 @@ from app.schema.control import (
     OperatorResponse,
     RuntimeAuthConfiguration,
 )
-from app.schema.messages import A2AEnvelope
+from app.schema.messages import A2AEnvelope, build_a2a_origin_routing_metadata
 from app.schema.telemetry import ChannelsTelemetrySnapshot, RuntimeMetadata
 from app.schema.todo import TodoItem, TodoListSnapshot
 from app.util.web import (
@@ -600,13 +605,21 @@ async def find_files(
 async def send_message(
     channel: str,
     message: str,
+    ctx: Context = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     """
     Sends a direct outbound message to a configured channel.
-    Intended for subagents and scheduled tasks to proactively send messages outside of an active conversation turn.
+
+    Use this when the agent needs to initiate or continue a message outside the normal reply path,
+    such as proactive follow-ups from a scheduled task, a subagent handoff, or a new outbound A2A exchange.
+    Do not use this to answer the current inbound message on the same channel during the active turn;
+    the application loop will send that response automatically.
 
     The channel argument accepts either a bare channel name for default destinations such as cli,
-    or a session-style target in the form channel_name:conversation_id such as telegram:123456789.
+    or a session-style target in the form channel_name:conversation_id such as telegram:123456789
+    or a2a:runtime-b/deploy-42.
+
+    For A2A, choose a stable conversation_id for the task so follow-up messages stay on the same exchange.
     """
 
     if not message.strip():
@@ -617,7 +630,22 @@ async def send_message(
     if channel_plugin is None:
         raise ValueError(f"Channel is not enabled or available: {channel_name}")
 
-    await channel_plugin.send_message(conversation_id, message)
+    metadata: dict[str, object] | None = None
+    if channel_name == "a2a" and ctx is not None:
+        runtime_session_key = get_runtime_session_for_mcp_session(ctx.session_id)
+        if runtime_session_key is not None:
+            origin_route = split_runtime_session_key(runtime_session_key)
+            if origin_route is not None:
+                origin_channel_metadata = get_runtime_session_origin_metadata(runtime_session_key)
+                metadata = dict(
+                    build_a2a_origin_routing_metadata(
+                        channel_name=origin_route[0],
+                        conversation_id=origin_route[1],
+                        channel_metadata=origin_channel_metadata,
+                    )
+                )
+
+    await channel_plugin.send_message(conversation_id, message, metadata=metadata)
     logger.info(f"Sent outbound message via channel={channel_name} destination={conversation_id or '<default>'}")
 
     return {
@@ -1091,7 +1119,7 @@ async def post_control_message(payload: ControlMessageRequest, request: Request)
         raise HTTPException(status_code=404, detail=f"Channel is not enabled or available: {payload.channel}")
 
     try:
-        await channel_plugin.send_message(payload.conversation_id or "", payload.message)
+        await channel_plugin.send_message(payload.conversation_id or "", payload.message, metadata=None)
     except Exception as exc:
         await _audit_control_action(
             request,

@@ -12,7 +12,62 @@ from pydantic import BaseModel, Field, model_validator
 
 _RUNTIME_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$")
 _A2A_CONVERGENCE_METADATA_KEY = "pillbug_convergence"
+_A2A_ORIGIN_CHANNEL_NAME_METADATA_KEY = "pillbug_origin_channel_name"
+_A2A_ORIGIN_CONVERSATION_ID_METADATA_KEY = "pillbug_origin_conversation_id"
+_A2A_ORIGIN_CHANNEL_METADATA_KEY = "pillbug_origin_channel_metadata"
 A2A_CONVERGENCE_EXTENSION_URI = "https://pillbug.dev/extensions/a2a-convergence/v1"
+
+
+def build_a2a_origin_routing_metadata(
+    *,
+    channel_name: str,
+    conversation_id: str,
+    channel_metadata: dict[str, object] | None = None,
+) -> dict[str, object]:
+    normalized_channel_name = channel_name.strip()
+    normalized_conversation_id = conversation_id.strip()
+    if not normalized_channel_name or not normalized_conversation_id:
+        raise ValueError("A2A origin routing metadata requires non-empty channel_name and conversation_id")
+
+    metadata: dict[str, object] = {
+        _A2A_ORIGIN_CHANNEL_NAME_METADATA_KEY: normalized_channel_name,
+        _A2A_ORIGIN_CONVERSATION_ID_METADATA_KEY: normalized_conversation_id,
+    }
+    if channel_metadata:
+        metadata[_A2A_ORIGIN_CHANNEL_METADATA_KEY] = channel_metadata
+
+    return metadata
+
+
+def extract_a2a_origin_routing_metadata(metadata: dict[str, Any]) -> dict[str, str] | None:
+    channel_name = metadata.get(_A2A_ORIGIN_CHANNEL_NAME_METADATA_KEY)
+    conversation_id = metadata.get(_A2A_ORIGIN_CONVERSATION_ID_METADATA_KEY)
+    if not isinstance(channel_name, str) or not isinstance(conversation_id, str):
+        return None
+
+    normalized_channel_name = channel_name.strip()
+    normalized_conversation_id = conversation_id.strip()
+    if not normalized_channel_name or not normalized_conversation_id:
+        return None
+
+    return {
+        _A2A_ORIGIN_CHANNEL_NAME_METADATA_KEY: normalized_channel_name,
+        _A2A_ORIGIN_CONVERSATION_ID_METADATA_KEY: normalized_conversation_id,
+    }
+
+
+def extract_a2a_origin_channel_metadata(metadata: dict[str, Any]) -> dict[str, object] | None:
+    channel_metadata = metadata.get(_A2A_ORIGIN_CHANNEL_METADATA_KEY)
+    if not isinstance(channel_metadata, dict):
+        return None
+
+    normalized_channel_metadata: dict[str, object] = {}
+    for key, value in channel_metadata.items():
+        if not isinstance(key, str) or not key.strip():
+            continue
+        normalized_channel_metadata[key] = value
+
+    return normalized_channel_metadata or None
 
 
 def _utcnow() -> datetime:
@@ -225,6 +280,22 @@ class A2AEnvelope(BaseModel):
     def convergence_state(self) -> A2AConvergenceState:
         return A2AConvergenceState.from_metadata(self.metadata)
 
+    @property
+    def origin_route(self) -> tuple[str, str] | None:
+        if self.reply_to_message_id is None:
+            return None
+
+        if self.intent not in {A2AIntent.RESULT, A2AIntent.INFORM, A2AIntent.ERROR, A2AIntent.HEARTBEAT}:
+            return None
+
+        if origin_metadata := extract_a2a_origin_routing_metadata(self.metadata):
+            return (
+                origin_metadata[_A2A_ORIGIN_CHANNEL_NAME_METADATA_KEY],
+                origin_metadata[_A2A_ORIGIN_CONVERSATION_ID_METADATA_KEY],
+            )
+
+        return None
+
     def render_inbound_text(self) -> str:
         sender_label = self.sender_runtime_id
         if self.sender_agent_name:
@@ -256,7 +327,7 @@ class A2AEnvelope(BaseModel):
         envelope_payload = self.model_dump(mode="json")
         envelope_payload["local_conversation_id"] = self.local_conversation_id
         convergence_state = self.convergence_state
-        return {
+        inbound_metadata = {
             "source": "a2a",
             "a2a": envelope_payload,
             "a2a_intent": self.intent.value,
@@ -271,6 +342,11 @@ class A2AEnvelope(BaseModel):
             "a2a_stop_reason": convergence_state.stop_reason,
         }
 
+        if origin_metadata := extract_a2a_origin_routing_metadata(self.metadata):
+            inbound_metadata.update(origin_metadata)
+
+        return inbound_metadata
+
     def to_inbound_message(
         self,
         *,
@@ -281,9 +357,17 @@ class A2AEnvelope(BaseModel):
         if extra_metadata:
             metadata.update(extra_metadata)
 
+        resolved_channel_name = channel_name
+        resolved_conversation_id = self.local_conversation_id
+        if origin_route := self.origin_route:
+            resolved_channel_name, resolved_conversation_id = origin_route
+            if origin_channel_metadata := extract_a2a_origin_channel_metadata(self.metadata):
+                for key, value in origin_channel_metadata.items():
+                    metadata.setdefault(key, value)
+
         return InboundMessage(
-            channel_name=channel_name,
-            conversation_id=self.local_conversation_id,
+            channel_name=resolved_channel_name,
+            conversation_id=resolved_conversation_id,
             text=self.render_inbound_text(),
             user_id=self.sender_runtime_id,
             message_id=self.message_id,

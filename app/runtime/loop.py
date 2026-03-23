@@ -14,6 +14,7 @@ from app.runtime.channels import (
     unregister_channel_plugin,
 )
 from app.runtime.pipeline import InboundProcessingPipeline
+from app.runtime.session_binding import bind_runtime_session_origin_metadata
 from app.schema.messages import InboundBatch, InboundMessage, ProcessedInboundMessage
 from app.schema.telemetry import SessionsTelemetrySnapshot, SessionTelemetryEntry
 
@@ -425,6 +426,8 @@ class ApplicationLoop:
         model_input: str,
         message_metadata: list[dict[str, object]] | None = None,
     ) -> None:
+        bind_runtime_session_origin_metadata(batch.session_key, batch.last_message.metadata)
+
         try:
             async with channel.response_presence(batch.last_message):
                 response = await session.send_message(

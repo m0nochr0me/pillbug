@@ -13,7 +13,14 @@ from pydantic import BaseModel, Field, SecretStr, field_validator, model_validat
 from app.core.config import settings
 from app.core.log import logger
 from app.runtime.channels import BaseChannel
-from app.schema.messages import A2AConvergenceState, A2AEnvelope, A2AIntent, A2ATarget, InboundMessage
+from app.schema.messages import (
+    A2AConvergenceState,
+    A2AEnvelope,
+    A2AIntent,
+    A2ATarget,
+    InboundMessage,
+    extract_a2a_origin_routing_metadata,
+)
 
 _DEFAULT_INGRESS_PATH = "/a2a/messages"
 
@@ -197,6 +204,7 @@ class A2AChannel(BaseChannel):
         self,
         conversation_id: str,
         message_text: str,
+        metadata: dict[str, object] | None = None,
     ) -> None:
         target = A2ATarget.parse(conversation_id)
         convergence_state = A2AConvergenceState(max_hops=self._settings.convergence_max_hops)
@@ -207,7 +215,7 @@ class A2AChannel(BaseChannel):
             conversation_id=target.conversation_id,
             intent=A2AIntent.ASK,
             text=message_text,
-            metadata=self._build_outbound_metadata(convergence_state=convergence_state),
+            metadata=self._build_outbound_metadata(convergence_state=convergence_state, extra_metadata=metadata),
         )
         await self._deliver_envelope(target.runtime_id, envelope)
 
@@ -219,6 +227,7 @@ class A2AChannel(BaseChannel):
         original_envelope = A2AEnvelope.from_inbound_metadata(inbound_message.metadata)
         fallback_base_url = self._fallback_sender_base_url(inbound_message)
         convergence_state = original_envelope.convergence_state.next_outbound()
+        origin_metadata = extract_a2a_origin_routing_metadata(original_envelope.metadata)
         envelope = A2AEnvelope(
             sender_runtime_id=settings.runtime_id,
             sender_agent_name=settings.AGENT_NAME,
@@ -230,6 +239,7 @@ class A2AChannel(BaseChannel):
             metadata=self._build_outbound_metadata(
                 reply_to_message_id=original_envelope.message_id,
                 convergence_state=convergence_state,
+                extra_metadata=origin_metadata,
             ),
         )
         await self._deliver_envelope(
@@ -310,6 +320,7 @@ class A2AChannel(BaseChannel):
         *,
         reply_to_message_id: str | None = None,
         convergence_state: A2AConvergenceState | None = None,
+        extra_metadata: dict[str, object] | None = None,
     ) -> dict[str, Any]:
         metadata: dict[str, Any] = {"transport": "pillbug-a2a"}
         if self._settings.self_base_url is not None:
@@ -319,6 +330,8 @@ class A2AChannel(BaseChannel):
             metadata["reply_to_message_id"] = reply_to_message_id
         if convergence_state is not None:
             metadata["pillbug_convergence"] = convergence_state.to_metadata()
+        if extra_metadata:
+            metadata.update(extra_metadata)
         return metadata
 
     def _agent_card_url(self) -> str | None:

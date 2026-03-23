@@ -26,6 +26,7 @@ class ChannelPlugin(Protocol):
         self,
         conversation_id: str,
         message_text: str,
+        metadata: dict[str, object] | None = None,
     ) -> None: ...
 
     async def send_response(
@@ -55,6 +56,7 @@ class BaseChannel(ABC):
         self,
         conversation_id: str,
         message_text: str,
+        metadata: dict[str, object] | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -116,7 +118,9 @@ class CliChannel(BaseChannel):
         self,
         conversation_id: str,
         message_text: str,
+        metadata: dict[str, object] | None = None,
     ) -> None:
+        del metadata
         del conversation_id
         await asyncio.to_thread(print, f"{self._assistant_prefix}{message_text}")
 

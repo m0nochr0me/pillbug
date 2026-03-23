@@ -346,7 +346,13 @@ class TelegramChannel(BaseChannel):
         finally:
             await self.close()
 
-    async def send_message(self, conversation_id: str, message_text: str) -> None:
+    async def send_message(
+        self,
+        conversation_id: str,
+        message_text: str,
+        metadata: dict[str, object] | None = None,
+    ) -> None:
+        del metadata
         try:
             chat_id = int(conversation_id)
         except ValueError as exc:

@@ -23,6 +23,7 @@ from app.core.config import settings
 from app.core.jinja import render_template
 from app.core.log import logger
 from app.runtime.channels import get_available_channels_context, get_channel_plugin
+from app.runtime.session_binding import bind_mcp_session_to_runtime_session
 from app.schema.ai import ChatResponse, ChatSessionSnapshot, ChatSessionUsageTotals, InboundAttachment, Skill
 from app.util.base_dir import get_module_root
 from app.util.workspace import resolve_path_within_root
@@ -346,6 +347,10 @@ class GeminiChatSession:
         message_parts = await self._build_message_parts(message, message_metadata)
 
         async with self._mcp_client as mcp_client, self._service.get_system_instruction() as system_instruction:
+            mcp_session_id = mcp_client.transport.get_session_id()
+            if mcp_session_id is not None:
+                bind_mcp_session_to_runtime_session(mcp_session_id, self._session_id)
+
             response = await self._chat.send_message(
                 message=message_parts,
                 config=types.GenerateContentConfig(
