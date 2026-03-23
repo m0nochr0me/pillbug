@@ -27,7 +27,7 @@ if [[ "$(id -u)" == "0" ]]; then
     ensure_dir_ownership "${PB_BASE_DIR:-}"
     ensure_dir_ownership "${PB_DASHBOARD_BASE_DIR:-}"
 
-    exec su -s /bin/bash pillbug -c 'exec "$@"' -- "$@"
+    exec su -s /bin/bash pillbug -c 'exec "$0" "$@"' -- "$@"
 fi
 
 exec "$@"
