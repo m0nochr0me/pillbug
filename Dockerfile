@@ -39,6 +39,6 @@ RUN if [ -n "$PILLBUG_INSTALL_EXTRAS" ]; then \
     fi
 
 # Run
-RUN chmod +x run.sh
-USER 1000:1000
-ENTRYPOINT [ "/app/run.sh" ]
+RUN chmod +x run.sh docker-entrypoint.sh
+ENTRYPOINT [ "/app/docker-entrypoint.sh" ]
+CMD [ "/app/run.sh" ]
