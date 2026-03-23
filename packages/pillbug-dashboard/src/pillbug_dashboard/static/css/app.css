@@ -46,10 +46,11 @@ body.dashboard-shell {
     linear-gradient(180deg, #0b1014 0%, #090d10 42%, #070a0d 100%);
   color: var(--on-surface);
   min-height: 100vh;
-  font-family: "Departure Mono", "Fira Code", "IBM Plex Mono", "JetBrains Mono", monospace;
+  font-family: "Departure Mono", monospace;
+  font-kerning: auto;
   letter-spacing: 0.01em;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
+  -webkit-font-smoothing: none;
 }
 
 body.dashboard-shell,
@@ -57,7 +58,7 @@ body.dashboard-shell input,
 body.dashboard-shell textarea,
 body.dashboard-shell select,
 body.dashboard-shell button {
-  font-family: "Departure Mono", "Fira Code", "IBM Plex Mono", "JetBrains Mono", monospace;
+  font-family: "Departure Mono", monospace;
 }
 
 body.dashboard-shell a {
@@ -153,11 +154,25 @@ body.dashboard-shell th {
   flex-direction: column;
 }
 
-.gap-2 { gap: 0.35rem; }
-.gap-3 { gap: 0.65rem; }
-.gap-4 { gap: 0.9rem; }
-.gap-5 { gap: 1.15rem; }
-.gap-6 { gap: 1.35rem; }
+.gap-2 {
+  gap: 0.35rem;
+}
+
+.gap-3 {
+  gap: 0.65rem;
+}
+
+.gap-4 {
+  gap: 0.9rem;
+}
+
+.gap-5 {
+  gap: 1.15rem;
+}
+
+.gap-6 {
+  gap: 1.35rem;
+}
 
 .metric-strip {
   display: grid;
@@ -230,6 +245,7 @@ body.dashboard-shell th {
 .codeish {
   font-size: 0.82rem;
   word-break: break-all;
+  display: inline;
 }
 
 .runtime-url {
@@ -424,7 +440,7 @@ body.dashboard-shell textarea::placeholder {
   color: rgba(167, 185, 180, 0.72);
 }
 
-body.dashboard-shell .field > label,
+body.dashboard-shell .field>label,
 body.dashboard-shell .field label,
 body.dashboard-shell .checkbox span {
   color: var(--on-surface-variant);
@@ -480,6 +496,7 @@ body.dashboard-shell .responsive {
 }
 
 @media (max-width: 900px) {
+
   .runtime-stat-grid,
   .definition-list {
     grid-template-columns: 1fr;
