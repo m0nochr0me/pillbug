@@ -10,11 +10,15 @@ Pillbug is an async AI agent runtime built for isolated deployment.
 - Async runtime with debounced inbound message handling
 - Built-in CLI channel plus factory-based external channel plugins
 - uv workspace-friendly plugin layout for optional channel packages
-- Local MCP server for workspace file, search, command, and outbound channel tools
+- Local MCP server for workspace file, search, command, outbound channel, and short-link tools
 - URL fetching tool with streamed size limits and readable HTML snapshots
+- Built-in session commands plus automatic session summarization in memory or compressed-history modes
 - Session-scoped todo planning tool for multi-step agent work
 - Embedded Docket worker for scheduled background AI tasks
-- Read-only HTTP telemetry endpoints plus an SSE event stream for external dashboards
+- Runtime skill discovery from workspace `skills/*/SKILL.md` metadata
+- Public and authenticated A2A Agent Card discovery with workspace skill publication
+- Read-only telemetry endpoints, narrow operator control APIs, and an SSE event stream for dashboards
+- Optional server-rendered operator dashboard package and Docker Compose example deployment
 - Per-workspace `AGENTS.md` instructions seeded on first run
 
 ## Quick Start
@@ -32,6 +36,14 @@ Alternative launch commands:
 ```bash
 uv run python -m app
 uv run python -m app.mcp
+```
+
+Optional packages are installed through uv extras:
+
+```bash
+uv sync --extra a2a
+uv sync --extra telegram
+uv sync --extra dashboard
 ```
 
 On first run, Pillbug initializes `~/.pillbug/workspace/AGENTS.md`. That file is included in the system instruction for model requests.
@@ -59,25 +71,45 @@ flowchart LR
   Pipeline -->|blocked| Reject[Security rejection]
   Reject --> Reply[Send response]
   Pipeline -->|accepted| Session[GeminiChatSession]
-  Session --> Context[Base context + workspace AGENTS.md]
+  Session --> Context[Base context + AGENTS.md + skills + channel memos]
+  Session --> Binding[Session binding metadata]
   Session --> MCP[Local MCP server]
+  MCP --> Control[Telemetry + control + Agent Card APIs]
   MCP --> Workspace[Scoped workspace file and command tools]
   Session --> Gemini[Gemini API]
   Context --> Gemini
+  Control --> Dashboard[Operator dashboard or peers]
   Gemini --> Reply
   Reply --> Channels
 ```
 
 Runtime flow:
 
-- `app/__main__.py` initializes the workspace, starts the local MCP server, and runs the application loop.
-- `app/runtime/loop.py` listens on each channel, groups messages by session, and reuses one chat session per session key.
+- `app/__main__.py` initializes the workspace, ensures runtime identity and security-pattern files exist, starts the local MCP server and embedded scheduler, and runs the application loop.
+- `app/runtime/loop.py` listens on each channel, groups messages by session, reuses one chat session per session key, handles `/clear`, `/usage`, and `/summarize`, and can auto-summarize long sessions.
 - `app/runtime/pipeline.py` cleans input, runs security checks, and builds the structured model input.
-- `app/mcp.py` exposes workspace-safe file, command, outbound messaging, URL-fetching, and todo-planning tools to the model.
+- `app/core/ai.py` layers base runtime context, workspace `AGENTS.md`, discovered workspace skills, channel memos, MCP tools, and supported inbound attachments into Gemini requests.
+- `app/mcp.py` exposes workspace-safe file, command, outbound messaging, URL-fetching, planning, telemetry, control, and Agent Card surfaces.
 
 External executions can also deliver messages through the local MCP server with `send_message(channel, message)`.
 Use `cli` for the local console, or a session-style target such as `telegram:123456789` where the suffix is the
 channel conversation identifier.
+
+## Session Commands And Summarization
+
+Built-in runtime commands:
+
+- `/clear` resets the current conversation history
+- `/usage` returns the accumulated Gemini token totals for the current session
+- `/summarize` runs the summarize prompt immediately for the current session
+
+Automatic summarization is controlled through:
+
+- `PB_SESSION_SUMMARIZATION=memory` to summarize and then reset the stored Gemini history
+- `PB_SESSION_SUMMARIZATION=compress` to replace the earlier Gemini history with a single compressed summary message
+- `PB_SESSION_SUMMARIZATION_THRESHOLD` to set the total-token threshold that triggers automatic summarization
+
+When auto-summarization completes and the channel allows replies, Pillbug sends `Session compressed` back through the originating channel.
 
 ## Planning
 
@@ -92,6 +124,17 @@ Use these actions:
 The tool validates that todo item ids are unique and that there is at most one `in-progress` item at a time.
 Todo state is scoped to the active MCP session, so each active agent conversation keeps its own plan.
 
+## Workspace Skills
+
+Pillbug discovers optional custom skills from `skills/*/SKILL.md` inside the runtime workspace.
+
+Each skill directory must contain `SKILL.md` frontmatter with at least:
+
+- `name`
+- `description`
+
+Discovered skills are injected into the model system instruction and published in the A2A Agent Card payloads.
+
 ## Configuration
 
 Common environment variables:
@@ -99,25 +142,30 @@ Common environment variables:
 - `PB_GEMINI_API_KEY` for Gemini access
 - `PB_RUNTIME_ID` to pin a stable runtime identifier explicitly; when omitted, Pillbug persists one at `~/.pillbug/runtime_id.txt`
 - `PB_AGENT_NAME` to attach an operator-facing agent label to runtime telemetry
-- `PB_DASHBOARD_BEARER_TOKEN` to protect the dashboard telemetry APIs and the upcoming control APIs with a single dashboard-scoped bearer token
+- `PB_DASHBOARD_BEARER_TOKEN` to protect telemetry and operator control APIs with a dashboard-scoped bearer token
 - `PB_A2A_BEARER_TOKEN` to protect runtime-to-runtime A2A ingress with a peer-scoped bearer token
 - `PB_ENABLED_CHANNELS` to enable `cli` and registered external channels
 - `PB_CHANNEL_PLUGIN_FACTORIES` for `channel=package.module:factory` plugin mappings
 - `PB_A2A_SELF_BASE_URL` to advertise the externally reachable base URL peers should use for replies
+- `PB_A2A_OUTBOUND_TIMEOUT_SECONDS` to bound outbound A2A delivery attempts
 - `PB_A2A_PEERS_JSON` to register known peer runtimes and their base URLs for outbound A2A delivery
 - `PB_A2A_CONVERGENCE_MAX_HOPS` to bound automatic cross-runtime reply chains before Pillbug stops the exchange
 - `PB_A2A_AGENT_DESCRIPTION`, `PB_A2A_PROVIDER_ORGANIZATION`, `PB_A2A_PROVIDER_URL`, `PB_A2A_DOCUMENTATION_URL`, and `PB_A2A_ICON_URL` to populate the published A2A Agent Card
 - `PB_SECURITY_PATTERNS_PATH` to tune inbound warning and block regexes loaded by the pipeline at runtime startup and on file change
 - `PB_WORKSPACE_ROOT` to change the runtime workspace location
 - `PB_INBOUND_DEBOUNCE_SECONDS` to tune message batching behavior
+- `PB_SESSION_SUMMARIZATION` to choose `memory`, `compress`, or disable automatic summarization
+- `PB_SESSION_SUMMARIZATION_THRESHOLD` to set the token threshold for automatic summarization
 - `PB_DOCKET_URL` to point scheduled tasks at a dedicated Redis-backed docket
 - `PB_MCP_FETCH_URL_MAX_BYTES` to cap streamed URL downloads before they are saved
 - `PB_MCP_FETCH_URL_OUTPUT_DIR` to choose where fetched resources are written inside the workspace
 - `PB_MCP_FETCH_URL_TIMEOUT_SECONDS` to tune remote fetch timeouts
 
-## Telemetry API
+If both `PB_DASHBOARD_BEARER_TOKEN` and `PB_A2A_BEARER_TOKEN` are configured, they must differ so operator access stays isolated from peer-runtime access.
 
-Pillbug now exposes read-only runtime telemetry alongside the MCP HTTP server.
+## Telemetry And Control API
+
+Pillbug exposes read-only runtime telemetry alongside narrow operator control routes on the same HTTP server.
 
 Available endpoints:
 
@@ -127,10 +175,18 @@ Available endpoints:
 - `GET /telemetry/sessions`
 - `GET /telemetry/tasks`
 - `GET /telemetry/events`
+- `POST /control/messages/send`
+- `POST /control/sessions/{session_id}/clear`
+- `POST /control/tasks/{task_id}/enable`
+- `POST /control/tasks/{task_id}/disable`
+- `POST /control/tasks/{task_id}/run-now`
+- `POST /control/runtime/drain`
+- `POST /control/runtime/shutdown`
 
 `GET /telemetry/events` uses Server-Sent Events and emits an initial runtime snapshot followed by live runtime, session, channel, and scheduler events.
 
-When `PB_DASHBOARD_BEARER_TOKEN` is configured, these endpoints require `Authorization: Bearer <token>`.
+When `PB_DASHBOARD_BEARER_TOKEN` is configured, telemetry and control endpoints require `Authorization: Bearer <token>`.
+Control responses return a small operator-focused payload with the runtime id, action name, human-readable message, and optional details that dashboards can apply directly.
 
 ## Scheduled Tasks
 
@@ -164,6 +220,8 @@ The root package exposes that plugin through the `telegram` extra, so the runtim
 The repository also includes `packages/pillbug-a2a`, an HTTP-based runtime-to-runtime channel.
 It keeps cross-runtime traffic in the normal inbound message pipeline instead of introducing remote tool execution.
 
+The repository also includes `packages/pillbug-dashboard`, a FastAPI-based operator dashboard that keeps runtime registrations and bearer tokens server-side while proxying telemetry, control actions, Agent Card fetches, and runtime event streams.
+
 Example setup:
 
 ```bash
@@ -186,6 +244,15 @@ export PB_A2A_CONVERGENCE_MAX_HOPS=6
 export PB_A2A_PEERS_JSON='[{"runtime_id":"runtime-b","base_url":"http://runtime-b:8000"}]'
 uv run python -m app
 ```
+
+Example dashboard setup:
+
+```bash
+uv sync --extra dashboard
+uv run pillbug-dashboard
+```
+
+The root `compose.yaml` also includes an example multi-runtime deployment with three runtime containers and one dashboard container.
 
 Outbound A2A targets use the form `a2a:runtime-id/conversation-id`.
 Inbound peer traffic is accepted on `POST /a2a/messages` and converted into normal `InboundMessage` values before the application loop processes it.
