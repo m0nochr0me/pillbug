@@ -19,6 +19,8 @@ from app.schema.messages import (
     A2AIntent,
     A2ATarget,
     InboundMessage,
+    build_a2a_origin_routing_metadata,
+    extract_a2a_origin_channel_metadata,
     extract_a2a_origin_routing_metadata,
 )
 
@@ -228,6 +230,15 @@ class A2AChannel(BaseChannel):
         fallback_base_url = self._fallback_sender_base_url(inbound_message)
         convergence_state = original_envelope.convergence_state.next_outbound()
         origin_metadata = extract_a2a_origin_routing_metadata(original_envelope.metadata)
+        origin_channel_metadata = extract_a2a_origin_channel_metadata(original_envelope.metadata)
+        outbound_origin_metadata: dict[str, object] | None = None
+        if origin_metadata is not None:
+            outbound_origin_metadata = build_a2a_origin_routing_metadata(
+                channel_name=origin_metadata["pillbug_origin_channel_name"],
+                conversation_id=origin_metadata["pillbug_origin_conversation_id"],
+                channel_metadata=origin_channel_metadata,
+            )
+
         envelope = A2AEnvelope(
             sender_runtime_id=settings.runtime_id,
             sender_agent_name=settings.AGENT_NAME,
@@ -239,7 +250,7 @@ class A2AChannel(BaseChannel):
             metadata=self._build_outbound_metadata(
                 reply_to_message_id=original_envelope.message_id,
                 convergence_state=convergence_state,
-                extra_metadata=origin_metadata,  # pyright: ignore[reportArgumentType]
+                extra_metadata=outbound_origin_metadata,
             ),
         )
         await self._deliver_envelope(

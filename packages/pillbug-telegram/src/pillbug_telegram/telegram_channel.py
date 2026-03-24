@@ -101,6 +101,23 @@ def _message_payload_from_event(event: Event) -> dict | None:
     return None
 
 
+def _coerce_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        stripped_value = value.strip()
+        if not stripped_value:
+            return None
+        try:
+            return int(stripped_value)
+        except ValueError:
+            return None
+
+    return None
+
+
 def _extract_attachment_payload(message_payload: dict) -> tuple[str, dict] | None:
     for content_type in _DOWNLOADABLE_EVENT_TYPES:
         payload = message_payload.get(content_type)
@@ -361,17 +378,19 @@ class TelegramChannel(BaseChannel):
         await self._send_text(chat_id=chat_id, response_text=message_text)
 
     async def send_response(self, inbound_message: InboundMessage, response_text: str) -> None:
-        chat_id = inbound_message.metadata.get("telegram_chat_id")
-        if not isinstance(chat_id, int):
-            raise ValueError("Telegram inbound message metadata is missing telegram_chat_id")
+        chat_id = self._chat_id_from_inbound_message(inbound_message)
+        if chat_id is None:
+            raise ValueError(
+                "Telegram inbound message metadata is missing telegram_chat_id and conversation_id is not a valid chat ID"
+            )
 
-        reply_to_message_id = inbound_message.metadata.get("telegram_message_id")
+        reply_to_message_id = _coerce_int(inbound_message.metadata.get("telegram_message_id"))
         await self._send_text(chat_id=chat_id, response_text=response_text, reply_to_message_id=reply_to_message_id)
 
     @asynccontextmanager
     async def response_presence(self, inbound_message: InboundMessage) -> AsyncIterator[None]:
-        chat_id = inbound_message.metadata.get("telegram_chat_id")
-        if not isinstance(chat_id, int):
+        chat_id = self._chat_id_from_inbound_message(inbound_message)
+        if chat_id is None:
             yield
             return
 
@@ -675,6 +694,13 @@ class TelegramChannel(BaseChannel):
 
     def _file_download_url(self, telegram_file_path: str) -> str:
         return f"https://api.telegram.org/file/bot{self._settings.bot_token}/{telegram_file_path}"
+
+    def _chat_id_from_inbound_message(self, inbound_message: InboundMessage) -> int | None:
+        chat_id = _coerce_int(inbound_message.metadata.get("telegram_chat_id"))
+        if chat_id is not None:
+            return chat_id
+
+        return _coerce_int(inbound_message.conversation_id)
 
 
 def create_channel() -> TelegramChannel:
