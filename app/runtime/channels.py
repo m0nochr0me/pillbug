@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from importlib import import_module
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 from app.core.cache import cache
 from app.core.config import settings
@@ -225,6 +225,29 @@ def _channel_context_destinations(
         return None
 
 
+def _channel_telemetry_details(channel: ChannelPlugin) -> dict[str, Any] | None:
+    telemetry_details = getattr(channel, "telemetry_details", None)
+    if not callable(telemetry_details):
+        return None
+
+    try:
+        details = telemetry_details()
+    except Exception:
+        logger.exception(f"Failed to build telemetry details for {channel.name}")
+        return None
+
+    if not isinstance(details, dict):
+        return None
+
+    normalized_details: dict[str, Any] = {}
+    for key, value in details.items():
+        if not isinstance(key, str) or not key.strip():
+            continue
+        normalized_details[key] = value
+
+    return normalized_details or None
+
+
 def _load_channel_factory(import_path: str) -> ChannelFactory:
     """
     Dynamically load a channel factory from an import path.
@@ -333,22 +356,42 @@ async def describe_channel_telemetry() -> list[ChannelTelemetryEntry]:
     channel_entries: list[ChannelTelemetryEntry] = []
 
     for channel_name in settings.enabled_channels():
-        channel = _active_channels.get(channel_name)
+        active_channel = _active_channels.get(channel_name)
+        channel = active_channel
+        created_for_telemetry = False
+        if channel is None:
+            factory = _get_channel_factories().get(channel_name)
+            if factory is not None:
+                try:
+                    channel = factory()
+                    created_for_telemetry = True
+                except Exception:
+                    logger.exception(f"Failed to initialize {channel_name} channel for telemetry")
+                    channel = None
+
         known_destinations = sorted(
             _known_channel_conversations.get(channel_name, set())
             | await _get_cached_channel_conversations(channel_name)
         )
 
-        channel_entries.append(
-            ChannelTelemetryEntry(
-                name=channel_name,
-                destination_kind=channel.destination_kind if channel is not None else "unknown",
-                enabled=True,
-                active=channel is not None,
-                known_destinations=tuple(known_destinations),
-                known_destination_count=len(known_destinations),
+        try:
+            channel_entries.append(
+                ChannelTelemetryEntry(
+                    name=channel_name,
+                    destination_kind=channel.destination_kind if channel is not None else "unknown",
+                    enabled=True,
+                    active=active_channel is not None,
+                    details=_channel_telemetry_details(channel) if channel is not None else None,
+                    known_destinations=tuple(known_destinations),
+                    known_destination_count=len(known_destinations),
+                )
             )
-        )
+        finally:
+            if created_for_telemetry and channel is not None:
+                try:
+                    await channel.close()
+                except Exception:
+                    logger.exception(f"Failed to close telemetry-only channel instance: {channel_name}")
 
     return channel_entries
 

@@ -42,6 +42,17 @@ def _extract_a2a_peers(channels_payload: dict[str, Any] | None) -> tuple[str, ..
         if channel.get("name") != "a2a":
             continue
 
+        details = channel.get("details")
+        if isinstance(details, dict):
+            configured_peers = details.get("configured_peers")
+            if isinstance(configured_peers, list | tuple):
+                normalized_peers = tuple(
+                    peer.strip() for peer in configured_peers if isinstance(peer, str) and peer.strip()
+                )
+                if normalized_peers:
+                    peers.update(normalized_peers)
+                    continue
+
         for destination in channel.get("known_destinations", []):
             if not isinstance(destination, str):
                 continue

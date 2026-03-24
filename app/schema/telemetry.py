@@ -94,6 +94,10 @@ class ChannelTelemetryEntry(BaseModel):
     destination_kind: str = Field(min_length=1, description="Destination addressing mode for outbound sends.")
     enabled: bool = Field(default=True, description="Whether the channel is enabled in runtime configuration.")
     active: bool = Field(default=False, description="Whether the channel plugin has been instantiated in-process.")
+    details: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional channel-specific configuration details safe to expose through telemetry.",
+    )
     known_destinations: tuple[str, ...] = Field(
         default_factory=tuple,
         description="Known conversation destinations seen for this channel.",

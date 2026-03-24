@@ -364,6 +364,18 @@ class A2AChannel(BaseChannel):
             "peers": tuple(peers),
         }
 
+    def telemetry_details(self) -> dict[str, Any] | None:
+        if not self._settings.peers:
+            return {
+                "configured_peers": (),
+                "convergence_max_hops": self._settings.convergence_max_hops,
+            }
+
+        return {
+            "configured_peers": tuple(peer.runtime_id for peer in self._settings.peers),
+            "convergence_max_hops": self._settings.convergence_max_hops,
+        }
+
     async def close(self) -> None:
         if self._closed:
             return

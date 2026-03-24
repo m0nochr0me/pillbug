@@ -100,7 +100,7 @@
         <hr class="large-divider">
 
         <div class="stack gap-3">
-          <p class="eyebrow">A2A TOPOLOGY</p>
+          <p class="eyebrow">CONFIGURED A2A PEERS</p>
           <div v-if="topologyEdges.length" class="stack gap-2">
             <div v-for="edge in topologyEdges" :key="edge.key" class="topology-edge">
               <strong>[[ edge.source ]]</strong>
@@ -108,7 +108,7 @@
               <span>[[ edge.target ]]</span>
             </div>
           </div>
-          <p v-else class="muted-copy">NO A2A DESTINATIONS</p>
+          <p v-else class="muted-copy">NO CONFIGURED A2A PEERS</p>
         </div>
       </article>
 
