@@ -23,6 +23,7 @@ __all__ = ("settings",)
 
 _RUNTIME_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$")
 _MIN_BEARER_TOKEN_LENGTH = 16
+_SESSION_SUMMARIZATION_MODES = {"memory", "compress"}
 
 
 def _split_csv(value: str) -> tuple[str, ...]:
@@ -84,6 +85,9 @@ class Settings(BaseSettings):
     GEMINI_THINKING_LEVEL: str = "high"
     GEMINI_API_KEY: str
 
+    SESSION_SUMMARIZATION: str | None = "memory"  # or "compress"
+    SESSION_SUMMARIZATION_THRESHOLD: int = 1024 * 128  # total tokens
+
     MCP_HOST: str = "127.0.0.1"
     MCP_PORT: int = 8000
     MCP_SHORTENER_BASE_URL: str | None = None
@@ -130,6 +134,30 @@ class Settings(BaseSettings):
             return None
 
         return _validate_runtime_identifier(value, source="PB_RUNTIME_ID")
+
+    @field_validator("SESSION_SUMMARIZATION", mode="before")
+    @classmethod
+    def validate_session_summarization(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+
+        normalized = str(value).strip().lower()
+        if not normalized or normalized in {"none", "off", "false", "disabled"}:
+            return None
+
+        if normalized not in _SESSION_SUMMARIZATION_MODES:
+            supported_modes = ", ".join(sorted(_SESSION_SUMMARIZATION_MODES))
+            raise ValueError(f"PB_SESSION_SUMMARIZATION must be one of: {supported_modes}")
+
+        return normalized
+
+    @field_validator("SESSION_SUMMARIZATION_THRESHOLD")
+    @classmethod
+    def validate_session_summarization_threshold(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("PB_SESSION_SUMMARIZATION_THRESHOLD must be greater than 0")
+
+        return value
 
     @field_validator("A2A_CONVERGENCE_MAX_HOPS")
     @classmethod

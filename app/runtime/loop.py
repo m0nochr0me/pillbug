@@ -19,6 +19,8 @@ from app.schema.messages import InboundBatch, InboundMessage, ProcessedInboundMe
 from app.schema.telemetry import SessionsTelemetrySnapshot, SessionTelemetryEntry
 
 _SUMMARIZE_PROMPT_NAME = "summarize.prompt.md"
+_COMPRESS_PROMPT_NAME = "compress.prompt.md"
+_SESSION_COMPRESSED_MESSAGE = "Session compressed"
 
 
 def _utcnow() -> datetime:
@@ -64,6 +66,7 @@ class ApplicationLoop:
         self._flush_tasks: dict[str, asyncio.Task[None]] = {}
         self._listener_tasks: list[asyncio.Task[None]] = []
         self._session_state_by_key: dict[str, _SessionTelemetryState] = {}
+        self._session_summarization_locks: dict[str, asyncio.Lock] = {}
         self._drain_requested = False
         self._shutdown_requested = False
         self._shutdown_event = asyncio.Event()
@@ -480,6 +483,100 @@ class ApplicationLoop:
                 "response_sent": response_sent,
             },
         )
+        await self._maybe_auto_summarize_session(
+            channel=channel,
+            batch=batch,
+            session=session,
+        )
+
+    async def _maybe_auto_summarize_session(
+        self,
+        *,
+        channel: ChannelPlugin,
+        batch: InboundBatch,
+        session: GeminiChatSession,
+    ) -> None:
+        summarization_mode = settings.SESSION_SUMMARIZATION
+        if summarization_mode is None:
+            return
+
+        if session.total_token_count() <= settings.SESSION_SUMMARIZATION_THRESHOLD:
+            return
+
+        summarization_lock = self._session_summarization_locks.setdefault(batch.session_key, asyncio.Lock())
+        if summarization_lock.locked():
+            return
+
+        async with summarization_lock:
+            total_token_count = session.total_token_count()
+            if total_token_count <= settings.SESSION_SUMMARIZATION_THRESHOLD:
+                return
+
+            logger.info(
+                f"Auto-summarizing session {batch.session_key} mode={summarization_mode} total_tokens={total_token_count}"
+            )
+            await runtime_telemetry.record_event(
+                event_type="session.summarization.started",
+                source="application-loop",
+                message="Automatic session summarization started.",
+                data={
+                    "session_key": batch.session_key,
+                    "channel": batch.channel_name,
+                    "mode": summarization_mode,
+                    "total_token_count": total_token_count,
+                    "threshold": settings.SESSION_SUMMARIZATION_THRESHOLD,
+                },
+            )
+
+            try:
+                if summarization_mode == "memory":
+                    summarize_prompt = self._chat_service.render_prompt_text(_SUMMARIZE_PROMPT_NAME)
+                    await session.send_message(summarize_prompt)
+                    self._sessions[batch.session_key] = await self._chat_service.reset_session(batch.session_key)
+                else:
+                    compress_prompt = self._chat_service.render_prompt_text(_COMPRESS_PROMPT_NAME)
+                    compression_response = await session.send_message(compress_prompt)
+                    compression_summary = compression_response.text.strip()
+                    if not compression_summary:
+                        raise RuntimeError("Compression summary response was blank")
+
+                    await session.replace_history_with_summary(compression_summary)
+
+                response_sent = await self._maybe_send_channel_response(
+                    channel=channel,
+                    inbound_message=batch.last_message,
+                    response_text=_SESSION_COMPRESSED_MESSAGE,
+                )
+                if response_sent:
+                    self._record_session_response(batch.session_key)
+                else:
+                    self._record_session_activity(batch.session_key)
+
+                await runtime_telemetry.record_event(
+                    event_type="session.summarization.completed",
+                    source="application-loop",
+                    message="Automatic session summarization completed.",
+                    data={
+                        "session_key": batch.session_key,
+                        "channel": batch.channel_name,
+                        "mode": summarization_mode,
+                        "response_sent": response_sent,
+                    },
+                )
+            except Exception:
+                logger.exception(f"Failed to auto-summarize session {batch.session_key}")
+                self._record_session_error(batch.session_key)
+                await runtime_telemetry.record_event(
+                    event_type="session.summarization.failed",
+                    source="application-loop",
+                    level="error",
+                    message="Automatic session summarization failed.",
+                    data={
+                        "session_key": batch.session_key,
+                        "channel": batch.channel_name,
+                        "mode": summarization_mode,
+                    },
+                )
 
     def _channel_response_policy(self, channel: ChannelPlugin, inbound_message: InboundMessage) -> object | None:
         response_policy = getattr(channel, "response_policy", None)

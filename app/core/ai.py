@@ -50,6 +50,10 @@ _EMPTY_MODEL_RESPONSE_FALLBACK = "I could not produce a text response right now.
 _MODEL_INPUT_PROMPT_NAME = "model_input.prompt.md"
 _SKILLS_PROMPT_NAME = "skills.prompt.md"
 _CHANNEL_MEMO_PROMPTS = {"a2a": "a2a_channel_memo.prompt.md"}
+_COMPRESSED_SESSION_HISTORY_PREFIX = (
+    "Compressed session summary. This replaces the earlier message history. "
+    "Use it as background context for future turns:\n\n"
+)
 
 
 def _normalize_supported_attachment_mime_type(mime_type: str) -> str | None:
@@ -465,6 +469,27 @@ class GeminiChatSession:
 
     def get_usage_totals(self) -> ChatSessionUsageTotals:
         return self._usage_totals.model_copy(deep=True)
+
+    def total_token_count(self) -> int:
+        return self._usage_totals.total_token_count
+
+    async def replace_history_with_summary(self, summary_text: str) -> None:
+        normalized_summary = summary_text.strip()
+        if not normalized_summary:
+            raise ValueError("summary_text must not be blank")
+
+        compressed_history = [
+            types.Content(
+                role="user",
+                parts=[types.Part.from_text(text=f"{_COMPRESSED_SESSION_HISTORY_PREFIX}{normalized_summary}")],
+            )
+        ]
+        self._chat = self._service.ai_client.aio.chats.create(
+            model=settings.GEMINI_MODEL,
+            history=cast("list[types.ContentOrDict] | None", compressed_history),
+        )
+        self._usage_totals = ChatSessionUsageTotals()
+        await self._persist_history()
 
     def render_usage_report(self) -> str:
         return self._usage_totals.to_display_text()
