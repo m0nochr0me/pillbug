@@ -89,12 +89,12 @@ def _skill_id(value: str) -> str:
 
 def _builtin_skills(*, include_extended_examples: bool) -> tuple[AgentSkill, ...]:
     channel_examples = [
-        "Send the final handoff to a2a:runtime-b/deploy-42 only if a new cross-runtime exchange is required.",
+        "Use send_a2a_message with runtime-b/deploy-42 only if a new asynchronous cross-runtime exchange is required.",
         "Notify telegram:123456789 after the scheduled verification completes.",
     ]
     if include_extended_examples:
         channel_examples.append(
-            "If you receive a terminal result, stop automatic replies and only use an outbound message tool when you need to start a fresh exchange."
+            "If you receive a terminal A2A result, answer normally in the local a2a session so the runtime can route that response back to the preserved origin channel."
         )
 
     return (

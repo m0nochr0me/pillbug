@@ -56,6 +56,16 @@ def extract_a2a_origin_routing_metadata(metadata: dict[str, Any]) -> dict[str, s
     }
 
 
+def extract_a2a_origin_route(metadata: dict[str, Any]) -> tuple[str, str] | None:
+    if origin_metadata := extract_a2a_origin_routing_metadata(metadata):
+        return (
+            origin_metadata[_A2A_ORIGIN_CHANNEL_NAME_METADATA_KEY],
+            origin_metadata[_A2A_ORIGIN_CONVERSATION_ID_METADATA_KEY],
+        )
+
+    return None
+
+
 def extract_a2a_origin_channel_metadata(metadata: dict[str, Any]) -> dict[str, object] | None:
     channel_metadata = metadata.get(_A2A_ORIGIN_CHANNEL_METADATA_KEY)
     if not isinstance(channel_metadata, dict):
@@ -150,9 +160,15 @@ class A2ATarget(BaseModel):
 
     @classmethod
     def parse(cls, value: str) -> Self:
-        runtime_id, separator, conversation_id = value.strip().partition("/")
+        normalized_value = value.strip()
+        if normalized_value.startswith("a2a:"):
+            normalized_value = normalized_value[4:].strip()
+
+        runtime_id, separator, conversation_id = normalized_value.partition("/")
         if not separator:
-            raise ValueError("A2A destination must use the format runtime_id/conversation_id")
+            raise ValueError(
+                "A2A destination must use the format runtime_id/conversation_id or a2a:runtime_id/conversation_id"
+            )
 
         return cls(runtime_id=runtime_id, conversation_id=conversation_id)
 
@@ -288,13 +304,7 @@ class A2AEnvelope(BaseModel):
         if self.intent not in {A2AIntent.RESULT, A2AIntent.INFORM, A2AIntent.ERROR, A2AIntent.HEARTBEAT}:
             return None
 
-        if origin_metadata := extract_a2a_origin_routing_metadata(self.metadata):
-            return (
-                origin_metadata[_A2A_ORIGIN_CHANNEL_NAME_METADATA_KEY],
-                origin_metadata[_A2A_ORIGIN_CONVERSATION_ID_METADATA_KEY],
-            )
-
-        return None
+        return extract_a2a_origin_route(self.metadata)
 
     def render_inbound_text(self) -> str:
         sender_label = self.sender_runtime_id
@@ -314,6 +324,11 @@ class A2AEnvelope(BaseModel):
             )
         elif block_reason == "convergence_limit":
             lines.append(convergence_state.render_limit_message())
+
+        if self.origin_route is not None:
+            lines.append(
+                "If you want to answer the original requester, reply normally in this local A2A session. The runtime will route your final response back to the preserved origin channel automatically."
+            )
 
         if self.attachments:
             attachment_summary = ", ".join(attachment.render_summary() for attachment in self.attachments[:5])
@@ -345,6 +360,9 @@ class A2AEnvelope(BaseModel):
         if origin_metadata := extract_a2a_origin_routing_metadata(self.metadata):
             inbound_metadata.update(origin_metadata)
 
+        if origin_channel_metadata := extract_a2a_origin_channel_metadata(self.metadata):
+            inbound_metadata[_A2A_ORIGIN_CHANNEL_METADATA_KEY] = origin_channel_metadata
+
         return inbound_metadata
 
     def to_inbound_message(
@@ -357,17 +375,9 @@ class A2AEnvelope(BaseModel):
         if extra_metadata:
             metadata.update(extra_metadata)
 
-        resolved_channel_name = channel_name
-        resolved_conversation_id = self.local_conversation_id
-        if origin_route := self.origin_route:
-            resolved_channel_name, resolved_conversation_id = origin_route
-            if origin_channel_metadata := extract_a2a_origin_channel_metadata(self.metadata):
-                for key, value in origin_channel_metadata.items():
-                    metadata.setdefault(key, value)
-
         return InboundMessage(
-            channel_name=resolved_channel_name,
-            conversation_id=resolved_conversation_id,
+            channel_name=channel_name,
+            conversation_id=self.local_conversation_id,
             text=self.render_inbound_text(),
             user_id=self.sender_runtime_id,
             message_id=self.message_id,

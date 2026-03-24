@@ -25,6 +25,7 @@ from app.schema.messages import (
 )
 
 _DEFAULT_INGRESS_PATH = "/a2a/messages"
+_TERMINAL_A2A_INTENTS = frozenset({A2AIntent.RESULT, A2AIntent.INFORM, A2AIntent.ERROR, A2AIntent.HEARTBEAT})
 
 
 def _normalize_base_url(value: str) -> str:
@@ -171,6 +172,7 @@ class A2AChannel(BaseChannel):
         self._settings = channel_settings or A2AChannelSettings.from_env()
         self._inbound_queue: asyncio.Queue[InboundMessage | None] = asyncio.Queue()
         self._http_session: aiohttp.ClientSession | None = None
+        self._response_waiters: dict[str, asyncio.Future[A2AEnvelope]] = {}
         self._closed = False
 
     async def listen(self) -> AsyncIterator[InboundMessage]:
@@ -196,6 +198,16 @@ class A2AChannel(BaseChannel):
             channel_name=self.name,
             extra_metadata={"a2a_client_host": client_host} if client_host else None,
         )
+
+        response_waiter = self._pop_response_waiter(envelope)
+        if response_waiter is not None:
+            if not response_waiter.done():
+                response_waiter.set_result(envelope)
+            logger.info(
+                f"Resolved synchronous A2A waiter for {envelope.sender_runtime_id} conversation={envelope.conversation_id} reply_to={envelope.reply_to_message_id}"
+            )
+            return inbound_message
+
         await self._inbound_queue.put(inbound_message)
         logger.info(
             f"Queued A2A envelope from {envelope.sender_runtime_id} to {envelope.target_runtime_id} conversation={envelope.conversation_id}"
@@ -208,18 +220,54 @@ class A2AChannel(BaseChannel):
         message_text: str,
         metadata: dict[str, object] | None = None,
     ) -> None:
-        target = A2ATarget.parse(conversation_id)
-        convergence_state = A2AConvergenceState(max_hops=self._settings.convergence_max_hops)
-        envelope = A2AEnvelope(
-            sender_runtime_id=settings.runtime_id,
-            sender_agent_name=settings.AGENT_NAME,
-            target_runtime_id=target.runtime_id,
-            conversation_id=target.conversation_id,
-            intent=A2AIntent.ASK,
-            text=message_text,
-            metadata=self._build_outbound_metadata(convergence_state=convergence_state, extra_metadata=metadata),
+        target, envelope = self._build_outbound_request_envelope(
+            conversation_id=conversation_id,
+            message_text=message_text,
+            metadata=metadata,
         )
         await self._deliver_envelope(target.runtime_id, envelope)
+
+    async def send_request(
+        self,
+        conversation_id: str,
+        message_text: str,
+        *,
+        metadata: dict[str, object] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> A2AEnvelope:
+        target, envelope = self._build_outbound_request_envelope(
+            conversation_id=conversation_id,
+            message_text=message_text,
+            metadata=metadata,
+        )
+        waiter_key = self._response_waiter_key(
+            sender_runtime_id=target.runtime_id,
+            conversation_id=target.conversation_id,
+            reply_to_message_id=envelope.message_id,
+        )
+        waiter = asyncio.get_running_loop().create_future()
+        existing_waiter = self._response_waiters.get(waiter_key)
+        if existing_waiter is not None and not existing_waiter.done():
+            raise RuntimeError(
+                f"A synchronous A2A request is already waiting for {target.runtime_id} conversation={target.conversation_id}"
+            )
+
+        self._response_waiters[waiter_key] = waiter
+        wait_timeout_seconds = timeout_seconds or self._settings.outbound_timeout_seconds
+
+        try:
+            await self._deliver_envelope(target.runtime_id, envelope)
+            return await asyncio.wait_for(waiter, timeout=wait_timeout_seconds)
+        except TimeoutError as exc:
+            raise TimeoutError(
+                f"Timed out waiting for A2A response from {target.runtime_id} conversation={target.conversation_id}"
+            ) from exc
+        finally:
+            current_waiter = self._response_waiters.get(waiter_key)
+            if current_waiter is waiter:
+                self._response_waiters.pop(waiter_key, None)
+            if not waiter.done():
+                waiter.cancel()
 
     async def send_response(
         self,
@@ -321,10 +369,34 @@ class A2AChannel(BaseChannel):
             return
 
         self._closed = True
+        for response_waiter in self._response_waiters.values():
+            if not response_waiter.done():
+                response_waiter.cancel()
+        self._response_waiters.clear()
         await self._inbound_queue.put(None)
         if self._http_session is not None:
             await self._http_session.close()
             self._http_session = None
+
+    def _build_outbound_request_envelope(
+        self,
+        *,
+        conversation_id: str,
+        message_text: str,
+        metadata: dict[str, object] | None = None,
+    ) -> tuple[A2ATarget, A2AEnvelope]:
+        target = A2ATarget.parse(conversation_id)
+        convergence_state = A2AConvergenceState(max_hops=self._settings.convergence_max_hops)
+        envelope = A2AEnvelope(
+            sender_runtime_id=settings.runtime_id,
+            sender_agent_name=settings.AGENT_NAME,
+            target_runtime_id=target.runtime_id,
+            conversation_id=target.conversation_id,
+            intent=A2AIntent.ASK,
+            text=message_text,
+            metadata=self._build_outbound_metadata(convergence_state=convergence_state, extra_metadata=metadata),
+        )
+        return target, envelope
 
     def _build_outbound_metadata(
         self,
@@ -365,6 +437,26 @@ class A2AChannel(BaseChannel):
             return None
 
         return _normalize_base_url(sender_base_url)
+
+    def _pop_response_waiter(self, envelope: A2AEnvelope) -> asyncio.Future[A2AEnvelope] | None:
+        if envelope.reply_to_message_id is None or envelope.intent not in _TERMINAL_A2A_INTENTS:
+            return None
+
+        waiter_key = self._response_waiter_key(
+            sender_runtime_id=envelope.sender_runtime_id,
+            conversation_id=envelope.conversation_id,
+            reply_to_message_id=envelope.reply_to_message_id,
+        )
+        return self._response_waiters.pop(waiter_key, None)
+
+    def _response_waiter_key(
+        self,
+        *,
+        sender_runtime_id: str,
+        conversation_id: str,
+        reply_to_message_id: str,
+    ) -> str:
+        return f"{sender_runtime_id}:{conversation_id}:{reply_to_message_id}"
 
     async def _deliver_envelope(
         self,

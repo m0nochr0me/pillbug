@@ -9,13 +9,20 @@ from app.core.log import logger
 from app.core.telemetry import runtime_telemetry
 from app.runtime.channels import (
     ChannelPlugin,
+    get_channel_plugin,
     load_channel_plugins,
     register_channel_conversation,
     unregister_channel_plugin,
 )
 from app.runtime.pipeline import InboundProcessingPipeline
 from app.runtime.session_binding import bind_runtime_session_origin_metadata
-from app.schema.messages import InboundBatch, InboundMessage, ProcessedInboundMessage
+from app.schema.messages import (
+    A2AEnvelope,
+    InboundBatch,
+    InboundMessage,
+    ProcessedInboundMessage,
+    extract_a2a_origin_channel_metadata,
+)
 from app.schema.telemetry import SessionsTelemetrySnapshot, SessionTelemetryEntry
 
 _SUMMARIZE_PROMPT_NAME = "summarize.prompt.md"
@@ -286,7 +293,7 @@ class ApplicationLoop:
         if response_policy is not None and not getattr(response_policy, "should_process", True):
             reply_text = getattr(response_policy, "reply_text", None)
             if isinstance(reply_text, str) and reply_text.strip():
-                response_sent = await self._maybe_send_channel_response(
+                response_sent = await self._send_inbound_response(
                     channel=channel,
                     inbound_message=batch.last_message,
                     response_text=reply_text,
@@ -317,7 +324,7 @@ class ApplicationLoop:
         if processed_message.security.blocked:
             self._record_blocked_batch(batch)
             rejection = self._render_security_rejection(processed_message)
-            await self._maybe_send_channel_response(
+            await self._send_inbound_response(
                 channel=channel,
                 inbound_message=batch.last_message,
                 response_text=rejection,
@@ -355,7 +362,7 @@ class ApplicationLoop:
 
         if command == "/clear":
             self._sessions[batch.session_key] = await self._chat_service.reset_session(batch.session_key)
-            response_sent = await self._maybe_send_channel_response(
+            response_sent = await self._send_inbound_response(
                 channel=channel,
                 inbound_message=batch.last_message,
                 response_text="Session cleared. Started a new chat session.",
@@ -377,7 +384,7 @@ class ApplicationLoop:
         session = await self._get_session(batch.session_key)
 
         if command == "/usage":
-            response_sent = await self._maybe_send_channel_response(
+            response_sent = await self._send_inbound_response(
                 channel=channel,
                 inbound_message=batch.last_message,
                 response_text=session.render_usage_report(),
@@ -401,7 +408,7 @@ class ApplicationLoop:
                 summarize_prompt = self._chat_service.render_prompt_text(_SUMMARIZE_PROMPT_NAME)
             except Exception:
                 logger.exception(f"Failed to load summarize prompt for {batch.session_key}")
-                await self._maybe_send_channel_response(
+                await self._send_inbound_response(
                     channel=channel,
                     inbound_message=batch.last_message,
                     response_text="I could not load the summarize prompt right now. Please try again.",
@@ -430,9 +437,13 @@ class ApplicationLoop:
         message_metadata: list[dict[str, object]] | None = None,
     ) -> None:
         bind_runtime_session_origin_metadata(batch.session_key, batch.last_message.metadata)
+        response_channel, response_inbound_message, use_source_response_policy = self._resolve_response_target(
+            channel,
+            batch.last_message,
+        )
 
         try:
-            async with channel.response_presence(batch.last_message):
+            async with response_channel.response_presence(response_inbound_message):
                 response = await session.send_message(
                     model_input,
                     message_metadata=message_metadata,
@@ -447,9 +458,12 @@ class ApplicationLoop:
                 message="Model response generation failed.",
                 data={"session_key": batch.session_key, "channel": batch.channel_name},
             )
-            await self._maybe_send_channel_response(
-                channel=channel,
-                inbound_message=batch.last_message,
+            await self._send_resolved_response(
+                source_channel=channel,
+                source_inbound_message=batch.last_message,
+                response_channel=response_channel,
+                response_inbound_message=response_inbound_message,
+                use_source_response_policy=use_source_response_policy,
                 response_text="I could not process that message right now. Please try again.",
             )
             return
@@ -462,9 +476,12 @@ class ApplicationLoop:
             response_text = "I could not produce a text response right now. Please try again."
             logger.warning(f"Model response was blank for {batch.session_key}; using runtime fallback text")
 
-        response_sent = await self._maybe_send_channel_response(
-            channel=channel,
-            inbound_message=batch.last_message,
+        response_sent = await self._send_resolved_response(
+            source_channel=channel,
+            source_inbound_message=batch.last_message,
+            response_channel=response_channel,
+            response_inbound_message=response_inbound_message,
+            use_source_response_policy=use_source_response_policy,
             response_text=response_text,
         )
         if response_sent:
@@ -542,7 +559,7 @@ class ApplicationLoop:
 
                     await session.replace_history_with_summary(compression_summary)
 
-                response_sent = await self._maybe_send_channel_response(
+                response_sent = await self._send_inbound_response(
                     channel=channel,
                     inbound_message=batch.last_message,
                     response_text=_SESSION_COMPRESSED_MESSAGE,
@@ -616,6 +633,88 @@ class ApplicationLoop:
             return False
 
         await channel.send_response(inbound_message, response_text)
+        return True
+
+    def _resolve_response_target(
+        self,
+        channel: ChannelPlugin,
+        inbound_message: InboundMessage,
+    ) -> tuple[ChannelPlugin, InboundMessage, bool]:
+        if channel.name != "a2a":
+            return channel, inbound_message, True
+
+        try:
+            envelope = A2AEnvelope.from_inbound_metadata(inbound_message.metadata)
+        except ValueError:
+            return channel, inbound_message, True
+
+        origin_route = envelope.origin_route
+        if origin_route is None:
+            return channel, inbound_message, True
+
+        response_channel_name, response_conversation_id = origin_route
+        response_channel = self._channel_by_name.get(response_channel_name)
+        if response_channel is None:
+            response_channel = get_channel_plugin(response_channel_name, create=True)
+            if response_channel is None:
+                logger.warning(
+                    "Unable to route A2A terminal reply to origin channel "
+                    f"{response_channel_name} for session={inbound_message.session_key}"
+                )
+                return channel, inbound_message, True
+            self._channel_by_name[response_channel_name] = response_channel
+
+        response_metadata = extract_a2a_origin_channel_metadata(inbound_message.metadata) or {}
+        return (
+            response_channel,
+            InboundMessage(
+                channel_name=response_channel.name,
+                conversation_id=response_conversation_id,
+                text=inbound_message.text,
+                user_id=inbound_message.user_id,
+                metadata=response_metadata,
+            ),
+            False,
+        )
+
+    async def _send_inbound_response(
+        self,
+        *,
+        channel: ChannelPlugin,
+        inbound_message: InboundMessage,
+        response_text: str,
+    ) -> bool:
+        response_channel, response_inbound_message, use_source_response_policy = self._resolve_response_target(
+            channel,
+            inbound_message,
+        )
+        return await self._send_resolved_response(
+            source_channel=channel,
+            source_inbound_message=inbound_message,
+            response_channel=response_channel,
+            response_inbound_message=response_inbound_message,
+            use_source_response_policy=use_source_response_policy,
+            response_text=response_text,
+        )
+
+    async def _send_resolved_response(
+        self,
+        *,
+        source_channel: ChannelPlugin,
+        source_inbound_message: InboundMessage,
+        response_channel: ChannelPlugin,
+        response_inbound_message: InboundMessage,
+        use_source_response_policy: bool,
+        response_text: str,
+    ) -> bool:
+        if use_source_response_policy:
+            return await self._maybe_send_channel_response(
+                channel=source_channel,
+                inbound_message=source_inbound_message,
+                response_text=response_text,
+            )
+
+        await response_channel.send_response(response_inbound_message, response_text)
         return True
 
     async def _get_session(self, session_key: str) -> GeminiChatSession:

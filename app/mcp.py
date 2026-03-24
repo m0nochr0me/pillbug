@@ -43,7 +43,13 @@ from app.schema.control import (
     OperatorResponse,
     RuntimeAuthConfiguration,
 )
-from app.schema.messages import A2AEnvelope, build_a2a_origin_routing_metadata
+from app.schema.messages import (
+    A2AEnvelope,
+    A2ATarget,
+    build_a2a_origin_routing_metadata,
+    extract_a2a_origin_channel_metadata,
+    extract_a2a_origin_route,
+)
 from app.schema.telemetry import ChannelsTelemetrySnapshot, RuntimeMetadata
 from app.schema.todo import TodoItem, TodoListSnapshot
 from app.util.web import (
@@ -128,6 +134,102 @@ def _parse_channel_target(channel: str) -> tuple[str, str]:
         raise ValueError("channel targets using ':' must include a destination after the channel name")
 
     return channel_name, conversation_id
+
+
+def _resolve_a2a_origin_routing_metadata(
+    runtime_session_key: str,
+    session_origin_metadata: dict[str, object] | None,
+) -> dict[str, object] | None:
+    if session_origin_metadata is not None and (
+        existing_origin_route := extract_a2a_origin_route(session_origin_metadata)
+    ):
+        return build_a2a_origin_routing_metadata(
+            channel_name=existing_origin_route[0],
+            conversation_id=existing_origin_route[1],
+            channel_metadata=extract_a2a_origin_channel_metadata(session_origin_metadata),
+        )
+
+    origin_route = split_runtime_session_key(runtime_session_key)
+    if origin_route is None:
+        return None
+
+    return build_a2a_origin_routing_metadata(
+        channel_name=origin_route[0],
+        conversation_id=origin_route[1],
+        channel_metadata=session_origin_metadata,
+    )
+
+
+def _get_outbound_a2a_metadata(ctx: Context | None) -> dict[str, object] | None:
+    if ctx is None:
+        return None
+
+    runtime_session_key = get_runtime_session_for_mcp_session(ctx.session_id)
+    if runtime_session_key is None:
+        return None
+
+    origin_channel_metadata = get_runtime_session_origin_metadata(runtime_session_key)
+    resolved_origin_metadata = _resolve_a2a_origin_routing_metadata(runtime_session_key, origin_channel_metadata)
+    if resolved_origin_metadata is None:
+        return None
+
+    return dict(resolved_origin_metadata)
+
+
+def _track_outbound_conversation(channel_name: str, conversation_id: str) -> None:
+    if not conversation_id:
+        return
+
+    register_channel_conversation(channel_name, conversation_id)
+    application_loop = mcp_app.state.application_loop
+    if application_loop is not None:
+        application_loop.track_outbound_conversation(channel_name, conversation_id)
+
+
+def _get_a2a_channel_plugin(create: bool = True) -> Any:
+    channel_plugin = get_channel_plugin("a2a", create=create)
+    if channel_plugin is None:
+        raise ValueError("A2A channel is not enabled or available")
+
+    return channel_plugin
+
+
+def _normalize_a2a_target(target: str) -> str:
+    return A2ATarget.parse(target).as_conversation_target()
+
+
+def _assert_not_echoing_a2a_origin(
+    *,
+    channel_name: str,
+    conversation_id: str,
+    ctx: Context | None,
+) -> None:
+    if ctx is None:
+        return
+
+    runtime_session_key = get_runtime_session_for_mcp_session(ctx.session_id)
+    if runtime_session_key is None:
+        return
+
+    session_route = split_runtime_session_key(runtime_session_key)
+    if session_route is None or session_route[0] != "a2a":
+        return
+
+    session_origin_metadata = get_runtime_session_origin_metadata(runtime_session_key)
+    if session_origin_metadata is None:
+        return
+
+    origin_route = extract_a2a_origin_route(session_origin_metadata)
+    if origin_route is None:
+        return
+
+    if (channel_name, conversation_id) != origin_route:
+        return
+
+    raise ValueError(
+        "This local A2A session already knows how to reach the preserved origin channel. "
+        "Reply normally in the current session instead of using send_message to echo the result manually."
+    )
 
 
 async def _get_todo_snapshot(ctx: Context) -> TodoListSnapshot:
@@ -611,47 +713,126 @@ async def send_message(
     Sends a direct outbound message to a configured channel.
 
     Use this when the agent needs to initiate or continue a message outside the normal reply path,
-    such as proactive follow-ups from a scheduled task, a subagent handoff, or a new outbound A2A exchange.
+    such as proactive follow-ups from a scheduled task or notifying a non-A2A channel.
     Do not use this to answer the current inbound message on the same channel during the active turn;
     the application loop will send that response automatically.
 
-    The channel argument accepts either a bare channel name for default destinations such as cli,
-    or a session-style target in the form channel_name:conversation_id such as telegram:123456789
-    or a2a:runtime-b/deploy-42.
+    Do not use this tool for cross-runtime A2A communication.
+    Use send_a2a_message for asynchronous A2A handoffs and request_a2a_response when you need a peer reply in the same turn.
 
-    For A2A, choose a stable conversation_id for the task so follow-up messages stay on the same exchange.
+    The channel argument accepts either a bare channel name for default destinations such as cli,
+    or a session-style target in the form channel_name:conversation_id such as telegram:123456789.
     """
 
     if not message.strip():
         raise ValueError("message must not be empty")
 
     channel_name, conversation_id = _parse_channel_target(channel)
+    _assert_not_echoing_a2a_origin(
+        channel_name=channel_name,
+        conversation_id=conversation_id,
+        ctx=ctx,
+    )
     channel_plugin = get_channel_plugin(channel_name, create=True)
     if channel_plugin is None:
         raise ValueError(f"Channel is not enabled or available: {channel_name}")
 
-    metadata: dict[str, object] | None = None
-    if channel_name == "a2a" and ctx is not None:
-        runtime_session_key = get_runtime_session_for_mcp_session(ctx.session_id)
-        if runtime_session_key is not None:
-            origin_route = split_runtime_session_key(runtime_session_key)
-            if origin_route is not None:
-                origin_channel_metadata = get_runtime_session_origin_metadata(runtime_session_key)
-                metadata = dict(
-                    build_a2a_origin_routing_metadata(
-                        channel_name=origin_route[0],
-                        conversation_id=origin_route[1],
-                        channel_metadata=origin_channel_metadata,
-                    )
-                )
+    await channel_plugin.send_message(conversation_id, message, metadata=None)
+    _track_outbound_conversation(channel_name, conversation_id)
 
-    await channel_plugin.send_message(conversation_id, message, metadata=metadata)
     logger.info(f"Sent outbound message via channel={channel_name} destination={conversation_id or '<default>'}")
 
     return {
         "channel": channel_name,
         "conversation_id": conversation_id or None,
         "chars_sent": len(message),
+    }
+
+
+@mcp.tool
+async def send_a2a_message(
+    target: str,
+    message: str,
+    ctx: Context = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    """
+    Sends an asynchronous A2A message to another runtime and returns immediately.
+
+    Use this when another runtime should continue work in the background and you will handle the result later.
+    The target may use runtime_id/conversation_id or a2a:runtime_id/conversation_id such as runtime-b/deploy-42
+    or a2a:runtime-b/deploy-42.
+
+    If you later receive a terminal A2A result in a local a2a session, answer normally in that session when you want
+    to respond to the original requester. The runtime will route that final response back to the preserved origin channel.
+    """
+
+    if not message.strip():
+        raise ValueError("message must not be empty")
+
+    normalized_target = _normalize_a2a_target(target)
+    channel_plugin = _get_a2a_channel_plugin(create=True)
+    metadata = _get_outbound_a2a_metadata(ctx)
+
+    await channel_plugin.send_message(normalized_target, message, metadata=metadata)
+    _track_outbound_conversation("a2a", normalized_target)
+
+    return {
+        "channel": "a2a",
+        "mode": "async",
+        "target": normalized_target,
+        "chars_sent": len(message),
+    }
+
+
+@mcp.tool
+async def request_a2a_response(
+    target: str,
+    message: str,
+    timeout_seconds: float = 60.0,
+    ctx: Context = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    """
+    Sends a synchronous A2A request to another runtime and waits for its terminal reply.
+
+    Use this when you need the peer runtime's answer before you continue the current turn.
+    The target may use runtime_id/conversation_id or a2a:runtime_id/conversation_id such as runtime-b/deploy-42
+    or a2a:runtime-b/deploy-42.
+    The returned response_text can be used directly in your final answer or incorporated into a larger response.
+    """
+
+    if not message.strip():
+        raise ValueError("message must not be empty")
+
+    normalized_target = _normalize_a2a_target(target)
+    timeout_seconds = _validate_command_timeout(timeout_seconds)
+    channel_plugin = _get_a2a_channel_plugin(create=True)
+    send_request = getattr(channel_plugin, "send_request", None)
+    if not callable(send_request):
+        raise ValueError("Configured A2A channel does not support synchronous requests")
+
+    send_request_callable = cast("Callable[..., Awaitable[A2AEnvelope]]", send_request)
+
+    metadata = _get_outbound_a2a_metadata(ctx)
+    response_envelope = await send_request_callable(
+        normalized_target,
+        message,
+        metadata=metadata,
+        timeout_seconds=timeout_seconds,
+    )
+
+    return {
+        "channel": "a2a",
+        "mode": "sync",
+        "target": normalized_target,
+        "sender_runtime_id": response_envelope.sender_runtime_id,
+        "conversation_id": response_envelope.conversation_id,
+        "intent": response_envelope.intent.value,
+        "response_text": response_envelope.text,
+        "message_id": response_envelope.message_id,
+        "reply_to_message_id": response_envelope.reply_to_message_id,
+        "hop_count": response_envelope.convergence_state.hop_count,
+        "max_hops": response_envelope.convergence_state.max_hops,
+        "stop_requested": response_envelope.convergence_state.stop_requested,
     }
 
 
