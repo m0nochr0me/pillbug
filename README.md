@@ -192,6 +192,8 @@ Control responses return a small operator-focused payload with the runtime id, a
 
 Pillbug includes an embedded Docket worker for background agent tasks. Tasks are persisted in `~/.pillbug/tasks/agent_tasks.json`, and each task executes in its own Gemini session keyed by the task identifier.
 
+When multiple runtimes share the same Redis instance, Pillbug namespaces each runtime's Docket state with its runtime id so scheduled tasks stay isolated. `PB_DOCKET_NAME` acts as the base prefix for that per-runtime namespace rather than a globally shared queue name.
+
 Use the MCP tool `manage_agent_task` with these actions:
 
 - `create` to add a new task

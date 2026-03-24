@@ -40,8 +40,111 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def _read_hash_value(payload: dict[Any, Any], field: str) -> Any:
+    return payload.get(field, payload.get(field.encode()))
+
+
 class _TaskBehavior(Protocol):
     def cancel(self) -> None: ...
+
+
+class PillbugWorker(Worker):
+    async def _scheduler_loop(self, redis: Any) -> None:
+        """Move due queued tasks without Docket's Lua script.
+
+        Some Redis-compatible backends reject the upstream Lua scheduler because it
+        constructs per-task keys dynamically rather than declaring them in KEYS.
+        Pillbug uses a Python implementation here so delayed and cron tasks can
+        share those backends safely.
+        """
+
+        log_context = self._log_context()
+
+        while not self._worker_stopping.is_set():  # pragma: no branch
+            try:
+                logger.debug("Scheduling due tasks", extra=log_context)
+                with self._maybe_suppress_instrumentation():
+                    total_work = await redis.zcard(self.docket.queue_key)
+                    due_keys = await redis.zrangebyscore(
+                        self.docket.queue_key,
+                        0,
+                        datetime.now(UTC).timestamp(),
+                    )
+
+                due_work = 0
+                for raw_task_key in due_keys:
+                    task_key = raw_task_key.decode() if isinstance(raw_task_key, bytes) else str(raw_task_key)
+                    parked_key = self.docket.parked_task_key(task_key)
+                    runs_key = self.docket.runs_key(task_key)
+
+                    with self._maybe_suppress_instrumentation():
+                        task_data = await redis.hgetall(parked_key)
+
+                    if not task_data:
+                        with self._maybe_suppress_instrumentation():
+                            await redis.zrem(self.docket.queue_key, raw_task_key)
+                        continue
+
+                    task_message = {
+                        "key": _read_hash_value(task_data, "key") or task_key,
+                        "when": _read_hash_value(task_data, "when"),
+                        "function": _read_hash_value(task_data, "function"),
+                        "args": _read_hash_value(task_data, "args"),
+                        "kwargs": _read_hash_value(task_data, "kwargs"),
+                        "attempt": _read_hash_value(task_data, "attempt"),
+                        "generation": _read_hash_value(task_data, "generation") or b"0",
+                    }
+
+                    with self._maybe_suppress_instrumentation():
+                        message_id = await redis.xadd(self.docket.stream_key, task_message)
+                        await redis.delete(parked_key)
+                        await redis.zrem(self.docket.queue_key, raw_task_key)
+                        await redis.hset(runs_key, mapping={"state": "queued"})
+
+                        payload = json.dumps(
+                            {
+                                "type": "state",
+                                "key": task_key,
+                                "state": "queued",
+                                "when": _read_hash_value(task_data, "when"),
+                            },
+                            default=lambda value: value.decode() if isinstance(value, bytes) else value,
+                            separators=(",", ":"),
+                        )
+                        await redis.publish(self.docket.key(f"state:{task_key}"), payload)
+
+                    due_work += 1
+                    logger.debug(
+                        "Moved due task %s to stream as %s",
+                        task_key,
+                        message_id.decode() if isinstance(message_id, bytes) else message_id,
+                        extra=log_context,
+                    )
+
+                if due_work > 0:
+                    logger.debug(
+                        "Moved %d/%d due tasks from %s to %s",
+                        due_work,
+                        total_work,
+                        self.docket.queue_key,
+                        self.docket.stream_key,
+                        extra=log_context,
+                    )
+            except Exception:  # pragma: no cover
+                logger.exception(
+                    "Error in scheduler loop",
+                    exc_info=True,
+                    extra=log_context,
+                )
+
+            try:
+                await asyncio.wait_for(
+                    self._worker_stopping.wait(),
+                    timeout=self.scheduling_resolution.total_seconds(),
+                )
+                return
+            except TimeoutError:
+                pass
 
 
 class AgentTaskScheduler:
@@ -56,7 +159,7 @@ class AgentTaskScheduler:
         self._lock = asyncio.Lock()
         self._startup_lock = asyncio.Lock()
         self._docket: Docket | None = None
-        self._worker: Worker | None = None
+        self._worker: PillbugWorker | None = None
         self._worker_task: asyncio.Task[None] | None = None
         self._started = False
         runtime_telemetry.bind_scheduler(self)
@@ -73,13 +176,13 @@ class AgentTaskScheduler:
             await asyncio.to_thread(self._store_path.parent.mkdir, parents=True, exist_ok=True)
 
             docket = Docket(
-                name=settings.DOCKET_NAME,
+                name=settings.docket_name(),
                 url=settings.docket_url(),
                 execution_ttl=timedelta(seconds=settings.DOCKET_EXECUTION_TTL_SECONDS),
             )
             await docket.__aenter__()
 
-            worker = Worker(
+            worker = PillbugWorker(
                 docket=docket,
                 concurrency=settings.DOCKET_WORKER_CONCURRENCY,
                 redelivery_timeout=timedelta(seconds=settings.DOCKET_REDELIVERY_TIMEOUT_SECONDS),
@@ -556,15 +659,16 @@ class AgentTaskScheduler:
         if self._docket is None:
             raise RuntimeError("Task scheduler is not started")
 
-        function = self._register_task(definition)
+        self._register_task(definition)
+        function_name = definition.function_name
         initial_when = self._initial_when(definition)
 
         if replace:
             when = initial_when or _utcnow()
-            await self._docket.replace(function, when, definition.execution_key)()
+            await self._docket.replace(function_name, when, definition.execution_key)()
             return
 
-        await self._docket.add(function, when=initial_when, key=definition.execution_key)()
+        await self._docket.add(function_name, when=initial_when, key=definition.execution_key)()
 
     async def _cancel_task(self, execution_key: str) -> None:
         if self._docket is None:
@@ -603,7 +707,7 @@ class AgentTaskScheduler:
         task_function.__qualname__ = task_function.__name__
         task_function.__doc__ = f"Pillbug scheduled task {task_id}"
 
-        self._docket.register(task_function, names=[definition.function_name])
+        self._docket.register(task_function, names=[definition.function_name, task_function.__name__])
         return task_function
 
     def _initial_when(self, definition: AgentTaskDefinition) -> datetime | None:

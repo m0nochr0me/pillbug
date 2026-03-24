@@ -8,6 +8,8 @@ from uuid import uuid4
 
 from pydantic import AliasChoices, BaseModel, Field, model_validator
 
+from app.core.config import settings
+
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
@@ -66,11 +68,11 @@ class AgentTaskDefinition(BaseModel):
 
     @property
     def execution_key(self) -> str:
-        return f"agent-task:{self.task_id}"
+        return f"agent-task:{settings.runtime_id}:{self.task_id}"
 
     @property
     def function_name(self) -> str:
-        return f"agent-task:{self.task_id}"
+        return f"agent-task:{settings.runtime_id}:{self.task_id}"
 
     @property
     def resolved_session_id(self) -> str:

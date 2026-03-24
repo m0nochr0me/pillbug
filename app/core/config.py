@@ -302,6 +302,13 @@ class Settings(BaseSettings):
 
         return f"redis://{auth}{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
 
+    def docket_name(self) -> str:
+        base_name = self.DOCKET_NAME.strip()
+        if not base_name:
+            raise ValueError("PB_DOCKET_NAME must not be empty")
+
+        return f"{base_name}-{self.runtime_id}"
+
     def mcp_shortener_base_url(self) -> str:
         if self.MCP_SHORTENER_BASE_URL:
             return self.MCP_SHORTENER_BASE_URL.rstrip("/")
