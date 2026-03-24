@@ -48,8 +48,6 @@ Current and intended direction:
 - Expose telemetry and narrow control endpoints so a separate dashboard app can observe and operate agents from another container
 - Keep the runtime useful in headless deployments without requiring a bundled web UI
 
-This philosophy is expanded in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
-
 ## Architecture
 
 ```mermaid
