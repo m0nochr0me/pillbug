@@ -81,7 +81,7 @@ uvicorn_log_config = {
         },
         "uvicorn.access": {
             "handlers": ["default"],
-            "level": "DEBUG",
+            "level": "WARNING",
             "propagate": False,
         },
         "uvicorn.error": {
