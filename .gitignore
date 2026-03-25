@@ -6,6 +6,7 @@ dist/
 wheels/
 *.egg-info
 .ruff-cache/
+.ruff_cache/
 .tmp-workspace/
 
 # Virtual environments

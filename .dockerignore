@@ -11,8 +11,11 @@ scratch/
 
 .env
 
+.claude/
 .vscode/
 .github/
 .deploy/
 .tmp-workspace/
 .ruff-cache/
+.ruff_cache/
+.git/
