@@ -16,6 +16,7 @@ ENV HOME=/home/pillbug
 WORKDIR /app
 
 ARG PILLBUG_INSTALL_EXTRAS=""
+ARG EXTRA_PACKAGES=""
 
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
@@ -29,6 +30,10 @@ RUN groupadd --gid 1000 pillbug \
     && useradd --uid 1000 --gid 1000 --create-home --home-dir /home/pillbug --shell /bin/bash pillbug \
     && install -d --owner 1000 --group 1000 /var/lib/pillbug \
     && install -d --owner 1000 --group 1000 /var/lib/pillbug-dashboard
+
+RUN if [ -n "$EXTRA_PACKAGES" ]; then \
+    apt-get update && apt-get install -y --no-install-recommends $EXTRA_PACKAGES && rm -rf /var/lib/apt/lists/*; \
+    fi
 
 ADD . .
 
