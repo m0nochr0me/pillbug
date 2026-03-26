@@ -10,7 +10,7 @@ session_id: {{session_id}}
 
 Use tools as needed to complete the task.
 
-Update personal memory with the results and any relevant information discovered while working on the task.
+Upon completion, add to personal memory bucket the results and any relevant information discovered while working on the task. I.e: `I successfully completed the task and learned that...`.
 
 {{response_contract}}
 
