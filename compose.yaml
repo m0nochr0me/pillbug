@@ -26,6 +26,7 @@ services:
       <<: *build-common
       args:
         PILLBUG_INSTALL_EXTRAS: a2a
+        EXTRA_PACKAGES: curl
     container_name: pillbug-b
     hostname: pillbug-b
     dns: # Adguard DNS servers
@@ -75,6 +76,7 @@ services:
     depends_on:
       - pillbug-a
       - pillbug-b
+      - pillbug-c
     env_file:
       - ./deploy/dashboard.env
     ports:
