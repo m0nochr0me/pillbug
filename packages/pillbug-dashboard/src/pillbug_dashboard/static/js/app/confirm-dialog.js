@@ -1,10 +1,10 @@
 (function () {
-  const overlay = document.getElementById("dashboard-confirm-overlay");
-  const dialog = document.getElementById("dashboard-confirm-dialog");
-  const title = document.getElementById("dashboard-confirm-title");
-  const message = document.getElementById("dashboard-confirm-message");
-  const cancelButton = document.getElementById("dashboard-confirm-cancel");
-  const confirmButton = document.getElementById("dashboard-confirm-submit");
+  const overlay = document.getElementById("confirm-overlay");
+  const dialog = document.getElementById("confirm-dialog");
+  const title = document.getElementById("confirm-title");
+  const message = document.getElementById("confirm-message");
+  const cancelButton = document.getElementById("confirm-cancel");
+  const confirmButton = document.getElementById("confirm-submit");
 
   if (!overlay || !dialog || !title || !message || !cancelButton || !confirmButton) {
     return;
@@ -28,20 +28,19 @@
     }
   }
 
-  function onCancel(event) {
+  overlay.addEventListener("click", () => finish(false));
+  cancelButton.addEventListener("click", (event) => {
     event.preventDefault();
     finish(false);
-  }
-
-  function onConfirm(event) {
+  });
+  confirmButton.addEventListener("click", (event) => {
     event.preventDefault();
     finish(true);
-  }
-
-  overlay.addEventListener("click", () => finish(false));
-  cancelButton.addEventListener("click", onCancel);
-  confirmButton.addEventListener("click", onConfirm);
-  dialog.addEventListener("cancel", onCancel);
+  });
+  dialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    finish(false);
+  });
   dialog.addEventListener("close", () => {
     if (resolvePending) {
       finish(dialog.returnValue === "confirm");

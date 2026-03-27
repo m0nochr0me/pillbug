@@ -1,215 +1,229 @@
 {% extends "base.html" %}
 
 {% block content %}
-  <section id="runtime-detail-app" class="dashboard-page">
-    <article class="no-round hero-panel">
+  <section id="runtime-detail-app" class="page">
+    <div class="hero">
       <div class="stack gap-4">
-        <div class="action-row wrap">
-          <a href="/runtimes" class="button border small">
-            <i>arrow_back</i>
-            <span>BACK</span>
-          </a>
-          <span class="status-pill" :class="statusClass(detail.status)">[[ statusLabel(detail.status) ]]</span>
+        <div class="row spread">
+          <a href="/runtimes" class="btn">&larr; BACK</a>
+          <span class="status" :class="statusClass(detail.status)">[[ statusLabel(detail.status) ]]</span>
         </div>
 
-        <div class="stack gap-2">
+        <div class="stack gap-1">
           <p class="eyebrow">[[ detail.registration.runtime_id ]]</p>
           <h2>[[ detail.registration.label || detail.registration.runtime_id ]]</h2>
-          <a class="runtime-url" :href="detail.registration.base_url" target="_blank" rel="noreferrer">
+          <a class="codeish" :href="detail.registration.base_url" target="_blank" rel="noreferrer" style="color:var(--tertiary);">
             [[ detail.registration.base_url ]]
           </a>
         </div>
 
         <div class="metric-strip">
-          <div class="metric-card standout">
-            <span class="muted-label">Active sessions</span>
+          <div class="metric standout">
+            <span class="muted">ACTIVE SESSIONS</span>
             <strong>[[ detail.runtime ? detail.runtime.active_session_count : 0 ]]</strong>
           </div>
-          <div class="metric-card">
-            <span class="muted-label">PENDING SESSIONS</span>
+          <div class="metric">
+            <span class="muted">PENDING</span>
             <strong>[[ detail.runtime ? detail.runtime.pending_session_count : 0 ]]</strong>
           </div>
-          <div class="metric-card">
-            <span class="muted-label">TOTAL TASKS</span>
+          <div class="metric">
+            <span class="muted">TOTAL TASKS</span>
             <strong>[[ scheduler.total_tasks || 0 ]]</strong>
           </div>
-          <div class="metric-card">
-            <span class="muted-label">ENABLED TASKS</span>
+          <div class="metric">
+            <span class="muted">ENABLED TASKS</span>
             <strong>[[ scheduler.enabled_tasks || 0 ]]</strong>
           </div>
-          <div class="metric-card">
-            <span class="muted-label">RECENT ERRORS</span>
+          <div class="metric">
+            <span class="muted">ERRORS</span>
             <strong>[[ detail.runtime ? detail.runtime.recent_error_count : 0 ]]</strong>
           </div>
         </div>
       </div>
-    </article>
+    </div>
 
-    <div v-if="actionMessage" class="notice-banner no-round success-tone">
-      <strong>ACTION COMPLETE</strong>
+    <div v-if="actionMessage" class="notice success">
+      <strong>OK</strong>
       <span>[[ actionMessage ]]</span>
     </div>
 
-    <div v-if="errorMessage" class="notice-banner no-round error-tone">
-      <strong>DASHBOARD REQUEST FAILED.</strong>
+    <div v-if="errorMessage" class="notice error">
+      <strong>ERR</strong>
       <span>[[ errorMessage ]]</span>
     </div>
 
-    <div class="grid dashboard-grid">
-      <article class="s12 l4 no-round panel-shell stack gap-5">
-        <div class="stack gap-2">
-          <p class="eyebrow">OPERATOR CONTROL</p>
-          <h4>SEND CONTROL MESSAGE</h4>
+    <div class="grid-sidebar">
+      <div class="stack gap-4">
+        <div class="panel stack gap-4">
+          <div class="stack gap-1">
+            <p class="eyebrow">OPERATOR</p>
+            <h4>SEND MESSAGE</h4>
+          </div>
+
+          <form class="stack gap-3" @submit.prevent="sendMessage">
+            <div class="field">
+              <label>CH</label>
+              <select v-model="messageForm.channel">
+                <option value="">Select channel</option>
+                <option v-for="ch in availableChannels" :key="ch" :value="ch">[[ ch ]]</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>CONV ID</label>
+              <input v-model.trim="messageForm.conversation_id" type="text" autocomplete="off">
+            </div>
+            <div class="field">
+              <label>MSG</label>
+              <textarea v-model.trim="messageForm.message" rows="4"></textarea>
+            </div>
+            <button type="submit" class="primary" :disabled="pendingActionKey === 'send-message'">
+              [[ pendingActionKey === 'send-message' ? '...' : 'SEND' ]]
+            </button>
+          </form>
+
+          <hr>
+
+          <div class="stack gap-3">
+            <p class="eyebrow">RUNTIME ACTIONS</p>
+            <div class="row wrap gap-1">
+              <button type="button" :disabled="pendingActionKey === 'drain'" @click="requestRuntimeAction('drain')">
+                [[ pendingActionKey === 'drain' ? '...' : 'DRAIN' ]]
+              </button>
+              <button type="button" class="danger" :disabled="pendingActionKey === 'shutdown'" @click="requestRuntimeAction('shutdown')">
+                [[ pendingActionKey === 'shutdown' ? '...' : 'SHUTDOWN' ]]
+              </button>
+              <button type="button" :disabled="refreshLoading" @click="refreshDetail(true)">
+                [[ refreshLoading ? '...' : 'REFRESH' ]]
+              </button>
+            </div>
+          </div>
+
+          <hr>
+
+          <div class="stack gap-2">
+            <p class="eyebrow">METADATA</p>
+            <div class="grid-2">
+              <div>
+                <span class="muted">RUNTIME ID</span>
+                <strong class="codeish">[[ detail.registration.runtime_id ]]</strong>
+              </div>
+              <div>
+                <span class="muted">AGENT</span>
+                <strong>[[ detail.runtime && detail.runtime.metadata ? (detail.runtime.metadata.agent_name || 'UNCONF') : 'UNKNOWN' ]]</strong>
+              </div>
+              <div>
+                <span class="muted">STARTED</span>
+                <strong>[[ formatTimestamp(detail.health && detail.health.started_at) ]]</strong>
+              </div>
+              <div>
+                <span class="muted">LAST</span>
+                <strong>[[ formatTimestamp(detail.health && detail.health.last_activity_at) ]]</strong>
+              </div>
+            </div>
+          </div>
         </div>
 
-        <form class="stack gap-3" @submit.prevent="sendMessage">
-          <div class="field label border">
-            <select v-model="messageForm.channel">
-              <option value="">Select a channel</option>
-              <option v-for="channel in availableChannels" :key="channel" :value="channel">[[ channel ]]</option>
-            </select>
-            <label>CH</label>
+        <div class="panel stack gap-3">
+          <p class="eyebrow">A2A PEERS</p>
+          <div v-if="detail.a2a_peers.length" class="stack gap-1">
+            <span v-for="peer in detail.a2a_peers" :key="peer" class="edge">
+              [[ detail.registration.runtime_id ]] <span class="edge-arrow">&rarr;</span> [[ peer ]]
+            </span>
           </div>
+          <p v-else class="muted">NO PEERS</p>
 
-          <div class="field label border">
-            <input v-model.trim="messageForm.conversation_id" type="text" autocomplete="off">
-            <label>CONV ID</label>
-          </div>
+          <hr>
 
-          <div class="field label border">
-            <textarea v-model.trim="messageForm.message" rows="5"></textarea>
-            <label>MSG</label>
-          </div>
-
-          <button type="submit" class="fill" :disabled="pendingActionKey === 'send-message'">
-            <i>send</i>
-            <span>[[ pendingActionKey === 'send-message' ? '...' : 'SEND MESSAGE' ]]</span>
-          </button>
-        </form>
-
-        <hr class="large-divider">
-
-        <div class="stack gap-3">
-          <p class="eyebrow">RUNTIME ACTIONS</p>
-          <div class="action-row wrap">
-            <button type="button" class="border" :disabled="pendingActionKey === 'drain'" @click="requestRuntimeAction('drain')">
-              [[ pendingActionKey === 'drain' ? '...' : 'DRAIN' ]]
-            </button>
-            <button type="button" class="border danger-button" :disabled="pendingActionKey === 'shutdown'" @click="requestRuntimeAction('shutdown')">
-              [[ pendingActionKey === 'shutdown' ? '...' : 'SHUTDOWN' ]]
-            </button>
-            <button type="button" class="border" :disabled="refreshLoading" @click="refreshDetail(true)">
-              <span>[[ refreshLoading ? '...' : 'REFRESH' ]]</span>
-            </button>
-          </div>
+          <p class="eyebrow">AGENT CARD</p>
+          <p v-if="detail.agent_card" class="muted">A2A DISCOVERY AVAILABLE</p>
+          <p v-else class="muted">NO PUBLIC CARD</p>
+          <a v-if="detail.agent_card" class="btn" :href="agentCardHref" target="_blank" rel="noreferrer">
+            VIEW CARD
+          </a>
         </div>
+      </div>
 
-        <hr class="large-divider">
-
-        <div class="stack gap-2">
-          <p class="eyebrow">METADATA</p>
-          <div class="definition-list">
-            <div>
-              <span class="muted-label">RUNTIME ID</span>
-              <strong class="codeish">[[ detail.registration.runtime_id ]]</strong>
-            </div>
-            <div>
-              <span class="muted-label">AGENT</span>
-              <strong>[[ detail.runtime && detail.runtime.metadata ? (detail.runtime.metadata.agent_name || 'UNCONF') : 'UNKNOWN' ]]</strong>
-            </div>
-            <div>
-              <span class="muted-label">STARTED</span>
-              <strong>[[ formatTimestamp(detail.health && detail.health.started_at) ]]</strong>
-            </div>
-            <div>
-              <span class="muted-label">LAST</span>
-              <strong>[[ formatTimestamp(detail.health && detail.health.last_activity_at) ]]</strong>
-            </div>
-          </div>
-        </div>
-      </article>
-
-      <section class="s12 l8 stack gap-4">
-        <article class="no-round panel-shell stack gap-4">
-          <div class="section-heading">
+      <div class="stack gap-4">
+        <div class="panel stack gap-3">
+          <div class="row spread">
             <div>
               <p class="eyebrow">SESSIONS</p>
               <h4>TRACKED CONVERSATIONS</h4>
             </div>
-            <span class="status-pill fill">[[ sessions.length ]] SESS</span>
+            <span class="tag primary">[[ sessions.length ]] SESS</span>
           </div>
 
-          <div v-if="sessions.length" class="responsive">
-            <table class="stripes compact-table">
+          <div v-if="sessions.length" class="table-wrap">
+            <table>
               <thead>
                 <tr>
                   <th>SESSION</th>
-                  <th>CHANNEL</th>
-                  <th>MESSAGES</th>
-                  <th>LAST ACT</th>
+                  <th>CH</th>
+                  <th>MSG</th>
+                  <th>LAST</th>
                   <th></th>
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="session in sessions" :key="session.session_key">
+                <tr v-for="s in sessions" :key="s.session_key">
                   <td>
-                    <strong>[[ session.session_key ]]</strong>
-                    <div class="muted-copy">[[ session.conversation_id ]]</div>
+                    <strong>[[ s.session_key ]]</strong>
+                    <div class="muted">[[ s.conversation_id ]]</div>
                   </td>
-                  <td>[[ session.channel_name ]]</td>
-                  <td>[[ session.message_count ]]</td>
-                  <td>[[ formatTimestamp(session.last_activity_at) ]]</td>
-                  <td class="right-align">
-                    <button type="button" class="border small" :disabled="pendingActionKey === ('clear-' + session.session_key)" @click="clearSession(session)">
-                      [[ pendingActionKey === ('clear-' + session.session_key) ? 'C..' : 'CLR' ]]
+                  <td>[[ s.channel_name ]]</td>
+                  <td>[[ s.message_count ]]</td>
+                  <td>[[ formatTimestamp(s.last_activity_at) ]]</td>
+                  <td style="text-align:right;">
+                    <button type="button" :disabled="pendingActionKey === ('clear-' + s.session_key)" @click="clearSession(s)">
+                      [[ pendingActionKey === ('clear-' + s.session_key) ? '..' : 'CLR' ]]
                     </button>
                   </td>
                 </tr>
               </tbody>
             </table>
           </div>
-          <p v-else class="muted-copy">NO SESSIONS</p>
-        </article>
+          <p v-else class="muted">NO SESSIONS</p>
+        </div>
 
-        <article class="no-round panel-shell stack gap-4">
-          <div class="section-heading">
+        <div class="panel stack gap-3">
+          <div class="row spread">
             <div>
               <p class="eyebrow">TASKS</p>
               <h4>SCHEDULED WORK</h4>
             </div>
-            <span class="status-pill fill primary">[[ scheduler.total_tasks || 0 ]] TOTAL</span>
+            <span class="tag">[[ scheduler.total_tasks || 0 ]] TOTAL</span>
           </div>
 
-          <div v-if="tasks.length" class="responsive">
-            <table class="stripes compact-table">
+          <div v-if="tasks.length" class="table-wrap">
+            <table>
               <thead>
                 <tr>
                   <th>TASK</th>
-                  <th>SCHEDULE</th>
-                  <th>STATE</th>
+                  <th>SCHED</th>
+                  <th>ST</th>
                   <th>LAST RUN</th>
                   <th></th>
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="task in tasks" :key="task.task_id">
+                <tr v-for="t in tasks" :key="t.task_id">
                   <td>
-                    <strong>[[ task.name ]]</strong>
-                    <div class="muted-copy">[[ task.task_id ]]</div>
+                    <strong>[[ t.name ]]</strong>
+                    <div class="muted">[[ t.task_id ]]</div>
                   </td>
-                  <td>[[ task.schedule_kind ]]</td>
-                  <td>[[ task.enabled ? 'E' : 'D' ]]</td>
-                  <td>[[ formatTimestamp(task.last_run && task.last_run.finished_at) ]]</td>
-                  <td class="right-align">
-                    <div class="action-row wrap right-align">
-                      <button type="button" class="border small" :disabled="pendingActionKey === ('run-' + task.task_id)" @click="runTask(task)">
-                        [[ pendingActionKey === ('run-' + task.task_id) ? 'R..' : 'RUN' ]]
+                  <td>[[ t.schedule_kind ]]</td>
+                  <td>[[ t.enabled ? 'E' : 'D' ]]</td>
+                  <td>[[ formatTimestamp(t.last_run && t.last_run.finished_at) ]]</td>
+                  <td style="text-align:right;">
+                    <div class="row right gap-1">
+                      <button type="button" :disabled="pendingActionKey === ('run-' + t.task_id)" @click="runTask(t)">
+                        [[ pendingActionKey === ('run-' + t.task_id) ? '..' : 'RUN' ]]
                       </button>
-                      <button v-if="task.enabled" type="button" class="border small" :disabled="pendingActionKey === ('disable-' + task.task_id)" @click="toggleTask(task, false)">
-                        [[ pendingActionKey === ('disable-' + task.task_id) ? 'D..' : 'DIS' ]]
+                      <button v-if="t.enabled" type="button" :disabled="pendingActionKey === ('disable-' + t.task_id)" @click="toggleTask(t, false)">
+                        [[ pendingActionKey === ('disable-' + t.task_id) ? '..' : 'DIS' ]]
                       </button>
-                      <button v-else type="button" class="border small" :disabled="pendingActionKey === ('enable-' + task.task_id)" @click="toggleTask(task, true)">
-                        [[ pendingActionKey === ('enable-' + task.task_id) ? 'E..' : 'ENA' ]]
+                      <button v-else type="button" :disabled="pendingActionKey === ('enable-' + t.task_id)" @click="toggleTask(t, true)">
+                        [[ pendingActionKey === ('enable-' + t.task_id) ? '..' : 'ENA' ]]
                       </button>
                     </div>
                   </td>
@@ -217,61 +231,31 @@
               </tbody>
             </table>
           </div>
-          <p v-else class="muted-copy">NO SCHEDULED TASKS</p>
-        </article>
-      </section>
-
-
-      <article class="s12 l4 no-round panel-shell stack gap-4">
-        <div class="section-heading">
-          <div>
-            <p class="eyebrow">CONFIGURED A2A PEERS</p>
-          </div>
+          <p v-else class="muted">NO TASKS</p>
         </div>
 
-        <div v-if="detail.a2a_peers.length" class="stack gap-2">
-          <div v-for="peer in detail.a2a_peers" :key="peer" class="topology-edge">
-            <strong>[[ detail.registration.runtime_id ]]</strong>
-            <span class="arrow-glyph">→</span>
-            <span>[[ peer ]]</span>
-          </div>
-        </div>
-        <p v-else class="muted-copy">NO CONFIGURED A2A PEERS</p>
-
-        <hr class="large-divider">
-
-        <div class="stack gap-2">
-          <p class="eyebrow">AGENT CARD</p>
-          <p v-if="detail.agent_card" class="muted-copy">A2A DISCOVERY AVAILABLE</p>
-          <p v-else class="muted-copy">NO PUBLIC AGENT CARD</p>
-          <a v-if="detail.agent_card" class="button border small" :href="agentCardHref" target="_blank" rel="noreferrer">
-            VIEW AGENT CARD
-          </a>
-        </div>
-      </article>
-
-
-      <article class="s12 l8 no-round panel-shell stack gap-4">
-        <div class="section-heading">
-          <div>
-            <p class="eyebrow">EVENTS</p>
-            <h4>RUNTIME ACTIVITY</h4>
-          </div>
-          <span class="status-pill secondary fill">[[ events.length ]] BUF</span>
-        </div>
-
-        <div v-if="events.length" class="timeline-list">
-          <div v-for="event in events" :key="event.event_id" class="timeline-item" :class="event.level || 'info'">
-            <div class="timeline-meta">
-              <strong>[[ event.event_type ]]</strong>
-              <span>[[ formatTimestamp(event.occurred_at) ]]</span>
+        <div class="panel stack gap-3">
+          <div class="row spread">
+            <div>
+              <p class="eyebrow">EVENTS</p>
+              <h4>RUNTIME ACTIVITY</h4>
             </div>
-            <p>[[ event.message ]]</p>
-            <small class="muted-copy">[[ event.source ]]</small>
+            <span class="tag secondary">[[ events.length ]] BUF</span>
           </div>
+
+          <div v-if="events.length" class="timeline">
+            <div v-for="ev in events" :key="ev.event_id" class="timeline-entry" :class="ev.level || 'info'">
+              <div class="timeline-meta">
+                <strong>[[ ev.event_type ]]</strong>
+                <span>[[ formatTimestamp(ev.occurred_at) ]]</span>
+              </div>
+              <p>[[ ev.message ]]</p>
+              <small class="muted">[[ ev.source ]]</small>
+            </div>
+          </div>
+          <p v-else class="muted">NO EVENTS</p>
         </div>
-        <p v-else class="muted-copy">NO TELEMETRY EVENTS</p>
-      </article>
+      </div>
     </div>
   </section>
 {% endblock %}

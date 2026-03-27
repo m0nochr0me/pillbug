@@ -5,40 +5,39 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="dark">
     <link rel="preload" href="{{ url_for('static', path='/font/DepartureMono-Regular.woff2') }}" as="font" type="font/woff2" crossorigin>
-    <link href="{{ url_for('static', path='/css/beer.min.css') }}" rel="stylesheet" />
-    <link href="{{ url_for('static', path='/css/app.css') }}" rel="stylesheet" />
-    <script type="module" src="{{ url_for('static', path='/js/vendor/beer.min.js') }}"></script>
-    <script type="module" src="{{ url_for('static', path='/js/vendor/material-dynamic-colors.min.js') }}"></script>
+    <link href="{{ url_for('static', path='/css/app.css') }}" rel="stylesheet">
     <script defer src="{{ url_for('static', path='/js/vendor/vue.global.js') }}"></script>
     {% block head %}{% endblock %}
-    <title>{{ page_title }} | Pillbug Dashboard</title>
+    <title>{{ page_title }} | Pillbug</title>
   </head>
-  <body class="dashboard-shell dark">
-    <header class="fixed blur dashboard-header">
-      <nav class="responsive dashboard-nav">
-        <a href="/runtimes" class="dashboard-brand">
-          <span class="dashboard-brand-mark">PB</span>
+  <body class="shell">
+    <header class="header">
+      <div class="container header-inner">
+        <a href="/runtimes" class="brand">
+          <span class="brand-mark">PB</span>
           <span>
-            <strong>Pillbug Dashboard</strong>
-            <small>Remote runtime operator console</small>
+            <strong>Pillbug</strong>
+            <small>operator console</small>
           </span>
         </a>
-        <div class="max"></div>
-        <a href="/runtimes" class="dashboard-nav-link">Runtimes</a>
-      </nav>
+        <div class="nav-spacer"></div>
+        <a href="/runtimes" class="nav-link">Runtimes</a>
+      </div>
     </header>
-    <main class="responsive dashboard-main">
+    <main class="container main">
       {% block content %}{% endblock %}
     </main>
-    <div id="dashboard-confirm-overlay" class="overlay blur"></div>
-    <dialog id="dashboard-confirm-dialog" class="dashboard-confirm-dialog no-round" aria-labelledby="dashboard-confirm-title">
-      <p class="eyebrow">CONFIRM ACTION</p>
-      <h5 id="dashboard-confirm-title">Confirm action</h5>
-      <div id="dashboard-confirm-message" class="muted-copy"></div>
-      <nav class="right-align no-space dashboard-confirm-actions">
-        <button id="dashboard-confirm-cancel" type="button" class="transparent link">Cancel</button>
-        <button id="dashboard-confirm-submit" type="button" class="transparent link">Confirm</button>
-      </nav>
+    <div id="confirm-overlay" class="overlay"></div>
+    <dialog id="confirm-dialog">
+      <div class="stack gap-3">
+        <p class="eyebrow">CONFIRM</p>
+        <h5 id="confirm-title">Confirm action</h5>
+        <p id="confirm-message" class="muted"></p>
+        <div class="row right gap-2">
+          <button id="confirm-cancel" type="button" class="ghost">Cancel</button>
+          <button id="confirm-submit" type="button" class="ghost">Confirm</button>
+        </div>
+      </div>
     </dialog>
     <script defer src="{{ url_for('static', path='/js/app/confirm-dialog.js') }}"></script>
     {% block scripts %}{% endblock %}

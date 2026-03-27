@@ -1,193 +1,169 @@
 {% extends "base.html" %}
 
 {% block content %}
-  <section id="runtimes-app" class="dashboard-page">
-    <article class="no-round hero-panel">
-      <div class="grid">
-        <div class="s12 stack gap-6">
+  <section id="runtimes-app" class="page">
+    <div class="hero">
+      <div class="stack gap-4">
+        <div>
           <p class="eyebrow">PILLBUG</p>
           <h2>RUNTIMES</h2>
-          <p class="hero-copy">
-            This dashboard treats every Pillbug runtime as an isolated node. It keeps registration local, polls
-            telemetry through the dashboard backend, and lets operators pivot into sessions, tasks, audit events, and
-            A2A links without embedding into the runtime container.
-          </p>
         </div>
-        <div class="s12 stack gap-4">
-          <div class="hero-meta">
-            <span class="muted-label">REG FILE</span>
-            <strong class="codeish">[[ registryPath ]]</strong>
+        <div class="metric-strip">
+          <div class="metric standout">
+            <span class="muted">REGISTERED</span>
+            <strong>[[ summary.total_runtimes ]]</strong>
           </div>
-          <div class="metric-strip">
-            <div class="metric-card standout">
-              <span class="muted-label">REGISTERED</span>
-              <strong>[[ summary.total_runtimes ]]</strong>
-            </div>
-            <div class="metric-card">
-              <span class="muted-label">CONNECTED</span>
-              <strong>[[ summary.connected_runtimes ]]</strong>
-            </div>
-            <div class="metric-card">
-              <span class="muted-label">HEALTHY</span>
-              <strong>[[ summary.healthy_runtimes ]]</strong>
-            </div>
-            <div class="metric-card">
-              <span class="muted-label">ACTIVE SESSIONS</span>
-              <strong>[[ summary.active_sessions ]]</strong>
-            </div>
-            <div class="metric-card">
-              <span class="muted-label">ENABLED TASKS</span>
-              <strong>[[ summary.enabled_tasks ]]</strong>
-            </div>
+          <div class="metric">
+            <span class="muted">CONNECTED</span>
+            <strong>[[ summary.connected_runtimes ]]</strong>
+          </div>
+          <div class="metric">
+            <span class="muted">HEALTHY</span>
+            <strong>[[ summary.healthy_runtimes ]]</strong>
+          </div>
+          <div class="metric">
+            <span class="muted">SESSIONS</span>
+            <strong>[[ summary.active_sessions ]]</strong>
+          </div>
+          <div class="metric">
+            <span class="muted">TASKS</span>
+            <strong>[[ summary.enabled_tasks ]]</strong>
           </div>
         </div>
       </div>
-    </article>
+    </div>
 
-    <div v-if="actionMessage" class="notice-banner no-round success-tone">
-      <strong>SAVED</strong>
+    <div v-if="actionMessage" class="notice success">
+      <strong>OK</strong>
       <span>[[ actionMessage ]]</span>
     </div>
 
-    <div v-if="errorMessage" class="notice-banner no-round error-tone">
-      <strong>DASHBOARD REQUEST FAILED.</strong>
+    <div v-if="errorMessage" class="notice error">
+      <strong>ERR</strong>
       <span>[[ errorMessage ]]</span>
     </div>
 
-    <div class="grid dashboard-grid">
-      <article class="s12 l4 no-round panel-shell stack gap-5">
-        <div class="stack gap-2">
+    <div class="row spread">
+      <div class="field" style="flex:1; max-width:440px;">
+        <input v-model.trim="query" type="text" placeholder="FILTER RUNTIMES..." autocomplete="off">
+      </div>
+      <div class="row gap-1">
+        <button type="button" :disabled="loading" @click="refreshDashboard(true)">
+          [[ loading ? '...' : 'REFRESH' ]]
+        </button>
+        <button type="button" @click="showForm = !showForm">
+          [[ showForm ? 'CLOSE' : 'REGISTER' ]]
+        </button>
+      </div>
+    </div>
+
+    <div v-if="showForm" class="panel">
+      <div class="stack gap-4">
+        <div>
           <p class="eyebrow">REGISTRY</p>
-          <h4>REGISTER OR UPDATE A RUNTIME</h4>
-          <p class="muted-copy">Tokens stay on the dashboard side and are never exposed back to the browser.</p>
+          <h4>[[ isEditing ? 'UPDATE RUNTIME' : 'REGISTER RUNTIME' ]]</h4>
+          <p class="muted">Tokens stay on the dashboard side and are never exposed back to the browser.</p>
         </div>
 
         <form class="stack gap-3" @submit.prevent="saveRuntime">
-          <div class="field label border">
-            <input v-model.trim="form.runtime_id" type="text" autocomplete="off">
-            <label>RUNTIME ID</label>
+          <div class="grid-2">
+            <div class="field">
+              <label>RUNTIME ID</label>
+              <input v-model.trim="form.runtime_id" type="text" autocomplete="off">
+            </div>
+            <div class="field">
+              <label>LABEL</label>
+              <input v-model.trim="form.label" type="text" autocomplete="off">
+            </div>
           </div>
 
-          <div class="field label border">
-            <input v-model.trim="form.label" type="text" autocomplete="off">
-            <label>LABEL</label>
-          </div>
-
-          <div class="field label border">
-            <input v-model.trim="form.base_url" type="url" autocomplete="off">
+          <div class="field">
             <label>BASE URL</label>
+            <input v-model.trim="form.base_url" type="url" autocomplete="off">
           </div>
 
-          <div class="field label border">
-            <input v-model.trim="form.dashboard_bearer_token" type="password" autocomplete="new-password">
-            <label>DASHBOARD BEARER TOKEN</label>
+          <div class="grid-2">
+            <div class="field">
+              <label>BEARER TOKEN</label>
+              <input v-model.trim="form.dashboard_bearer_token" type="password" autocomplete="new-password">
+            </div>
+            <label class="checkbox" style="align-self:end;">
+              <input v-model="form.clear_dashboard_bearer_token" type="checkbox">
+              <span>CLEAR TOKEN</span>
+            </label>
           </div>
 
-          <label class="checkbox">
-            <input v-model="form.clear_dashboard_bearer_token" type="checkbox">
-            <span>CLEAR STORED TOKEN</span>
-          </label>
-
-          <div class="action-row">
-            <button type="submit" :disabled="submitting" class="fill">
-              <i>save</i>
-              <span>[[ submitting ? 'SAVING...' : (isEditing ? 'UPDATE RUNTIME' : 'ADD RUNTIME') ]]</span>
+          <div class="row gap-2">
+            <button type="submit" class="primary" :disabled="submitting">
+              [[ submitting ? '...' : (isEditing ? 'UPDATE' : 'ADD') ]]
             </button>
-            <button v-if="isEditing" type="button" class="border" @click="resetForm">CANCEL</button>
+            <button v-if="isEditing" type="button" @click="resetForm">CANCEL</button>
           </div>
         </form>
+      </div>
+    </div>
 
-        <hr class="large-divider">
-
-        <div class="stack gap-3">
-          <p class="eyebrow">CONFIGURED A2A PEERS</p>
-          <div v-if="topologyEdges.length" class="stack gap-2">
-            <div v-for="edge in topologyEdges" :key="edge.key" class="topology-edge">
-              <strong>[[ edge.source ]]</strong>
-              <span class="arrow-glyph">→</span>
-              <span>[[ edge.target ]]</span>
-            </div>
-          </div>
-          <p v-else class="muted-copy">NO CONFIGURED A2A PEERS</p>
+    <div v-if="filteredRuntimes.length" class="cluster-grid">
+      <section v-for="cluster in clusters" :key="cluster.id" class="cluster">
+        <div class="cluster-label">
+          [[ cluster.label ]]
+          <span v-if="cluster.edges.length" class="muted"> &mdash; [[ cluster.edges.length ]] connections</span>
         </div>
-      </article>
 
-      <section class="s12 l8 stack gap-4">
-        <article class="no-round panel-shell stack gap-4">
-          <nav class="toolbar-row">
-            <div class="field label border max">
-              <input v-model.trim="query" type="text" autocomplete="off">
-              <label>FILTER</label>
-            </div>
-            <button type="button" class="border" :disabled="loading" @click="refreshDashboard(true)">
-              <i>refresh</i>
-              <span>[[ loading ? '...' : 'REFRESH' ]]</span>
-            </button>
-          </nav>
-
-          <div v-if="filteredRuntimes.length" class="stack">
-            <article v-for="runtime in filteredRuntimes" :key="runtime.registration.runtime_id" class="runtime-card panel-shell no-round">
-              <div class="stack gap-3">
-                <div class="runtime-card-header">
-                  <div>
-                    <p class="eyebrow">[[ runtime.registration.runtime_id ]]</p>
-                    <h5>[[ runtime.registration.label || runtime.registration.runtime_id ]]</h5>
-                  </div>
-                  <span class="status-pill" :class="statusClass(runtime)">[[ statusLabel(runtime) ]]</span>
-                  <span v-if="!runtime.registration.has_dashboard_bearer_token" class="status-pill degraded">NO TOKEN</span>
-                </div>
-
-                <a class="runtime-url" :href="runtime.registration.base_url" target="_blank" rel="noreferrer">
-                  [[ runtime.registration.base_url ]]
-                </a>
-
-                <div class="runtime-stat-grid">
-                  <div>
-                    <span class="muted-label">SESSIONS</span>
-                    <strong>[[ activeSessions(runtime) ]]</strong>
-                  </div>
-                  <div>
-                    <span class="muted-label">TASKS</span>
-                    <strong>[[ totalTasks(runtime) ]]</strong>
-                  </div>
-                  <div>
-                    <span class="muted-label">CHANNELS</span>
-                    <strong>[[ channelCount(runtime) ]]</strong>
-                  </div>
-                  <div>
-                    <span class="muted-label">LAST ACTIVITY</span>
-                    <strong>[[ formatTimestamp(runtime.runtime && runtime.runtime.last_activity_at) ]]</strong>
-                  </div>
-                </div>
-
-                <div class="stack gap-2">
-                  <div class="token-chip-row">
-                    <span v-if="runtime.a2a_peers.length" class="chip fill small secondary-container">[[ runtime.a2a_peers.length ]] A2A PEERS</span>
-                  </div>
-                  <p v-if="runtime.status.error" class="muted-copy">[[ runtime.status.error ]]</p>
-                </div>
-
-                <div class="action-row wrap">
-                  <a class="button fill" :href="runtimeDetailHref(runtime)">
-                    <span>INSPECT</span>
-                  </a>
-                  <button type="button" class="border" @click="editRuntime(runtime)">EDIT</button>
-                  <button type="button" class="border" :disabled="deletingRuntimeId === runtime.registration.runtime_id" @click="deleteRuntime(runtime)">
-                    [[ deletingRuntimeId === runtime.registration.runtime_id ? '...' : 'REMOVE' ]]
-                  </button>
-                </div>
+        <div class="cluster-nodes">
+          <article v-for="runtime in cluster.runtimes" :key="runtime.registration.runtime_id" class="agent-node">
+            <div class="agent-header">
+              <span class="heartbeat" :class="heartbeatClass(runtime)"></span>
+              <div class="agent-header-text">
+                <p class="eyebrow">[[ runtime.registration.runtime_id ]]</p>
+                <strong>[[ runtime.registration.label || runtime.registration.runtime_id ]]</strong>
               </div>
-            </article>
-          </div>
-
-          <div v-else class="empty-state-block">
-            <p v-if="query">NO RUNTIMES</p>
-            <div v-else>
-              <p>NO RUNTIMES REGISTERED</p>
+              <span class="status" :class="statusClass(runtime)">[[ statusLabel(runtime) ]]</span>
             </div>
-          </div>
-        </article>
+
+            <div class="agent-metrics">
+              <div class="agent-metric">
+                <span class="muted">SESS</span>
+                <strong>[[ activeSessions(runtime) ]]</strong>
+              </div>
+              <div class="agent-metric">
+                <span class="muted">TASKS</span>
+                <strong>[[ totalTasks(runtime) ]]</strong>
+              </div>
+              <div class="agent-metric">
+                <span class="muted">CH</span>
+                <strong>[[ channelCount(runtime) ]]</strong>
+              </div>
+            </div>
+
+            <div v-if="runtimeEvents(runtime).length" class="mini-events">
+              <div v-for="ev in runtimeEvents(runtime)" :key="ev.id" class="mini-event">
+                <span class="mini-event-type">[[ ev.type ]]</span>
+                <span class="mini-event-time">[[ ev.time ]]</span>
+              </div>
+            </div>
+
+            <div class="agent-actions">
+              <a class="btn primary" :href="runtimeDetailHref(runtime)">INSPECT</a>
+              <button type="button" @click="editRuntime(runtime)">EDIT</button>
+              <button type="button" :disabled="deletingRuntimeId === runtime.registration.runtime_id" @click="deleteRuntime(runtime)">
+                [[ deletingRuntimeId === runtime.registration.runtime_id ? '...' : 'DEL' ]]
+              </button>
+            </div>
+          </article>
+        </div>
+
+        <div v-if="cluster.edges.length" class="cluster-edges">
+          <span v-for="edge in cluster.edges" :key="edge.key" class="edge">
+            [[ edge.source ]] <span class="edge-arrow">&rarr;</span> [[ edge.target ]]
+          </span>
+        </div>
       </section>
+    </div>
+
+    <div v-else class="empty">
+      <p v-if="query">NO MATCHING RUNTIMES</p>
+      <p v-else>NO RUNTIMES REGISTERED</p>
     </div>
   </section>
 {% endblock %}
