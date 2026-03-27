@@ -1,5 +1,6 @@
 x-build-common: &build-common
   context: .
+  target: final
 
 services:
   pillbug-a:
