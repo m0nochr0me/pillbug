@@ -3,6 +3,8 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from google.genai import types
+
 from app.core.ai import GeminiChatService, GeminiChatSession
 from app.core.config import settings
 from app.core.log import logger
@@ -64,6 +66,7 @@ class ApplicationLoop:
         pipeline: InboundProcessingPipeline | None = None,
     ) -> None:
         self._chat_service = chat_service
+        self._chat_service.set_outbound_injection_handler(self._inject_outbound_turn)
         self._channels = channels or load_channel_plugins()
         self._pipeline = pipeline or InboundProcessingPipeline()
         self._debounce_window = settings.INBOUND_DEBOUNCE_SECONDS
@@ -731,6 +734,11 @@ class ApplicationLoop:
             data={"session_key": session_key},
         )
         return session
+
+    async def _inject_outbound_turn(self, target_session_key: str, content: types.Content) -> None:
+        session = await self._get_session(target_session_key)
+        await session.inject_model_turn(content)
+        logger.debug(f"Injected outbound model turn into session={target_session_key}")
 
     def _recognized_command(self, raw_text: str) -> str | None:
         normalized_text = raw_text.strip().lower()

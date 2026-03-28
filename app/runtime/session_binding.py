@@ -6,6 +6,7 @@ from typing import Final
 _SESSION_KEY_SEPARATOR: Final[str] = ":"
 _mcp_runtime_sessions: dict[str, str] = {}
 _runtime_session_origin_metadata: dict[str, dict[str, object]] = {}
+_pending_outbound_injections: dict[str, list[str]] = {}
 
 
 def bind_mcp_session_to_runtime_session(mcp_session_id: str, runtime_session_key: str) -> None:
@@ -47,6 +48,19 @@ def get_runtime_session_origin_metadata(runtime_session_key: str) -> dict[str, o
         return None
 
     return deepcopy(metadata)
+
+
+def record_pending_outbound_injection(source_session_key: str, target_session_key: str) -> None:
+    normalized_source = source_session_key.strip()
+    normalized_target = target_session_key.strip()
+    if not normalized_source or not normalized_target:
+        return
+
+    _pending_outbound_injections.setdefault(normalized_source, []).append(normalized_target)
+
+
+def consume_pending_outbound_injections(source_session_key: str) -> list[str]:
+    return _pending_outbound_injections.pop(source_session_key.strip(), [])
 
 
 def split_runtime_session_key(runtime_session_key: str) -> tuple[str, str] | None:

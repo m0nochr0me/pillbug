@@ -34,6 +34,7 @@ from app.runtime.scheduler import task_scheduler
 from app.runtime.session_binding import (
     get_runtime_session_for_mcp_session,
     get_runtime_session_origin_metadata,
+    record_pending_outbound_injection,
     split_runtime_session_key,
 )
 from app.schema.control import (
@@ -739,6 +740,12 @@ async def send_message(
 
     await channel_plugin.send_message(conversation_id, message, metadata=None)
     _track_outbound_conversation(channel_name, conversation_id)
+
+    if settings.SESSION_CONTINUITY and ctx is not None:
+        source_session_key = get_runtime_session_for_mcp_session(ctx.session_id)
+        target_session_key = f"{channel_name}:{conversation_id}" if conversation_id else channel_name
+        if source_session_key and source_session_key != target_session_key:
+            record_pending_outbound_injection(source_session_key, target_session_key)
 
     logger.info(f"Sent outbound message via channel={channel_name} destination={conversation_id or '<default>'}")
 

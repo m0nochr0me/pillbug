@@ -4,7 +4,7 @@ AI client
 
 import asyncio
 import mimetypes
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -54,6 +54,21 @@ _COMPRESSED_SESSION_HISTORY_PREFIX = (
     "Compressed session summary. This replaces the earlier message history. "
     "Use it as background context for future turns:\n\n"
 )
+
+
+def _extract_injectable_content(history: list[types.Content]) -> types.Content | None:
+    """Return the last model response from history with only text and thought parts (thought_signature preserved)."""
+    for content in reversed(history):
+        if getattr(content, "role", None) != "model":
+            continue
+        injectable_parts = [
+            p
+            for p in (content.parts or [])
+            if getattr(p, "thought", False) or isinstance(getattr(p, "text", None), str)
+        ]
+        if injectable_parts:
+            return types.Content(role="model", parts=injectable_parts)
+    return None
 
 
 def _normalize_supported_attachment_mime_type(mime_type: str) -> str | None:
@@ -143,6 +158,10 @@ class GeminiChatService:
         self._sessions_dir = settings.SESSIONS_DIR
         self._module_root = get_module_root("app")
         self._prompts_dir = self._module_root / "prompts"
+        self._outbound_injection_handler: Callable[[str, types.Content], Awaitable[None]] | None = None
+
+    def set_outbound_injection_handler(self, handler: Callable[[str, types.Content], Awaitable[None]] | None) -> None:
+        self._outbound_injection_handler = handler
 
     def create_session(
         self,
@@ -350,6 +369,7 @@ class GeminiChatSession:
         full_response = response.text or self._extract_parts_text(response.parts)
         self._usage_totals.add_usage_metadata(response.usage_metadata)
         await self._persist_history()
+        await self._flush_outbound_injections()
         if full_response.strip():
             return ChatResponse(
                 text=full_response,
@@ -467,6 +487,29 @@ class GeminiChatSession:
         except Exception:
             logger.exception(f"Failed to persist session history for {self._session_id}")
 
+    async def _flush_outbound_injections(self) -> None:
+        if not settings.SESSION_CONTINUITY or self._service._outbound_injection_handler is None:
+            return
+
+        from app.runtime.session_binding import consume_pending_outbound_injections
+
+        targets = consume_pending_outbound_injections(self._session_id)
+        if not targets:
+            return
+
+        injectable = _extract_injectable_content(self._get_curated_history())
+        if injectable is None:
+            return
+
+        handler = self._service._outbound_injection_handler
+        for target_session_key in targets:
+            try:
+                await handler(target_session_key, injectable)
+            except Exception:
+                logger.exception(
+                    f"Failed to inject outbound turn into session={target_session_key} from source={self._session_id}"
+                )
+
     def get_usage_totals(self) -> ChatSessionUsageTotals:
         return self._usage_totals.model_copy(deep=True)
 
@@ -489,6 +532,14 @@ class GeminiChatSession:
             history=cast("list[types.ContentOrDict] | None", compressed_history),
         )
         self._usage_totals = ChatSessionUsageTotals()
+        await self._persist_history()
+
+    async def inject_model_turn(self, content: types.Content) -> None:
+        updated_history = self._get_curated_history() + [content]
+        self._chat = self._service.ai_client.aio.chats.create(
+            model=settings.GEMINI_MODEL,
+            history=cast("list[types.ContentOrDict] | None", updated_history),
+        )
         await self._persist_history()
 
     def render_usage_report(self) -> str:

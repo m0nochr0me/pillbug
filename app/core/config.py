@@ -87,6 +87,7 @@ class Settings(BaseSettings):
 
     SESSION_SUMMARIZATION: str | None = "memory"  # or "compress"
     SESSION_SUMMARIZATION_THRESHOLD: int = 1024 * 128  # total tokens
+    SESSION_CONTINUITY: bool = True
 
     MCP_HOST: str = "127.0.0.1"
     MCP_PORT: int = 8000
