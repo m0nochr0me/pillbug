@@ -8,6 +8,7 @@ members = [
     "pillbug-a2a",
     "pillbug-dashboard",
     "pillbug-telegram",
+    "pillbug-trigger",
 ]
 
 [[package]]
@@ -1059,6 +1060,9 @@ dashboard = [
 telegram = [
     { name = "pillbug-telegram" },
 ]
+trigger = [
+    { name = "pillbug-trigger" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -1081,11 +1085,12 @@ requires-dist = [
     { name = "pillbug-a2a", marker = "extra == 'a2a'", editable = "packages/pillbug-a2a" },
     { name = "pillbug-dashboard", marker = "extra == 'dashboard'", editable = "packages/pillbug-dashboard" },
     { name = "pillbug-telegram", marker = "extra == 'telegram'", editable = "packages/pillbug-telegram" },
+    { name = "pillbug-trigger", marker = "extra == 'trigger'", editable = "packages/pillbug-trigger" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pydocket", specifier = ">=0.18.2" },
     { name = "redis", specifier = ">=7.3.0" },
 ]
-provides-extras = ["a2a", "telegram", "dashboard"]
+provides-extras = ["a2a", "telegram", "dashboard", "trigger"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1140,6 +1145,21 @@ dependencies = [
 requires-dist = [
     { name = "pillbug", editable = "." },
     { name = "shingram", specifier = ">=0.3.0" },
+]
+
+[[package]]
+name = "pillbug-trigger"
+version = "0.1.0"
+source = { editable = "packages/pillbug-trigger" }
+dependencies = [
+    { name = "pillbug" },
+    { name = "pydantic-settings" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pillbug", editable = "." },
+    { name = "pydantic-settings", specifier = ">=2.11.0" },
 ]
 
 [[package]]

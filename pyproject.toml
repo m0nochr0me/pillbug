@@ -38,6 +38,7 @@ dependencies = [
 a2a = ["pillbug-a2a"]
 telegram = ["pillbug-telegram"]
 dashboard = ["pillbug-dashboard"]
+trigger = ["pillbug-trigger"]
 
 [project.urls]
 Homepage = "https://github.com/m0nochr0me/pillbug"
@@ -61,6 +62,7 @@ package = true
 pillbug-a2a = { workspace = true }
 pillbug-telegram = { workspace = true }
 pillbug-dashboard = { workspace = true }
+pillbug-trigger = { workspace = true }
 
 [tool.uv.workspace]
 members = ["packages/*"]
