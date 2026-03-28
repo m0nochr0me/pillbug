@@ -135,11 +135,10 @@
                 <strong>[[ channelCount(runtime) ]]</strong>
               </div>
             </div>
-
             <div v-if="runtimeEvents(runtime).length" class="mini-events">
-              <div v-for="ev in runtimeEvents(runtime)" :key="ev.id" class="mini-event">
-                <span class="mini-event-type">[[ ev.type ]]</span>
-                <span class="mini-event-time">[[ ev.time ]]</span>
+              <div v-for="ev in runtimeEvents(runtime).slice(0, 3)" :key="ev.id" class="mini-event">
+              <span class="mini-event-type">[[ ev.type ]]</span>
+              <span class="mini-event-time">[[ ev.time ]]</span>
               </div>
             </div>
 
