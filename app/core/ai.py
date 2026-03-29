@@ -47,6 +47,7 @@ _ATTACHMENT_MIME_TYPE_OVERRIDES = {
     ".txt": "text/plain",
 }
 _EMPTY_MODEL_RESPONSE_FALLBACK = "I could not produce a text response right now. Please try again."
+_EMPTY_RESPONSE_NUDGE_TEXT = "Please continue"
 _MODEL_INPUT_PROMPT_NAME = "model_input.prompt.md"
 _SKILLS_PROMPT_NAME = "skills.prompt.md"
 _CHANNEL_MEMO_PROMPTS = {"a2a": "a2a_channel_memo.prompt.md"}
@@ -383,7 +384,53 @@ class GeminiChatSession:
                 usage_metadata=response.usage_metadata,
             )
 
-        logger.warning(f"Gemini returned no text for session={self._session_id}; responding with fallback text instead")
+        max_nudges = settings.GEMINI_EMPTY_RESPONSE_MAX_NUDGES
+        for nudge_attempt in range(1, max_nudges + 1):
+            logger.info(
+                f"Gemini returned no text for session={self._session_id}; sending nudge {nudge_attempt}/{max_nudges}"
+            )
+
+            async with self._mcp_client as mcp_client, self._service.get_system_instruction() as system_instruction:
+                mcp_session_id = mcp_client.transport.get_session_id()
+                if mcp_session_id is not None:
+                    bind_mcp_session_to_runtime_session(mcp_session_id, self._session_id)
+
+                nudge_response = await self._chat.send_message(
+                    message=_EMPTY_RESPONSE_NUDGE_TEXT,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        temperature=settings.GEMINI_TEMPERATURE,
+                        top_p=settings.GEMINI_TOP_P,
+                        max_output_tokens=settings.GEMINI_MAX_OUTPUT_TOKENS,
+                        thinking_config=types.ThinkingConfig(
+                            thinking_level=types.ThinkingLevel(settings.GEMINI_THINKING_LEVEL)
+                        ),
+                        tools=[mcp_client.session],
+                    ),
+                )
+
+            nudge_text = nudge_response.text or self._extract_parts_text(nudge_response.parts)
+            self._usage_totals.add_usage_metadata(nudge_response.usage_metadata)
+            await self._persist_history()
+            await self._flush_outbound_injections()
+
+            if nudge_text.strip():
+                logger.info(f"Nudge {nudge_attempt} produced text for session={self._session_id}")
+                return ChatResponse(
+                    text=nudge_text,
+                    usage_metadata=nudge_response.usage_metadata,
+                )
+
+            latest_model_response = self._get_latest_model_response_text()
+            if latest_model_response.strip():
+                return ChatResponse(
+                    text=latest_model_response,
+                    usage_metadata=nudge_response.usage_metadata,
+                )
+
+        logger.warning(
+            f"Gemini returned no text for session={self._session_id} after {max_nudges} nudge(s); responding with fallback text instead"
+        )
 
         return ChatResponse(
             text=_EMPTY_MODEL_RESPONSE_FALLBACK,
