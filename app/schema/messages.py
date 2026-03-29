@@ -84,6 +84,42 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+class OutboundAttachment(BaseModel):
+    path: str = Field(
+        ...,
+        description="Workspace-relative or absolute path to the file to send",
+    )
+    mime_type: str | None = Field(
+        default=None,
+        description="MIME type of the file; channels may use this to select the send method",
+    )
+    display_name: str | None = Field(
+        default=None,
+        description="Display name or caption for the attachment",
+    )
+    send_as: str | None = Field(
+        default=None,
+        description="Hint for the channel on how to send the file (e.g. 'voice', 'document', 'photo')",
+    )
+
+    @model_validator(mode="after")
+    def normalize_values(self) -> Self:
+        self.path = self.path.strip()
+        if not self.path:
+            raise ValueError("path must not be blank")
+
+        if self.mime_type is not None:
+            self.mime_type = self.mime_type.strip().lower() or None
+
+        if self.display_name is not None:
+            self.display_name = self.display_name.strip() or None
+
+        if self.send_as is not None:
+            self.send_as = self.send_as.strip().lower() or None
+
+        return self
+
+
 class InboundMessage(BaseModel):
     channel_name: str
     conversation_id: str

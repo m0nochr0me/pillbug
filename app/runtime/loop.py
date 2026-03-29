@@ -22,6 +22,7 @@ from app.schema.messages import (
     A2AEnvelope,
     InboundBatch,
     InboundMessage,
+    OutboundAttachment,
     ProcessedInboundMessage,
     extract_a2a_origin_channel_metadata,
 )
@@ -615,6 +616,7 @@ class ApplicationLoop:
         channel: ChannelPlugin,
         inbound_message: InboundMessage,
         response_text: str,
+        attachments: tuple[OutboundAttachment, ...] | None = None,
     ) -> bool:
         response_policy = self._channel_response_policy(channel, inbound_message)
         if response_policy is not None and not getattr(response_policy, "should_reply", True):
@@ -635,7 +637,7 @@ class ApplicationLoop:
             )
             return False
 
-        await channel.send_response(inbound_message, response_text)
+        await channel.send_response(inbound_message, response_text, attachments=attachments)
         return True
 
     def _resolve_response_target(
@@ -686,6 +688,7 @@ class ApplicationLoop:
         channel: ChannelPlugin,
         inbound_message: InboundMessage,
         response_text: str,
+        attachments: tuple[OutboundAttachment, ...] | None = None,
     ) -> bool:
         response_channel, response_inbound_message, use_source_response_policy = self._resolve_response_target(
             channel,
@@ -698,6 +701,7 @@ class ApplicationLoop:
             response_inbound_message=response_inbound_message,
             use_source_response_policy=use_source_response_policy,
             response_text=response_text,
+            attachments=attachments,
         )
 
     async def _send_resolved_response(
@@ -709,15 +713,17 @@ class ApplicationLoop:
         response_inbound_message: InboundMessage,
         use_source_response_policy: bool,
         response_text: str,
+        attachments: tuple[OutboundAttachment, ...] | None = None,
     ) -> bool:
         if use_source_response_policy:
             return await self._maybe_send_channel_response(
                 channel=source_channel,
                 inbound_message=source_inbound_message,
                 response_text=response_text,
+                attachments=attachments,
             )
 
-        await response_channel.send_response(response_inbound_message, response_text)
+        await response_channel.send_response(response_inbound_message, response_text, attachments=attachments)
         return True
 
     async def _get_session(self, session_key: str) -> GeminiChatSession:

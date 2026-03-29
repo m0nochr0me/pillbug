@@ -19,6 +19,7 @@ from app.schema.messages import (
     A2AIntent,
     A2ATarget,
     InboundMessage,
+    OutboundAttachment,
     build_a2a_origin_routing_metadata,
     extract_a2a_origin_channel_metadata,
     extract_a2a_origin_routing_metadata,
@@ -219,7 +220,9 @@ class A2AChannel(BaseChannel):
         conversation_id: str,
         message_text: str,
         metadata: dict[str, object] | None = None,
+        attachments: tuple[OutboundAttachment, ...] | None = None,
     ) -> None:
+        del attachments
         target, envelope = self._build_outbound_request_envelope(
             conversation_id=conversation_id,
             message_text=message_text,
@@ -273,7 +276,9 @@ class A2AChannel(BaseChannel):
         self,
         inbound_message: InboundMessage,
         response_text: str,
+        attachments: tuple[OutboundAttachment, ...] | None = None,
     ) -> None:
+        del attachments
         original_envelope = A2AEnvelope.from_inbound_metadata(inbound_message.metadata)
         fallback_base_url = self._fallback_sender_base_url(inbound_message)
         convergence_state = original_envelope.convergence_state.next_outbound()

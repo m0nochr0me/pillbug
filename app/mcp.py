@@ -47,6 +47,7 @@ from app.schema.control import (
 from app.schema.messages import (
     A2AEnvelope,
     A2ATarget,
+    OutboundAttachment,
     build_a2a_origin_routing_metadata,
     extract_a2a_origin_channel_metadata,
     extract_a2a_origin_route,
@@ -753,6 +754,64 @@ async def send_message(
         "channel": channel_name,
         "conversation_id": conversation_id or None,
         "chars_sent": len(message),
+    }
+
+
+@mcp.tool
+async def send_file(
+    channel: str,
+    path: str,
+    caption: str | None = None,
+    send_as: str | None = None,
+) -> dict[str, Any]:
+    """
+    Sends a workspace file as an attachment to a configured channel.
+
+    Use this to deliver files from the workspace to a user on a specific channel.
+    The channel argument accepts the same format as send_message:
+    a bare channel name like cli, or a session-style target like telegram:123456789.
+
+    The path argument should be a workspace-relative or absolute path to the file.
+    The optional send_as argument hints how the channel should deliver the file:
+    voice (Telegram voice message, best with .ogg opus files),
+    audio (music/audio player), photo, video, or document (default, any file type).
+    If omitted, the channel infers the delivery method from the file MIME type.
+    """
+
+    channel_name, conversation_id = _parse_channel_target(channel)
+    channel_plugin = get_channel_plugin(channel_name, create=True)
+    if channel_plugin is None:
+        raise ValueError(f"Channel is not enabled or available: {channel_name}")
+
+    resolved_path = _resolve_workspace_path(path)
+    if not resolved_path.is_file():
+        raise ValueError(f"File not found in workspace: {_display_path(resolved_path)}")
+
+    import mimetypes
+
+    mime_type = mimetypes.guess_type(resolved_path.name)[0]
+    attachment = OutboundAttachment(
+        path=str(resolved_path),
+        mime_type=mime_type,
+        display_name=caption,
+        send_as=send_as,
+    )
+
+    await channel_plugin.send_message(
+        conversation_id,
+        caption or "",
+        attachments=(attachment,),
+    )
+
+    logger.info(
+        f"Sent file via channel={channel_name} destination={conversation_id or '<default>'} path={_display_path(resolved_path)}"
+    )
+
+    return {
+        "channel": channel_name,
+        "conversation_id": conversation_id or None,
+        "file": _display_path(resolved_path),
+        "send_as": send_as or "auto",
     }
 
 

@@ -6,7 +6,7 @@ from typing import Any
 
 from app.core.log import logger
 from app.runtime.channels import BaseChannel
-from app.schema.messages import InboundMessage
+from app.schema.messages import InboundMessage, OutboundAttachment
 from pillbug_trigger.config import settings
 from pillbug_trigger.schema import TriggerEvent, TriggerSourceConfig
 from pillbug_trigger.server import create_trigger_app, run_server
@@ -143,14 +143,18 @@ class TriggerChannel(BaseChannel):
         conversation_id: str,
         message_text: str,
         metadata: dict[str, object] | None = None,
+        attachments: tuple[OutboundAttachment, ...] | None = None,
     ) -> None:
+        del attachments
         logger.info("Trigger channel outbound message", conversation_id=conversation_id, length=len(message_text))
 
     async def send_response(
         self,
         inbound_message: InboundMessage,
         response_text: str,
+        attachments: tuple[OutboundAttachment, ...] | None = None,
     ) -> None:
+        del attachments
         logger.info(
             "Trigger channel agent response",
             conversation_id=inbound_message.conversation_id,

@@ -23,7 +23,7 @@ from app.core.config import settings
 from app.core.jinja import render_template
 from app.core.log import logger
 from app.runtime.channels import get_available_channels_context, get_channel_plugin
-from app.runtime.session_binding import bind_mcp_session_to_runtime_session
+from app.runtime.session_binding import bind_mcp_session_to_runtime_session, consume_pending_outbound_injections
 from app.schema.ai import ChatResponse, ChatSessionSnapshot, ChatSessionUsageTotals, InboundAttachment, Skill
 from app.util.base_dir import get_module_root
 from app.util.skills import discover_workspace_skills
@@ -50,7 +50,7 @@ _EMPTY_MODEL_RESPONSE_FALLBACK = "I could not produce a text response right now.
 _EMPTY_RESPONSE_NUDGE_TEXT = "Please continue"
 _MODEL_INPUT_PROMPT_NAME = "model_input.prompt.md"
 _SKILLS_PROMPT_NAME = "skills.prompt.md"
-_CHANNEL_MEMO_PROMPTS = {"a2a": "a2a_channel_memo.prompt.md"}
+_CHANNEL_MEMO_PROMPTS = {"a2a": "a2a_channel_memo.prompt.md", "telegram": "telegram_channel_memo.prompt.md"}
 _COMPRESSED_SESSION_HISTORY_PREFIX = (
     "Compressed session summary. This replaces the earlier message history. "
     "Use it as background context for future turns:\n\n"
@@ -538,8 +538,6 @@ class GeminiChatSession:
         if not settings.SESSION_CONTINUITY or self._service._outbound_injection_handler is None:
             return
 
-        from app.runtime.session_binding import consume_pending_outbound_injections
-
         targets = consume_pending_outbound_injections(self._session_id)
         if not targets:
             return
@@ -582,7 +580,7 @@ class GeminiChatSession:
         await self._persist_history()
 
     async def inject_model_turn(self, content: types.Content) -> None:
-        updated_history = self._get_curated_history() + [content]
+        updated_history = [*self._get_curated_history(), content]
         self._chat = self._service.ai_client.aio.chats.create(
             model=settings.GEMINI_MODEL,
             history=cast("list[types.ContentOrDict] | None", updated_history),

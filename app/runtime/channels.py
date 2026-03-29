@@ -12,7 +12,7 @@ from typing import Any, Protocol, cast
 from app.core.cache import cache
 from app.core.config import settings
 from app.core.log import logger
-from app.schema.messages import InboundMessage
+from app.schema.messages import InboundMessage, OutboundAttachment
 from app.schema.telemetry import ChannelTelemetryEntry
 
 
@@ -27,12 +27,14 @@ class ChannelPlugin(Protocol):
         conversation_id: str,
         message_text: str,
         metadata: dict[str, object] | None = None,
+        attachments: tuple[OutboundAttachment, ...] | None = None,
     ) -> None: ...
 
     async def send_response(
         self,
         inbound_message: InboundMessage,
         response_text: str,
+        attachments: tuple[OutboundAttachment, ...] | None = None,
     ) -> None: ...
 
     def response_presence(
@@ -57,6 +59,7 @@ class BaseChannel(ABC):
         conversation_id: str,
         message_text: str,
         metadata: dict[str, object] | None = None,
+        attachments: tuple[OutboundAttachment, ...] | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -65,6 +68,7 @@ class BaseChannel(ABC):
         self,
         inbound_message: InboundMessage,
         response_text: str,
+        attachments: tuple[OutboundAttachment, ...] | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -119,17 +123,18 @@ class CliChannel(BaseChannel):
         conversation_id: str,
         message_text: str,
         metadata: dict[str, object] | None = None,
+        attachments: tuple[OutboundAttachment, ...] | None = None,
     ) -> None:
-        del metadata
-        del conversation_id
+        del metadata, conversation_id, attachments
         await asyncio.to_thread(print, f"{self._assistant_prefix}{message_text}")
 
     async def send_response(
         self,
         inbound_message: InboundMessage,
         response_text: str,
+        attachments: tuple[OutboundAttachment, ...] | None = None,
     ) -> None:
-        await self.send_message(inbound_message.conversation_id, response_text)
+        await self.send_message(inbound_message.conversation_id, response_text, attachments=attachments)
 
 
 ChannelFactory = Callable[[], ChannelPlugin]

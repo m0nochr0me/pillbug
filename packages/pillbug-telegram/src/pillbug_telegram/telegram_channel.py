@@ -17,7 +17,7 @@ from shingram.exceptions import TelegramAPIError
 from app.core.config import settings
 from app.core.log import ThrottledExceptionLogger, logger
 from app.runtime.channels import BaseChannel, register_channel_conversation
-from app.schema.messages import InboundMessage
+from app.schema.messages import InboundMessage, OutboundAttachment
 from app.util.workspace import async_write_bytes_file, display_path
 
 _DEFAULT_ALLOWED_UPDATES = ("message", "edited_message")
@@ -28,6 +28,9 @@ _TELEGRAM_DOWNLOADS_DIR = settings.WORKSPACE_ROOT / "downloads" / "telegram"
 _FILENAME_SANITIZER = re.compile(r"[^A-Za-z0-9._-]+")
 _TRANSIENT_TELEGRAM_LOG_COOLDOWN_SECONDS = 60.0
 _TYPING_INTERVAL_SECONDS = 5.0
+_VOICE_MIME_TYPES = frozenset({"audio/ogg", "audio/opus"})
+_PHOTO_MIME_PREFIXES = ("image/jpeg", "image/png", "image/gif", "image/webp")
+_TELEGRAM_FILE_UPLOAD_TIMEOUT_SECONDS = 120.0
 _MAX_TYPING_ACTIONS = 10
 _BOT_COMMANDS = (
     {"command": "start", "description": "Check that the bot is ready"},
@@ -188,6 +191,40 @@ def _build_download_filename(
     return f"{message_prefix}_{safe_stem}{extension}"
 
 
+def _resolve_send_method(attachment: OutboundAttachment) -> tuple[str, str]:
+    """Return (telegram_api_method, file_field_name) for an outbound attachment."""
+    send_as = attachment.send_as
+    mime_type = attachment.mime_type or ""
+
+    if send_as == "voice":
+        return "sendVoice", "voice"
+    if send_as == "audio":
+        return "sendAudio", "audio"
+    if send_as == "photo":
+        return "sendPhoto", "photo"
+    if send_as == "video":
+        return "sendVideo", "video"
+
+    if mime_type in _VOICE_MIME_TYPES:
+        return "sendVoice", "voice"
+    if mime_type.startswith("audio/"):
+        return "sendAudio", "audio"
+    if any(mime_type.startswith(prefix) for prefix in _PHOTO_MIME_PREFIXES):
+        return "sendPhoto", "photo"
+    if mime_type.startswith("video/"):
+        return "sendVideo", "video"
+
+    return "sendDocument", "document"
+
+
+def _resolve_attachment_path(attachment: OutboundAttachment) -> Path:
+    """Resolve an outbound attachment path relative to the workspace root."""
+    raw_path = Path(attachment.path)
+    if raw_path.is_absolute():
+        return raw_path
+    return settings.WORKSPACE_ROOT / raw_path
+
+
 def _is_transient_telegram_error(exc: BaseException) -> bool:
     if isinstance(exc, TimeoutError):
         return True
@@ -314,6 +351,12 @@ class TelegramChannel(BaseChannel):
             cooldown_seconds=_TRANSIENT_TELEGRAM_LOG_COOLDOWN_SECONDS,
         )
 
+    def instruction_context(self) -> dict[str, object]:
+        chat_ids = sorted(self._allowed_chat_ids) if self._allowed_chat_ids else []
+        return {
+            "chat_id_example": str(chat_ids[0]) if chat_ids else "<chat_id>",
+        }
+
     async def listen(self) -> AsyncIterator[InboundMessage]:
         if self._settings.delete_webhook_on_start:
             await self._delete_webhook()
@@ -368,6 +411,7 @@ class TelegramChannel(BaseChannel):
         conversation_id: str,
         message_text: str,
         metadata: dict[str, object] | None = None,
+        attachments: tuple[OutboundAttachment, ...] | None = None,
     ) -> None:
         del metadata
         try:
@@ -375,9 +419,17 @@ class TelegramChannel(BaseChannel):
         except ValueError as exc:
             raise ValueError(f"Telegram conversation_id must be an integer chat ID, got: {conversation_id}") from exc
 
-        await self._send_text(chat_id=chat_id, response_text=message_text)
+        if message_text.strip():
+            await self._send_text(chat_id=chat_id, response_text=message_text)
+        if attachments:
+            await self._send_attachments(chat_id=chat_id, attachments=attachments)
 
-    async def send_response(self, inbound_message: InboundMessage, response_text: str) -> None:
+    async def send_response(
+        self,
+        inbound_message: InboundMessage,
+        response_text: str,
+        attachments: tuple[OutboundAttachment, ...] | None = None,
+    ) -> None:
         chat_id = self._chat_id_from_inbound_message(inbound_message)
         if chat_id is None:
             raise ValueError(
@@ -386,6 +438,12 @@ class TelegramChannel(BaseChannel):
 
         reply_to_message_id = _coerce_int(inbound_message.metadata.get("telegram_message_id"))
         await self._send_text(chat_id=chat_id, response_text=response_text, reply_to_message_id=reply_to_message_id)
+        if attachments:
+            await self._send_attachments(
+                chat_id=chat_id,
+                attachments=attachments,
+                reply_to_message_id=reply_to_message_id if isinstance(reply_to_message_id, int) else None,
+            )
 
     @asynccontextmanager
     async def response_presence(self, inbound_message: InboundMessage) -> AsyncIterator[None]:
@@ -425,6 +483,70 @@ class TelegramChannel(BaseChannel):
                 params["allow_sending_without_reply"] = True
 
             await self._client.call_async("sendMessage", **params)
+
+    async def _send_file_multipart(
+        self,
+        *,
+        method: str,
+        chat_id: int,
+        field_name: str,
+        file_path: Path,
+        caption: str | None = None,
+        reply_to_message_id: int | None = None,
+    ) -> None:
+        url = f"{self._client.base_url}/{method}"
+        http_client = await self._client._get_client()
+        data: dict[str, str] = {"chat_id": str(chat_id)}
+        if caption:
+            data["caption"] = caption
+        if reply_to_message_id is not None and self._settings.reply_to_message:
+            data["reply_to_message_id"] = str(reply_to_message_id)
+            data["allow_sending_without_reply"] = "true"
+
+        file_content = await asyncio.to_thread(file_path.read_bytes)
+        file_name = file_path.name
+        mime_type = mimetypes.guess_type(file_name)[0]
+        files = {field_name: (file_name, file_content, mime_type)}
+
+        response = await http_client.post(
+            url,
+            data=data,
+            files=files,
+            timeout=_TELEGRAM_FILE_UPLOAD_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+
+    async def _send_attachments(
+        self,
+        *,
+        chat_id: int,
+        attachments: tuple[OutboundAttachment, ...],
+        reply_to_message_id: int | None = None,
+    ) -> None:
+        for index, attachment in enumerate(attachments):
+            file_path = _resolve_attachment_path(attachment)
+            if not await asyncio.to_thread(file_path.is_file):
+                logger.warning(f"Skipping outbound attachment — file not found: {file_path}")
+                continue
+
+            method, field_name = _resolve_send_method(attachment)
+            try:
+                await self._send_file_multipart(
+                    method=method,
+                    chat_id=chat_id,
+                    field_name=field_name,
+                    file_path=file_path,
+                    caption=attachment.display_name,
+                    reply_to_message_id=reply_to_message_id if index == 0 else None,
+                )
+                logger.info(f"Sent Telegram attachment chat_id={chat_id} method={method} path={file_path.name}")
+            except Exception as exc:
+                self._log_telegram_failure(
+                    action="attachment send failed",
+                    exc=exc,
+                    chat_id=chat_id,
+                    suppression_key=f"send_attachment:{chat_id}:{file_path.name}",
+                )
 
     async def _delete_webhook(self) -> None:
         await self._client.call_async(
