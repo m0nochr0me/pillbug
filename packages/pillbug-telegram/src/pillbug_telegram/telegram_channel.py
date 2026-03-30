@@ -34,6 +34,8 @@ _TELEGRAM_FILE_UPLOAD_TIMEOUT_SECONDS = 120.0
 _MAX_TYPING_ACTIONS = 10
 _BOT_COMMANDS = (
     {"command": "start", "description": "Check that the bot is ready"},
+    {"command": "summarize", "description": "Summarize the conversation history"},
+    {"command": "usage", "description": "Show usage statistics for the current conversation"},
     {"command": "clear", "description": "Clear the current session"},
 )
 _ATTACHMENT_LABELS = {
