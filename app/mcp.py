@@ -5,6 +5,7 @@ Composition MCP Server
 import asyncio
 import hashlib
 import json
+import mimetypes
 import os
 import re
 import secrets
@@ -786,8 +787,6 @@ async def send_file(
     resolved_path = _resolve_workspace_path(path)
     if not resolved_path.is_file():
         raise ValueError(f"File not found in workspace: {_display_path(resolved_path)}")
-
-    import mimetypes
 
     mime_type = mimetypes.guess_type(resolved_path.name)[0]
     attachment = OutboundAttachment(
