@@ -158,6 +158,7 @@ class AgentTaskScheduler:
         self._tasks: dict[str, AgentTaskDefinition] = {}
         self._lock = asyncio.Lock()
         self._startup_lock = asyncio.Lock()
+        self._running_tasks: set[str] = set()
         self._docket: Docket | None = None
         self._worker: PillbugWorker | None = None
         self._worker_task: asyncio.Task[None] | None = None
@@ -490,14 +491,22 @@ class AgentTaskScheduler:
             behavior.cancel()
             return {"action": "cancel", "message": "Task definition is stale or disabled."}
 
-        return await self._run_task_definition(
-            definition=definition,
-            revision=revision,
-            behavior=behavior,
-            allow_disabled=False,
-            apply_schedule_effects=True,
-            trigger="scheduler",
-        )
+        if task_id in self._running_tasks:
+            logger.warning(f"Skipping concurrent execution of task {task_id} (already running)")
+            return {"action": "continue", "message": "Skipped: task is already running."}
+
+        self._running_tasks.add(task_id)
+        try:
+            return await self._run_task_definition(
+                definition=definition,
+                revision=revision,
+                behavior=behavior,
+                allow_disabled=False,
+                apply_schedule_effects=True,
+                trigger="scheduler",
+            )
+        finally:
+            self._running_tasks.discard(task_id)
 
     async def _run_task_definition(
         self,
