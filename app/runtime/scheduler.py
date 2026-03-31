@@ -649,11 +649,42 @@ class AgentTaskScheduler:
             execution.key for execution in snapshot.running
         }
 
+        known_keys = {definition.execution_key for definition in await self._task_snapshots()}
+        await self._cancel_orphaned_executions(active_keys, known_keys)
+
         for definition in await self._task_snapshots():
-            if not definition.enabled or definition.execution_key in active_keys:
+            if not definition.enabled:
                 continue
 
+            if definition.execution_key in active_keys:
+                continue
+
+            execution = await self._docket.get_execution(definition.execution_key)
+            if execution is not None:
+                await execution.sync()
+                state = getattr(execution.state, "value", execution.state)
+                if state not in {"completed", "failed", "cancelled"}:
+                    continue
+
             await self._schedule_task(definition, replace=False)
+
+    async def _cancel_orphaned_executions(self, active_keys: set[str], known_keys: set[str]) -> None:
+        if self._docket is None:
+            return
+
+        orphaned_keys = active_keys - known_keys
+        for key in orphaned_keys:
+            try:
+                await self._docket.cancel(key)
+                logger.info("Cancelled orphaned execution %s (task no longer in store)", key)
+                await runtime_telemetry.record_event(
+                    event_type="scheduler.orphan.cancelled",
+                    source="scheduler",
+                    message="Cancelled orphaned execution missing from task store.",
+                    data={"execution_key": key},
+                )
+            except Exception:
+                logger.warning("Failed to cancel orphaned execution %s", key, exc_info=True)
 
     async def _schedule_task(self, definition: AgentTaskDefinition, *, replace: bool) -> None:
         if self._docket is None:
