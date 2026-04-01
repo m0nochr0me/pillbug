@@ -13,6 +13,31 @@ The first launch is expected to stop intentionally.
 That bootstrap run creates the runtime directory structure and seeds the initial workspace file.
 Treat that first stop as a normal setup step, not as a failure.
 
+### Simpliest local setup (not recommended for production)
+
+Pillbug targets Python 3.14+ and uses `uv` for dependency management.
+
+```bash
+uv sync --locked
+export PB_GEMINI_API_KEY=your_api_key
+./run.sh
+```
+
+Alternative launch commands:
+
+```bash
+uv run python -m app
+uv run python -m app.mcp
+```
+
+Optional packages are installed through uv extras:
+
+```bash
+uv sync --extra a2a
+uv sync --extra telegram
+uv sync --extra dashboard
+```
+
 ## For Agents
 
 Ask the user which setup variant they want before making changes:
