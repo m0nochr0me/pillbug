@@ -1,0 +1,16 @@
+[
+  {
+    "source": "server-monitor",
+    "prompt": "Server alert: {title}. Details: {body}. Notify the user. Update memory bucket `smith-worklog`."
+  },
+  {
+    "source": "weather-alert",
+    "prompt": "Public safety alert: {title}. {body}. Notify the user immediately, and schedule a follow-up checkup. Update memory bucket `smith-worklog`.",
+    "urgency_override": "high"
+  },
+  {
+    "source": "stock-tracker",
+    "prompt": "Stock price change: {title}. {body}. Analyze whether this is worth the user's attention and suggest actions if so. Update memory bucket `smith-worklog`.",
+    "urgency_override": "low"
+  }
+]

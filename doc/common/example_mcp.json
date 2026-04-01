@@ -1,0 +1,13 @@
+{
+    "servers": {
+        "arca_memory": {
+            "url": "http://arca:8201/app/mcp",
+            "type": "http",
+            "headers": {
+                "Authorization": "Bearer arca_secret_token",
+                "X-namespace": "smith_memory"
+            }
+        }
+    },
+    "inputs": []
+}
