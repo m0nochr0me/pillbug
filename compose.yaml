@@ -13,6 +13,9 @@ services:
     hostname: pillbug-a
     env_file:
       - ./deploy/runtime-a.env
+    dns: # Adguard DNS servers
+      - 94.140.14.140
+      - 94.140.15.15
     ports:
       - "8001:8000"
       - "9101:9100"
