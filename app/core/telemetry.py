@@ -44,6 +44,7 @@ class RuntimeTelemetry:
             agent_name=settings.AGENT_NAME,
             timezone=settings.TIMEZONE,
             workspace_root=str(settings.WORKSPACE_ROOT),
+            model=settings.GEMINI_MODEL,
             enabled_channels=settings.enabled_channels(),
         )
         self._events: deque[TelemetryEvent] = deque(maxlen=250)
@@ -187,7 +188,7 @@ class RuntimeTelemetry:
                     "running_executions": 0,
                     "scheduled_executions": 0,
                     "recent_runs": [],
-                },
+                },  # pyright: ignore[reportArgumentType]
                 tasks=[],
             )
 

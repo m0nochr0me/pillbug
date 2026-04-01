@@ -28,6 +28,7 @@ class RuntimeMetadata(BaseModel):
         min_length=1,
         description="Absolute workspace root path enforced by the MCP file tools.",
     )
+    model: str = Field(min_length=1, description="Configured AI model identifier.")
     enabled_channels: tuple[str, ...] = Field(
         default_factory=tuple,
         description="Enabled inbound channels for this runtime instance.",
