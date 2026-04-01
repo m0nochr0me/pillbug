@@ -444,12 +444,12 @@ def _format_sse_event(
     return "\n".join(lines) + "\n\n"
 
 
-@mcp.resource("resource://runtime_info")
-def get_runtime_info() -> str:
+@mcp.tool
+def get_runtime_info() -> dict[str, Any]:
     """
     Provides a runtime info
     """
-    return _build_runtime_metadata().model_dump_json()
+    return _build_runtime_metadata().model_dump(mode="json")
 
 
 @mcp.tool
