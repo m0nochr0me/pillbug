@@ -53,6 +53,8 @@ class Settings(BaseSettings):
 
     CACHE_TTL: int = 7200  # 2 hours
 
+    LOG_INCLUDE_TRACEBACK: bool = False
+
     BASE_DIR: Path = Path.home() / ".pillbug"
 
     LOG_DIR: Path = BASE_DIR / "logs"

@@ -214,7 +214,7 @@ def log_serializer(record: loguru.Record) -> str:
     """
 
     message = record["message"]
-    if exc := record.get("exception"):
+    if settings.LOG_INCLUDE_TRACEBACK and (exc := record.get("exception")):
         message += f" - {exc.type}({exc.value})"
 
     logger_name = str(record["extra"].get("stdlib_logger") or record["name"])
@@ -270,8 +270,8 @@ if settings.LOG_DIR:
         rotation="50 MB",
         compression="zip",
         level="DEBUG" if settings.DEBUG else "INFO",
-        backtrace=True,
-        diagnose=True,
+        backtrace=settings.LOG_INCLUDE_TRACEBACK,
+        diagnose=settings.LOG_INCLUDE_TRACEBACK,
     )
 
 if "cli" not in settings.enabled_channels():
@@ -279,6 +279,8 @@ if "cli" not in settings.enabled_channels():
         sys.stderr,
         format="{extra[serialized]}",
         level="DEBUG" if settings.DEBUG else "INFO",
+        backtrace=settings.LOG_INCLUDE_TRACEBACK,
+        diagnose=settings.LOG_INCLUDE_TRACEBACK,
     )
 
 configure_standard_logging()
