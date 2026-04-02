@@ -1116,6 +1116,7 @@ async def manage_agent_task(
     delay_seconds: int | None = None,
     enabled: bool | None = None,
     repeat: bool | None = None,
+    clean_session: bool | None = None,
 ) -> dict[str, Any]:
     """
     Creates, lists, reads, updates, and deletes scheduled background AI tasks.
@@ -1125,6 +1126,7 @@ async def manage_agent_task(
     Supported schedule_type values are cron and delayed.
     Cron tasks use cron_expression.
     Delayed tasks use delay_seconds. They are one-shot by default and only repeat when repeat=true is explicitly set.
+    Tasks run in a clean session by default (no history from previous runs). Set clean_session=false to preserve session history across runs.
     """
 
     normalized_action = action.strip().lower()
@@ -1154,6 +1156,7 @@ async def manage_agent_task(
             timezone_name=settings.TIMEZONE,
             enabled=enabled if enabled is not None else True,
             repeat=repeat if repeat is not None else False,
+            clean_session=clean_session if clean_session is not None else True,
         )
 
     if normalized_action == "update":
@@ -1170,6 +1173,7 @@ async def manage_agent_task(
             timezone_name=settings.TIMEZONE,
             enabled=enabled,
             repeat=repeat,
+            clean_session=clean_session,
         )
 
     if normalized_action == "delete":

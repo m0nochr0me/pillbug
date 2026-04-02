@@ -337,6 +337,7 @@ class AgentTaskScheduler:
         timezone_name: str | None = None,
         enabled: bool = True,
         repeat: bool = False,
+        clean_session: bool = True,
     ) -> dict[str, Any]:
         await self.ensure_started()
 
@@ -351,6 +352,7 @@ class AgentTaskScheduler:
                 repeat=repeat,
             ),
             enabled=enabled,
+            clean_session=clean_session,
         )
 
         async with self._lock:
@@ -384,6 +386,7 @@ class AgentTaskScheduler:
         timezone_name: str | None = None,
         enabled: bool | None = None,
         repeat: bool | None = None,
+        clean_session: bool | None = None,
     ) -> dict[str, Any]:
         await self.ensure_started()
 
@@ -401,6 +404,10 @@ class AgentTaskScheduler:
 
             if prompt is not None and prompt.strip() != updated.prompt:
                 updated.prompt = prompt.strip()
+                changed = True
+
+            if clean_session is not None and clean_session != updated.clean_session:
+                updated.clean_session = clean_session
                 changed = True
 
             if (
@@ -543,7 +550,10 @@ class AgentTaskScheduler:
         )
 
         try:
-            session = await self._chat_service.restore_session(definition.resolved_session_id)
+            if definition.clean_session:
+                session = await self._chat_service.reset_session(definition.resolved_session_id)
+            else:
+                session = await self._chat_service.restore_session(definition.resolved_session_id)
             response = await session.send_message(self._build_model_input(definition))
             raw_response = response.text or ""
             action, parsed_message = self._parse_task_response(raw_response, definition.schedule.kind)

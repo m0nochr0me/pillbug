@@ -55,6 +55,7 @@ class AgentTaskDefinition(BaseModel):
     enabled: bool = True
     revision: int = Field(default=1, ge=1)
     session_id: str | None = None
+    clean_session: bool = True
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
     last_run: AgentTaskRunRecord | None = None
