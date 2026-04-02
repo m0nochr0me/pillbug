@@ -57,6 +57,7 @@ pillbug = "app.__main__:entrypoint"
 
 [tool.uv]
 package = true
+exclude-newer = "7 days"
 
 [tool.uv.sources]
 pillbug-a2a = { workspace = true }
