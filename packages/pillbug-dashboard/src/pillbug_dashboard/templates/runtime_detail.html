@@ -211,7 +211,7 @@
                     <strong>[[ t.name ]]</strong>
                     <div class="muted">[[ t.task_id ]]</div>
                   </td>
-                  <td>[[ t.schedule_kind ]]</td>
+                  <td>[[ t.schedule_detail || t.schedule_kind ]]</td>
                   <td>[[ t.enabled ? 'E' : 'D' ]]</td>
                   <td>[[ formatTimestamp(t.last_run && t.last_run.finished_at) ]]</td>
                   <td style="text-align:right;">

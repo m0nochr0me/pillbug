@@ -1,0 +1,1 @@
+Return a JSON object with keys action and message. This is a repeat-enabled delayed task. Use action=continue only when it should schedule itself again after the same delay; otherwise use action=cancel.

@@ -836,22 +836,18 @@ class AgentTaskScheduler:
             return schedule.timezone
         return None
 
+    def _response_contract_prompt(self, schedule: TaskSchedule) -> str:
+        if isinstance(schedule, CronTaskSchedule):
+            return "task_contract_cron.prompt.md"
+        if isinstance(schedule, DelayedTaskSchedule) and schedule.repeat:
+            return "task_contract_repeat.prompt.md"
+        return "task_contract_oneshot.prompt.md"
+
     def _build_model_input(self, definition: AgentTaskDefinition) -> str:
         schedule_description = self._schedule_description(definition.schedule)
-        if definition.schedule.kind == "cron":
-            response_contract = (
-                "Return a JSON object with keys action and message. The action must be continue for cron tasks."
-            )
-        elif self._repeat_enabled(definition.schedule):
-            response_contract = (
-                "Return a JSON object with keys action and message. "
-                "This is a repeat-enabled delayed task. Use action=continue only when it should schedule itself again after the same delay; otherwise use action=cancel."
-            )
-        else:
-            response_contract = (
-                "Return a JSON object with keys action and message. "
-                "This is a one-shot delayed task. It will be cancelled after this execution, so action should be cancel."
-            )
+        response_contract = self._chat_service.render_prompt_text(
+            self._response_contract_prompt(definition.schedule),
+        )
 
         return self._chat_service.render_prompt_text(
             "task.prompt.md",
@@ -1001,6 +997,7 @@ class AgentTaskScheduler:
                     task_id=definition.task_id,
                     name=definition.name,
                     schedule_kind=definition.schedule.kind,
+                    schedule_detail=self._schedule_description(definition.schedule),
                     enabled=definition.enabled,
                     revision=definition.revision,
                     created_at=definition.created_at,
