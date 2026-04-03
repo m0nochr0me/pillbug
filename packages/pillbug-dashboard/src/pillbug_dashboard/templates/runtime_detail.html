@@ -244,7 +244,7 @@
           </div>
 
           <div v-if="events.length" class="timeline">
-            <div v-for="ev in events" :key="ev.event_id" class="timeline-entry" :class="ev.level || 'info'">
+            <div v-for="ev in events.slice(0, 25)" :key="ev.event_id" class="timeline-entry" :class="ev.level || 'info'">
               <div class="timeline-meta">
                 <strong>[[ ev.event_type ]]</strong>
                 <span>[[ formatTimestamp(ev.occurred_at) ]]</span>
