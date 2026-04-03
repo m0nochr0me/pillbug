@@ -24,6 +24,7 @@ from app.core.log import logger
 from app.runtime.channels import get_available_channels_context, get_channel_plugin
 from app.runtime.session_binding import bind_mcp_session_to_runtime_session, consume_pending_outbound_injections
 from app.schema.ai import ChatResponse, ChatSessionSnapshot, ChatSessionUsageTotals, InboundAttachment, Skill
+from app.schema.messages import extract_a2a_origin_route
 from app.util.base_dir import get_module_root
 from app.util.skills import discover_workspace_skills
 from app.util.workspace import resolve_path_within_root
@@ -45,15 +46,14 @@ _ATTACHMENT_MIME_TYPE_OVERRIDES = {
     ".pdf": "application/pdf",
     ".txt": "text/plain",
 }
-_EMPTY_MODEL_RESPONSE_FALLBACK = "I could not produce a text response right now. Please try again."
-_EMPTY_RESPONSE_NUDGE_TEXT = "Please continue"
+_COMPRESSED_SESSION_HISTORY_PROMPT_NAME = "compressed_session_history.prompt.md"
+_DIRECT_REPLY_CHANNEL_MEMO_PROMPT_NAME = "direct_reply_channel_memo.prompt.md"
+_EMPTY_MODEL_RESPONSE_FALLBACK_PROMPT_NAME = "empty_model_response_fallback.prompt.md"
+_EMPTY_RESPONSE_NUDGE_PROMPT_NAME = "empty_response_nudge.prompt.md"
 _MODEL_INPUT_PROMPT_NAME = "model_input.prompt.md"
 _SKILLS_PROMPT_NAME = "skills.prompt.md"
 _CHANNEL_MEMO_PROMPTS = {"a2a": "a2a_channel_memo.prompt.md", "telegram": "telegram_channel_memo.prompt.md"}
-_COMPRESSED_SESSION_HISTORY_PREFIX = (
-    "Compressed session summary. This replaces the earlier message history. "
-    "Use it as background context for future turns:\n\n"
-)
+_DIRECT_REPLY_CHANNEL_EXCLUSIONS = frozenset({"a2a", "trigger"})
 
 
 def _extract_injectable_content(history: list[types.Content]) -> types.Content | None:
@@ -152,6 +152,41 @@ def _extract_inbound_attachments(metadata: dict[str, Any]) -> list[InboundAttach
     return attachments
 
 
+def _normalize_channel_name(channel_name: str | None) -> str | None:
+    if channel_name is None:
+        return None
+
+    normalized_channel_name = channel_name.strip().lower()
+    return normalized_channel_name or None
+
+
+def _filter_base_context_channels(channels: list[str]) -> list[str]:
+    return [channel for channel in channels if channel.partition(":")[0].strip().lower() != "trigger"]
+
+
+def _resolve_user_origin_channel(
+    channel_name: str | None,
+    message_metadata: list[dict[str, Any]] | None,
+) -> str | None:
+    if message_metadata:
+        for metadata in reversed(message_metadata):
+            if origin_route := extract_a2a_origin_route(metadata):
+                return _normalize_channel_name(origin_route[0])
+
+    return _normalize_channel_name(channel_name)
+
+
+def _resolve_direct_reply_channel_name(
+    channel_name: str | None,
+    message_metadata: list[dict[str, Any]] | None,
+) -> str | None:
+    origin_channel_name = _resolve_user_origin_channel(channel_name, message_metadata)
+    if origin_channel_name is None or origin_channel_name in _DIRECT_REPLY_CHANNEL_EXCLUSIONS:
+        return None
+
+    return origin_channel_name
+
+
 class GeminiChatService:
     def __init__(self) -> None:
         self.ai_client = genai.Client(api_key=settings.GEMINI_API_KEY)
@@ -246,19 +281,40 @@ class GeminiChatService:
         template_name = prompt_path.relative_to(self._module_root).as_posix()
         return render_template(template_name, **context)
 
-    async def get_base_context(self) -> str:
-        now = datetime.now(ZoneInfo(settings.TIMEZONE))
+    def render_required_prompt_text(self, prompt_name: str, **context: Any) -> str:
+        rendered = self.render_prompt_text(prompt_name, **context).strip()
+        if not rendered:
+            raise ValueError(f"Prompt rendered blank text: {prompt_name}")
 
-        return "\n".join(
-            (
-                "---",
-                f"datetime: {now:%Y-%b-%d %H:%M:%S}",
-                f"timezone: {settings.TIMEZONE}",
-                f"workspace: {settings.WORKSPACE_ROOT}",
-                f"available_channels: {', '.join(await get_available_channels_context())}",
-                "---\n",
-            ),
-        )
+        return rendered
+
+    async def get_base_context(
+        self,
+        *,
+        channel_name: str | None = None,
+        message_metadata: list[dict[str, Any]] | None = None,
+    ) -> str:
+        now = datetime.now(ZoneInfo(settings.TIMEZONE))
+        available_channels = _filter_base_context_channels(await get_available_channels_context())
+        base_context_lines = [
+            "---",
+            f"datetime: {now:%Y-%b-%d %H:%M:%S}",
+            f"timezone: {settings.TIMEZONE}",
+            f"workspace: {settings.WORKSPACE_ROOT}",
+            f"available_channels: {', '.join(available_channels)}",
+        ]
+
+        if direct_reply_channel_name := _resolve_direct_reply_channel_name(channel_name, message_metadata):
+            direct_reply_instruction = self.render_prompt_text(
+                _DIRECT_REPLY_CHANNEL_MEMO_PROMPT_NAME,
+                channel_name=direct_reply_channel_name,
+            ).strip()
+            if direct_reply_instruction:
+                base_context_lines.append(direct_reply_instruction)
+
+        base_context_lines.append("---\n")
+
+        return "\n".join(base_context_lines)
 
     def _render_channel_instruction_memo(self, channel_name: str, context: dict[str, Any]) -> str | None:
         prompt_name = _CHANNEL_MEMO_PROMPTS.get(channel_name)
@@ -300,7 +356,12 @@ class GeminiChatService:
         """
         return await asyncio.to_thread(discover_workspace_skills, settings.WORKSPACE_ROOT)
 
-    async def build_system_instruction(self) -> str | None:
+    async def build_system_instruction(
+        self,
+        *,
+        channel_name: str | None = None,
+        message_metadata: list[dict[str, Any]] | None = None,
+    ) -> str | None:
         async with aiofile.AIOFile(settings.WORKSPACE_ROOT / "AGENTS.md", "r", encoding="utf-8") as agents_file:
             agents_md = str(await agents_file.read())
             skills_prompt: str | None = None
@@ -312,7 +373,10 @@ class GeminiChatService:
             channel_memos = await self.get_channel_instruction_memos()
             return self.render_prompt_text(
                 _MODEL_INPUT_PROMPT_NAME,
-                base_context=await self.get_base_context(),
+                base_context=await self.get_base_context(
+                    channel_name=channel_name,
+                    message_metadata=message_metadata,
+                ),
                 agents_md=agents_md,
                 channel_memos=tuple(channel_memos),
                 skills=skills_prompt.strip() if skills_prompt else None,
@@ -347,9 +411,13 @@ class GeminiChatSession:
         self,
         message: str,
         message_metadata: list[dict[str, Any]] | None = None,
+        channel_name: str | None = None,
     ) -> ChatResponse:
         message_parts = await self._build_message_parts(message, message_metadata)
-        system_instruction = await self._service.build_system_instruction()
+        system_instruction = await self._service.build_system_instruction(
+            channel_name=channel_name,
+            message_metadata=message_metadata,
+        )
         self._latest_system_instruction = system_instruction
 
         async with self._mcp_client as mcp_client:
@@ -393,7 +461,10 @@ class GeminiChatSession:
             logger.info(
                 f"Gemini returned no text for session={self._session_id}; sending nudge {nudge_attempt}/{max_nudges}"
             )
-            system_instruction = await self._service.build_system_instruction()
+            system_instruction = await self._service.build_system_instruction(
+                channel_name=channel_name,
+                message_metadata=message_metadata,
+            )
             self._latest_system_instruction = system_instruction
 
             async with self._mcp_client as mcp_client:
@@ -402,7 +473,7 @@ class GeminiChatSession:
                     bind_mcp_session_to_runtime_session(mcp_session_id, self._session_id)
 
                 nudge_response = await self._chat.send_message(
-                    message=_EMPTY_RESPONSE_NUDGE_TEXT,
+                    message=self._service.render_required_prompt_text(_EMPTY_RESPONSE_NUDGE_PROMPT_NAME),
                     config=types.GenerateContentConfig(
                         system_instruction=system_instruction,
                         temperature=settings.GEMINI_TEMPERATURE,
@@ -439,7 +510,7 @@ class GeminiChatSession:
         )
 
         return ChatResponse(
-            text=_EMPTY_MODEL_RESPONSE_FALLBACK,
+            text=self._service.render_required_prompt_text(_EMPTY_MODEL_RESPONSE_FALLBACK_PROMPT_NAME),
             usage_metadata=response.usage_metadata,
         )
 
@@ -576,7 +647,14 @@ class GeminiChatSession:
         compressed_history = [
             types.Content(
                 role="user",
-                parts=[types.Part.from_text(text=f"{_COMPRESSED_SESSION_HISTORY_PREFIX}{normalized_summary}")],
+                parts=[
+                    types.Part.from_text(
+                        text=self._service.render_required_prompt_text(
+                            _COMPRESSED_SESSION_HISTORY_PROMPT_NAME,
+                            summary_text=normalized_summary,
+                        )
+                    )
+                ],
             )
         ]
         self._chat = self._service.ai_client.aio.chats.create(

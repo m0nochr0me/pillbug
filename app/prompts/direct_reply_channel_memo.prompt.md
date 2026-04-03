@@ -1,0 +1,1 @@
+response_delivery: This turn originated from a user-facing channel ({{ channel_name }}). Respond directly in the current session and do not call the send_message tool unless the user explicitly asks for a separate outbound message.

@@ -451,6 +451,7 @@ class ApplicationLoop:
                 response = await session.send_message(
                     model_input,
                     message_metadata=message_metadata,
+                    channel_name=batch.channel_name,
                 )
         except Exception:
             logger.exception(f"Failed to process inbound message for session={batch.session_key}")
