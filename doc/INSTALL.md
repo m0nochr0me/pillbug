@@ -162,10 +162,10 @@ docker build \
 docker run --rm -it \
   --name pillbug-bootstrap \
   --env-file ./.runtime.env \
-  -e PB_BASE_DIR=/var/lib/pillbug \
+  -e PB_BASE_DIR=/home/pillbug \
   -p 8000:8000 \
   -p 9100:9100 \
-  -v "$HOME/.pillbug/local:/var/lib/pillbug" \
+  -v "$HOME/.pillbug/local:/home/pillbug" \
   pillbug-local:latest
 ```
 
@@ -214,10 +214,10 @@ If you are not using Arca-Memory yet, either omit `mcp.json` or reduce it to an 
 docker run --rm -it \
   --name pillbug-local \
   --env-file ./.runtime.env \
-  -e PB_BASE_DIR=/var/lib/pillbug \
+  -e PB_BASE_DIR=/home/pillbug \
   -p 8000:8000 \
   -p 9100:9100 \
-  -v "$HOME/.pillbug/local:/var/lib/pillbug" \
+  -v "$HOME/.pillbug/local:/home/pillbug" \
   pillbug-local:latest
 ```
 

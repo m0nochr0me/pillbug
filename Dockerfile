@@ -23,8 +23,7 @@ RUN --mount=type=cache,target=/tmp/uv-cache \
 
 RUN groupadd --gid 1000 pillbug \
     && useradd --uid 1000 --gid 1000 --create-home --home-dir /home/pillbug --shell /bin/bash pillbug \
-    && install -d --owner 1000 --group 1000 /var/lib/pillbug \
-    && install -d --owner 1000 --group 1000 /var/lib/pillbug-dashboard
+    && install -d --owner 1000 --group 1000 /home/pillbug
 
 ADD . .
 

@@ -22,12 +22,16 @@ ensure_dir_ownership() {
 }
 
 if [[ "$(id -u)" == "0" ]]; then
-    ensure_dir_ownership "/var/lib/pillbug"
-    ensure_dir_ownership "/var/lib/pillbug-dashboard"
+    ensure_dir_ownership "/home/pillbug"
     ensure_dir_ownership "${PB_BASE_DIR:-}"
     ensure_dir_ownership "${PB_DASHBOARD_BASE_DIR:-}"
 
-    exec su -s /bin/bash pillbug -c 'exec "$0" "$@"' -- "$@"
+    exec setpriv \
+        --reuid="$runtime_uid" \
+        --regid="$runtime_gid" \
+        --init-groups \
+        --no-new-privs \
+        "$@"
 fi
 
 exec "$@"

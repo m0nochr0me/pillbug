@@ -25,7 +25,7 @@ services:
     volumes:
       - type: bind
         source: /opt/ext/pillbug/runtime-a
-        target: /var/lib/pillbug
+        target: /home/pillbug
 
   pillbug-b:
     build:
@@ -48,7 +48,7 @@ services:
     volumes:
       - type: bind
         source: /opt/ext/pillbug/runtime-b
-        target: /var/lib/pillbug
+        target: /home/pillbug
 
   pillbug-c:
     build:
@@ -71,7 +71,7 @@ services:
     volumes:
       - type: bind
         source: /opt/ext/pillbug/runtime-c
-        target: /var/lib/pillbug
+        target: /home/pillbug
 
   pillbug-alerts:
     build:
@@ -116,7 +116,7 @@ services:
     volumes:
       - type: bind
         source: /opt/ext/pillbug/dashboard
-        target: /var/lib/pillbug-dashboard
+        target: /home/pillbug
 
 volumes:
   pillbug-alerts-state:

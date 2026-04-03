@@ -25,7 +25,7 @@ services:
     volumes:
       - type: bind
         source: ~/.pillbug/runtime-a
-        target: /var/lib/pillbug
+        target: /home/pillbug
 
   pillbug-b:
     build:
@@ -48,7 +48,7 @@ services:
     volumes:
       - type: bind
         source: ~/.pillbug/runtime-b
-        target: /var/lib/pillbug
+        target: /home/pillbug
 
   pillbug-alerts:
     build:
@@ -92,7 +92,7 @@ services:
     volumes:
       - type: bind
         source: ~/.pillbug/dashboard
-        target: /var/lib/pillbug-dashboard
+        target: /home/pillbug
 
   arca-memory:
     image: arca-memory:latest
