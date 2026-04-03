@@ -1,11 +1,6 @@
 ---
 name: financial-assistant
-description: >
-  Track personal expenses by recording purchases into a CSV ledger and providing
-  spending insights. Normalizes all amounts to USD via live exchange rates (defaults
-  to PHP when no currency is stated). Use when the user mentions: recording a purchase,
-  logging an expense, processing a receipt, checking how much they've spent, asking
-  for spending summaries or breakdowns, or any personal finance tracking task.
+description: Track personal expenses by recording purchases into a CSV ledger and providing spending insights. Normalizes all amounts to USD via live exchange rates (defaults to PHP when no currency is stated). Use when the user mentions: recording a purchase, logging an expense, processing a receipt, checking how much they've spent, asking for spending summaries or breakdowns, or any personal finance tracking task.
 ---
 
 # Financial Assistant

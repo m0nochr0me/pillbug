@@ -1,10 +1,6 @@
 ---
 name: feed-reader
-description: >
-  RSS/Atom feed reader for subscribing to feeds, checking for new posts, and saving post content
-  to text files. Use when the agent needs to: (1) subscribe to an RSS or Atom feed URL,
-  (2) list new/updated post titles from subscribed feeds, (3) fetch and save full post text
-  to disk, or (4) manage feed subscriptions by category.
+description: RSS/Atom feed reader for subscribing to feeds, checking for new posts, and saving post content to text files. Use when the agent needs to: (1) subscribe to an RSS or Atom feed URL, (2) list new/updated post titles from subscribed feeds, (3) fetch and save full post text to disk, or (4) manage feed subscriptions by category.
 ---
 
 # Feed Reader
