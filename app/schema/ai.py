@@ -86,6 +86,13 @@ class ChatSessionSnapshot(BaseModel):
         default_factory=ChatSessionUsageTotals,
         description="Accumulated token usage totals for the session.",
     )
+    system_instruction: str | None = Field(
+        default=None,
+        description=(
+            "Final rendered system instruction captured when the session snapshot was written. "
+            "Informational only and never used to restore session state."
+        ),
+    )
 
 
 class Skill(BaseModel):

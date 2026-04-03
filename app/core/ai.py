@@ -4,8 +4,7 @@ AI client
 
 import asyncio
 import mimetypes
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
@@ -194,9 +193,15 @@ class GeminiChatService:
         session_id: str,
         history: list[types.Content],
         usage_totals: ChatSessionUsageTotals,
+        system_instruction: str | None = None,
     ) -> None:
         self._sessions_dir.mkdir(parents=True, exist_ok=True)
-        snapshot = ChatSessionSnapshot(session_id=session_id, history=history, usage_totals=usage_totals)
+        snapshot = ChatSessionSnapshot(
+            session_id=session_id,
+            history=history,
+            usage_totals=usage_totals,
+            system_instruction=system_instruction,
+        )
         session_path = self._get_session_path(session_id)
 
         async with aiofile.AIOFile(session_path, "w", encoding="utf-8") as session_file:
@@ -295,8 +300,7 @@ class GeminiChatService:
         """
         return await asyncio.to_thread(discover_workspace_skills, settings.WORKSPACE_ROOT)
 
-    @asynccontextmanager
-    async def get_system_instruction(self) -> AsyncIterator[str | None]:
+    async def build_system_instruction(self) -> str | None:
         async with aiofile.AIOFile(settings.WORKSPACE_ROOT / "AGENTS.md", "r", encoding="utf-8") as agents_file:
             agents_md = str(await agents_file.read())
             skills_prompt: str | None = None
@@ -306,16 +310,13 @@ class GeminiChatService:
                     skills=skills,
                 )
             channel_memos = await self.get_channel_instruction_memos()
-            yield self.render_prompt_text(
+            return self.render_prompt_text(
                 _MODEL_INPUT_PROMPT_NAME,
                 base_context=await self.get_base_context(),
                 agents_md=agents_md,
                 channel_memos=tuple(channel_memos),
                 skills=skills_prompt.strip() if skills_prompt else None,
             )
-            return
-
-        yield None
 
 
 class GeminiChatSession:
@@ -331,6 +332,7 @@ class GeminiChatSession:
         self._usage_totals = (
             usage_totals.model_copy(deep=True) if usage_totals is not None else ChatSessionUsageTotals()
         )
+        self._latest_system_instruction: str | None = None
         self._mcp_client = Client(
             StreamableHttpTransport(
                 f"http://{settings.MCP_HOST}:{settings.MCP_PORT}/mcp",
@@ -347,8 +349,10 @@ class GeminiChatSession:
         message_metadata: list[dict[str, Any]] | None = None,
     ) -> ChatResponse:
         message_parts = await self._build_message_parts(message, message_metadata)
+        system_instruction = await self._service.build_system_instruction()
+        self._latest_system_instruction = system_instruction
 
-        async with self._mcp_client as mcp_client, self._service.get_system_instruction() as system_instruction:
+        async with self._mcp_client as mcp_client:
             mcp_session_id = mcp_client.transport.get_session_id()
             if mcp_session_id is not None:
                 bind_mcp_session_to_runtime_session(mcp_session_id, self._session_id)
@@ -389,8 +393,10 @@ class GeminiChatSession:
             logger.info(
                 f"Gemini returned no text for session={self._session_id}; sending nudge {nudge_attempt}/{max_nudges}"
             )
+            system_instruction = await self._service.build_system_instruction()
+            self._latest_system_instruction = system_instruction
 
-            async with self._mcp_client as mcp_client, self._service.get_system_instruction() as system_instruction:
+            async with self._mcp_client as mcp_client:
                 mcp_session_id = mcp_client.transport.get_session_id()
                 if mcp_session_id is not None:
                     bind_mcp_session_to_runtime_session(mcp_session_id, self._session_id)
@@ -530,6 +536,7 @@ class GeminiChatSession:
                 self._session_id,
                 self._get_curated_history(),
                 self._usage_totals,
+                system_instruction=self._latest_system_instruction,
             )
         except Exception:
             logger.exception(f"Failed to persist session history for {self._session_id}")
