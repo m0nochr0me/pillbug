@@ -115,20 +115,12 @@ class PillbugWorker(Worker):
 
                     due_work += 1
                     logger.debug(
-                        "Moved due task %s to stream as %s",
-                        task_key,
-                        message_id.decode() if isinstance(message_id, bytes) else message_id,
-                        extra=log_context,
+                        f"Moved due task {task_key} to stream as {message_id.decode() if isinstance(message_id, bytes) else message_id}",
                     )
 
                 if due_work > 0:
                     logger.debug(
-                        "Moved %d/%d due tasks from %s to %s",
-                        due_work,
-                        total_work,
-                        self.docket.queue_key,
-                        self.docket.stream_key,
-                        extra=log_context,
+                        f"Moved {due_work}/{total_work} due tasks from {self.docket.queue_key} to {self.docket.stream_key}",
                     )
             except Exception:  # pragma: no cover
                 logger.exception(
@@ -695,7 +687,7 @@ class AgentTaskScheduler:
         for key in orphaned_keys:
             try:
                 await self._docket.cancel(key)
-                logger.info("Cancelled orphaned execution %s (task no longer in store)", key)
+                logger.info(f"Cancelled orphaned execution {key} (task no longer in store)")
                 await runtime_telemetry.record_event(
                     event_type="scheduler.orphan.cancelled",
                     source="scheduler",
@@ -703,7 +695,7 @@ class AgentTaskScheduler:
                     data={"execution_key": key},
                 )
             except Exception:
-                logger.warning("Failed to cancel orphaned execution %s", key, exc_info=True)
+                logger.warning(f"Failed to cancel orphaned execution {key}")
 
     async def _schedule_task(self, definition: AgentTaskDefinition, *, replace: bool) -> None:
         if self._docket is None:
