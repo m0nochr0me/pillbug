@@ -3,9 +3,12 @@
 from copy import deepcopy
 from typing import Final
 
+from app.schema.todo import TodoListSnapshot
+
 _SESSION_KEY_SEPARATOR: Final[str] = ":"
 _mcp_runtime_sessions: dict[str, str] = {}
 _runtime_session_origin_metadata: dict[str, dict[str, object]] = {}
+_runtime_session_todo_snapshots: dict[str, TodoListSnapshot] = {}
 _pending_outbound_injections: dict[str, list[str]] = {}
 
 
@@ -48,6 +51,30 @@ def get_runtime_session_origin_metadata(runtime_session_key: str) -> dict[str, o
         return None
 
     return deepcopy(metadata)
+
+
+def bind_runtime_session_todo_snapshot(runtime_session_key: str, snapshot: TodoListSnapshot | None) -> None:
+    normalized_runtime_session_key = runtime_session_key.strip()
+    if not normalized_runtime_session_key:
+        return
+
+    if snapshot is None or not snapshot.items:
+        _runtime_session_todo_snapshots.pop(normalized_runtime_session_key, None)
+        return
+
+    _runtime_session_todo_snapshots[normalized_runtime_session_key] = snapshot.model_copy(deep=True)
+
+
+def get_runtime_session_todo_snapshot(runtime_session_key: str) -> TodoListSnapshot | None:
+    normalized_runtime_session_key = runtime_session_key.strip()
+    if not normalized_runtime_session_key:
+        return None
+
+    snapshot = _runtime_session_todo_snapshots.get(normalized_runtime_session_key)
+    if snapshot is None:
+        return None
+
+    return snapshot.model_copy(deep=True)
 
 
 def record_pending_outbound_injection(source_session_key: str, target_session_key: str) -> None:

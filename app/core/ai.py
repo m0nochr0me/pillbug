@@ -22,9 +22,15 @@ from app.core.config import settings
 from app.core.jinja import render_template
 from app.core.log import logger
 from app.runtime.channels import get_available_channels_context, get_channel_plugin
-from app.runtime.session_binding import bind_mcp_session_to_runtime_session, consume_pending_outbound_injections
+from app.runtime.session_binding import (
+    bind_mcp_session_to_runtime_session,
+    bind_runtime_session_todo_snapshot,
+    consume_pending_outbound_injections,
+    get_runtime_session_todo_snapshot,
+)
 from app.schema.ai import ChatResponse, ChatSessionSnapshot, ChatSessionUsageTotals, InboundAttachment, Skill
 from app.schema.messages import extract_a2a_origin_route
+from app.schema.todo import TodoListSnapshot
 from app.util.base_dir import get_module_root
 from app.util.skills import discover_workspace_skills
 from app.util.workspace import resolve_path_within_root
@@ -54,6 +60,11 @@ _MODEL_INPUT_PROMPT_NAME = "model_input.prompt.md"
 _SKILLS_PROMPT_NAME = "skills.prompt.md"
 _CHANNEL_MEMO_PROMPTS = {"a2a": "a2a_channel_memo.prompt.md", "telegram": "telegram_channel_memo.prompt.md"}
 _DIRECT_REPLY_CHANNEL_EXCLUSIONS = frozenset({"a2a", "trigger"})
+_TODO_STATUS_LABELS = {
+    "not-started": "not started",
+    "in-progress": "in progress",
+    "completed": "completed",
+}
 
 
 def _extract_injectable_content(history: list[types.Content]) -> types.Content | None:
@@ -187,6 +198,24 @@ def _resolve_direct_reply_channel_name(
     return origin_channel_name
 
 
+def _render_todo_list_instruction(todo_snapshot: TodoListSnapshot | None) -> str | None:
+    if todo_snapshot is None or not todo_snapshot.items:
+        return None
+
+    lines = [
+        "Current session todo list:",
+    ]
+
+    if todo_snapshot.explanation:
+        lines.append(f"Plan note: {todo_snapshot.explanation}")
+
+    for item in todo_snapshot.items:
+        lines.append(f"{item.id}. [{_TODO_STATUS_LABELS[item.status]}] {item.title}")
+
+    lines.append("Use manage_todo_list to keep this plan accurate when progress changes.")
+    return "\n".join(lines)
+
+
 class GeminiChatService:
     def __init__(self) -> None:
         self.ai_client = genai.Client(api_key=settings.GEMINI_API_KEY)
@@ -221,6 +250,7 @@ class GeminiChatService:
 
     async def reset_session(self, session_id: str) -> GeminiChatSession:
         await self._delete_session_history(session_id)
+        bind_runtime_session_todo_snapshot(session_id, None)
         return self.create_session(session_id=session_id)
 
     async def save_session_history(
@@ -359,11 +389,15 @@ class GeminiChatService:
     async def build_system_instruction(
         self,
         *,
+        session_id: str | None = None,
         channel_name: str | None = None,
         message_metadata: list[dict[str, Any]] | None = None,
     ) -> str | None:
         async with aiofile.AIOFile(settings.WORKSPACE_ROOT / "AGENTS.md", "r", encoding="utf-8") as agents_file:
             agents_md = str(await agents_file.read())
+            todo_list = _render_todo_list_instruction(
+                get_runtime_session_todo_snapshot(session_id) if session_id is not None else None
+            )
             skills_prompt: str | None = None
             if skills := await self.discover_skills():
                 skills_prompt = self.render_prompt_text(
@@ -379,6 +413,7 @@ class GeminiChatService:
                 ),
                 agents_md=agents_md,
                 channel_memos=tuple(channel_memos),
+                todo_list=todo_list,
                 skills=skills_prompt.strip() if skills_prompt else None,
             )
 
@@ -415,6 +450,7 @@ class GeminiChatSession:
     ) -> ChatResponse:
         message_parts = await self._build_message_parts(message, message_metadata)
         system_instruction = await self._service.build_system_instruction(
+            session_id=self._session_id,
             channel_name=channel_name,
             message_metadata=message_metadata,
         )
@@ -462,6 +498,7 @@ class GeminiChatSession:
                 f"Gemini returned no text for session={self._session_id}; sending nudge {nudge_attempt}/{max_nudges}"
             )
             system_instruction = await self._service.build_system_instruction(
+                session_id=self._session_id,
                 channel_name=channel_name,
                 message_metadata=message_metadata,
             )

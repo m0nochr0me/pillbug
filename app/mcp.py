@@ -33,6 +33,7 @@ from app.middleware.compactor import CompactorMiddleware
 from app.runtime.channels import describe_channel_telemetry, get_channel_plugin, register_channel_conversation
 from app.runtime.scheduler import task_scheduler
 from app.runtime.session_binding import (
+    bind_runtime_session_todo_snapshot,
     get_runtime_session_for_mcp_session,
     get_runtime_session_origin_metadata,
     record_pending_outbound_injection,
@@ -238,9 +239,23 @@ def _assert_not_echoing_a2a_origin(
 async def _get_todo_snapshot(ctx: Context) -> TodoListSnapshot:
     state = await ctx.get_state(_TODO_LIST_STATE_KEY)
     if state is None:
+        _sync_todo_snapshot_to_runtime_session(ctx, None)
         return TodoListSnapshot()
 
-    return TodoListSnapshot.model_validate(state)
+    snapshot = TodoListSnapshot.model_validate(state)
+    _sync_todo_snapshot_to_runtime_session(ctx, snapshot)
+    return snapshot
+
+
+def _sync_todo_snapshot_to_runtime_session(ctx: Context | None, snapshot: TodoListSnapshot | None) -> None:
+    if ctx is None:
+        return
+
+    runtime_session_key = get_runtime_session_for_mcp_session(ctx.session_id)
+    if runtime_session_key is None:
+        return
+
+    bind_runtime_session_todo_snapshot(runtime_session_key, snapshot)
 
 
 def _serialize_todo_snapshot(action: str, snapshot: TodoListSnapshot) -> dict[str, Any]:
@@ -923,6 +938,7 @@ async def manage_todo_list(
 
     if normalized_action == "clear":
         await ctx.delete_state(_TODO_LIST_STATE_KEY)
+        _sync_todo_snapshot_to_runtime_session(ctx, None)
         return _serialize_todo_snapshot("clear", TodoListSnapshot())
 
     if normalized_action == "set":
@@ -931,6 +947,7 @@ async def manage_todo_list(
 
         snapshot = TodoListSnapshot(items=todo_list, explanation=explanation)
         await ctx.set_state(_TODO_LIST_STATE_KEY, snapshot.model_dump(mode="json"))
+        _sync_todo_snapshot_to_runtime_session(ctx, snapshot)
         logger.debug(f"Updated todo list with {len(snapshot.items)} items")
         return _serialize_todo_snapshot("set", snapshot)
 

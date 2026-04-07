@@ -13,6 +13,12 @@
 {% endif %}
 {% endfor %}
 {% endif %}
+{% if todo_list %}
+
+---
+
+{{ todo_list }}
+{% endif %}
 {% if skills %}
 
 ---
