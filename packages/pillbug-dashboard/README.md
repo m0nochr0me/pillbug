@@ -12,7 +12,7 @@ local registry persistence, and browser-side polling or event subscription witho
 - Runtime overview page with health, task, and A2A topology summaries
 - Runtime detail page with session, task, and recent event views
 - Dashboard-side proxy routes for telemetry, public agent-card fetches, narrow control actions, and runtime SSE streams
-- Static asset directories wired for local BeerCSS and Vue files
+- Static asset directories wired for local CSS and Vue files
 
 ## Registry format
 
@@ -49,12 +49,10 @@ The bearer token is optional for public telemetry, but it is required if you wan
 The dashboard now expects local frontend assets here:
 
 - `src/pillbug_dashboard/static/css/beer.min.css`
-- `src/pillbug_dashboard/static/js/vendor/beer.min.js`
-- `src/pillbug_dashboard/static/js/vendor/material-dynamic-colors.min.js`
 - `src/pillbug_dashboard/static/js/vendor/vue.global.js`
 - `src/pillbug_dashboard/static/js/app/`
 
-The base template references the local BeerCSS and Vue vendor files directly, and page-specific scripts can be added through the template `scripts` block later.
+The base template references the local CSS and Vue vendor files directly, and page-specific scripts can be added through the template `scripts` block later.
 
 ## Run
 
