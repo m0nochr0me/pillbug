@@ -289,7 +289,7 @@ hr {
   border: 1px solid var(--border-dim);
   background: var(--surface-dim);
   padding: 11px;
-  transform: translateZ(0);
+  transform: perspective(1px);
 }
 
 .metric strong {
@@ -519,6 +519,7 @@ button,
   padding: 5px 11px;
   text-decoration: none;
   transition: border-color 0.15s;
+  transform: perspective(1px);
 }
 
 button:hover,
@@ -642,7 +643,7 @@ td {
   padding: 8px 11px;
   vertical-align: top;
   border-bottom: 1px solid var(--border-dim);
-  transform: translateZ(0);
+  transform: perspective(1px);
 }
 
 th {
@@ -679,6 +680,7 @@ tbody tr:nth-child(even) {
   background: rgba(18, 27, 33, 0.94);
   border: 1px solid var(--border-dim);
   border-left: 3px solid var(--tertiary);
+  transform: perspective(1px);
 }
 
 .timeline-entry.warning {
