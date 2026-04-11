@@ -48,7 +48,6 @@ The bearer token is optional for public telemetry, but it is required if you wan
 
 The dashboard now expects local frontend assets here:
 
-- `src/pillbug_dashboard/static/css/beer.min.css`
 - `src/pillbug_dashboard/static/js/vendor/vue.global.js`
 - `src/pillbug_dashboard/static/js/app/`
 
