@@ -12,9 +12,13 @@
         <div class="stack gap-1">
           <p class="eyebrow">[[ detail.registration.runtime_id ]]</p>
           <h2>[[ detail.registration.label || detail.registration.runtime_id ]]</h2>
-          <a class="codeish" :href="detail.registration.base_url" target="_blank" rel="noreferrer" style="color:var(--tertiary);">
-            [[ detail.registration.base_url ]]
-          </a>
+          <div class="row wrap gap-1">
+            <a class="codeish" :href="detail.registration.base_url" target="_blank" rel="noreferrer" style="color:var(--tertiary);">
+              [[ detail.registration.base_url ]]
+            </a>
+            <span>STARTED: [[ formatTimestamp(detail.health && detail.health.started_at) ]]</span>
+            <span>LAST: [[ formatTimestamp(detail.health && detail.health.last_activity_at) ]]</span>
+          </div>
         </div>
 
         <div class="metric-strip">
@@ -98,29 +102,6 @@
             </div>
           </div>
 
-          <hr>
-
-          <div class="stack gap-2">
-            <p class="eyebrow">METADATA</p>
-            <div class="grid-2">
-              <div>
-                <span class="muted">RUNTIME ID</span>
-                <strong class="codeish">[[ detail.registration.runtime_id ]]</strong>
-              </div>
-              <div>
-                <span class="muted">AGENT</span>
-                <strong>[[ detail.runtime && detail.runtime.metadata ? (detail.runtime.metadata.agent_name || 'UNCONF') : 'UNKNOWN' ]]</strong>
-              </div>
-              <div>
-                <span class="muted">STARTED</span>
-                <strong>[[ formatTimestamp(detail.health && detail.health.started_at) ]]</strong>
-              </div>
-              <div>
-                <span class="muted">LAST</span>
-                <strong>[[ formatTimestamp(detail.health && detail.health.last_activity_at) ]]</strong>
-              </div>
-            </div>
-          </div>
         </div>
 
         <div class="panel stack gap-3">
