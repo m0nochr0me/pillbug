@@ -410,17 +410,18 @@ class MatrixChannel(BaseChannel):
                 continue
 
             try:
-                file_data = await asyncio.to_thread(file_path.read_bytes)
+                file_size = (await asyncio.to_thread(file_path.stat)).st_size
                 mime_type = (
                     attachment.mime_type or mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
                 )
 
-                upload_response, _maybe_keys = await self._client.upload(
-                    data_provider=file_data,
-                    content_type=mime_type,
-                    filename=file_path.name,
-                    filesize=len(file_data),
-                )
+                with file_path.open("rb") as file_handle:
+                    upload_response, _maybe_keys = await self._client.upload(
+                        data_provider=file_handle,
+                        content_type=mime_type,
+                        filename=file_path.name,
+                        filesize=file_size,
+                    )
 
                 if isinstance(upload_response, UploadError):
                     logger.error(f"Matrix upload failed room_id={room_id}: {upload_response.message}")
@@ -435,7 +436,7 @@ class MatrixChannel(BaseChannel):
                     "url": content_uri,
                     "info": {
                         "mimetype": mime_type,
-                        "size": len(file_data),
+                        "size": file_size,
                     },
                 }
 
