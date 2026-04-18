@@ -79,6 +79,8 @@ class Settings(BaseSettings):
     A2A_PROVIDER_URL: str | None = None
     A2A_DOCUMENTATION_URL: str | None = None
     A2A_ICON_URL: str | None = None
+    A2A_PEER_CARD_CACHE_TTL_SECONDS: float = 300.0
+    A2A_PEER_CARD_FETCH_TIMEOUT_SECONDS: float = 5.0
 
     GEMINI_MODEL: str = "gemini-3.1-pro-preview"
     GEMINI_TEMPERATURE: float = 1.0
@@ -177,6 +179,14 @@ class Settings(BaseSettings):
     def validate_a2a_outbound_timeout_seconds(cls, value: float) -> float:
         if value <= 0:
             raise ValueError("PB_A2A_OUTBOUND_TIMEOUT_SECONDS must be greater than 0")
+
+        return value
+
+    @field_validator("A2A_PEER_CARD_CACHE_TTL_SECONDS", "A2A_PEER_CARD_FETCH_TIMEOUT_SECONDS")
+    @classmethod
+    def validate_a2a_peer_card_timers(cls, value: float, info: ValidationInfo) -> float:
+        if value <= 0:
+            raise ValueError(f"PB_{info.field_name} must be greater than 0")
 
         return value
 

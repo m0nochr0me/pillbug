@@ -9,6 +9,7 @@ import mimetypes
 import os
 import re
 import secrets
+import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path
@@ -916,6 +917,103 @@ async def request_a2a_response(
     }
 
 
+_peer_card_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+async def _fetch_agent_card(base_url: str, timeout_seconds: float) -> dict[str, Any]:
+    url = f"{base_url.rstrip('/')}/.well-known/agent-card.json"
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+    async with aiohttp.ClientSession(timeout=timeout) as session, session.get(url) as response:
+        response.raise_for_status()
+        return await response.json(content_type=None)
+
+
+async def _get_cached_peer_card(
+    runtime_id: str,
+    base_url: str,
+    *,
+    timeout_seconds: float,
+    force_refresh: bool,
+) -> tuple[dict[str, Any] | None, str | None]:
+    now = time.monotonic()
+    cached = _peer_card_cache.get(runtime_id)
+    if not force_refresh and cached is not None:
+        fetched_at, card = cached
+        if now - fetched_at < settings.A2A_PEER_CARD_CACHE_TTL_SECONDS:
+            return card, None
+
+    try:
+        card = await _fetch_agent_card(base_url, timeout_seconds)
+    except (aiohttp.ClientError, TimeoutError, json.JSONDecodeError) as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+
+    _peer_card_cache[runtime_id] = (now, card)
+    return card, None
+
+
+@mcp.tool
+async def list_a2a_peers(
+    fetch_cards: bool = True,
+    force_refresh: bool = False,
+) -> dict[str, Any]:
+    """
+    Lists A2A peer runtimes configured via PB_A2A_PEERS_JSON, optionally fetching each peer's
+    public agent card so you can see which skills it advertises.
+
+    Use this to discover which peer runtime_id to target with send_a2a_message or
+    request_a2a_response, and to verify a peer is reachable before delegating work. Cards are
+    cached for PB_A2A_PEER_CARD_CACHE_TTL_SECONDS; set force_refresh=True to bypass the cache.
+    """
+    channel_plugin = _get_a2a_channel_plugin(create=True)
+    instruction_context = channel_plugin.instruction_context() or {}
+    peers = list(instruction_context.get("peers", ()))
+    timeout_seconds = settings.A2A_PEER_CARD_FETCH_TIMEOUT_SECONDS
+
+    results: list[dict[str, Any]] = []
+    for peer in peers:
+        runtime_id = peer.get("runtime_id")
+        base_url = peer.get("base_url")
+        entry: dict[str, Any] = {
+            "runtime_id": runtime_id,
+            "base_url": base_url,
+            "send_target": peer.get("send_target"),
+            "agent_card_url": peer.get("agent_card_url"),
+        }
+        if fetch_cards and runtime_id and base_url:
+            card, error = await _get_cached_peer_card(
+                runtime_id,
+                base_url,
+                timeout_seconds=timeout_seconds,
+                force_refresh=force_refresh,
+            )
+            if card is not None:
+                entry["card"] = {
+                    "name": card.get("name"),
+                    "description": card.get("description"),
+                    "version": card.get("version"),
+                    "skills": [
+                        {
+                            "id": skill.get("id"),
+                            "name": skill.get("name"),
+                            "description": skill.get("description"),
+                            "tags": skill.get("tags"),
+                        }
+                        for skill in (card.get("skills") or [])
+                    ],
+                }
+                entry["health"] = "ok"
+            else:
+                entry["health"] = "unreachable"
+                entry["error"] = error
+        results.append(entry)
+
+    return {
+        "count": len(results),
+        "peers": results,
+        "cache_ttl_seconds": settings.A2A_PEER_CARD_CACHE_TTL_SECONDS,
+    }
+
+
 @mcp.tool
 async def manage_todo_list(
     action: Literal["get", "set", "clear"] = "get",
@@ -954,14 +1052,34 @@ async def manage_todo_list(
     raise ValueError(f"Unsupported action: {action}")
 
 
+def _build_command_environment(ctx: Context | None) -> dict[str, str]:
+    environment = dict(os.environ)
+    environment["PB_RUNTIME_ID"] = settings.runtime_id
+    environment["PB_WORKSPACE_ROOT"] = str(settings.WORKSPACE_ROOT)
+
+    if ctx is not None:
+        runtime_session_key = get_runtime_session_for_mcp_session(ctx.session_id)
+        if runtime_session_key:
+            environment["PB_SESSION_KEY"] = runtime_session_key
+            environment["PB_SESSION_KEY_SAFE"] = runtime_session_key.replace(":", "__")
+
+    return environment
+
+
 @mcp.tool
 async def execute_command(
     command: str,
     directory: str = ".",
     timeout_seconds: float = settings.MCP_DEFAULT_COMMAND_TIMEOUT_SECONDS,
+    ctx: Context = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     """
     Executes a shell command inside the workspace and returns its captured output.
+
+    The subprocess environment is augmented with PB_RUNTIME_ID, PB_WORKSPACE_ROOT, and, when the
+    caller is bound to a runtime session, PB_SESSION_KEY (channel:conversation:user) and
+    PB_SESSION_KEY_SAFE (filesystem-safe form with ':' replaced by '__'). Helper scripts can
+    read these via os.environ to locate per-session state without re-deriving identity.
     """
 
     if not command.strip():
@@ -977,6 +1095,7 @@ async def execute_command(
         raise ValueError(f"Path is not a directory: {directory}")
 
     shell = _get_command_shell()
+    environment = _build_command_environment(ctx)
 
     process = await asyncio.create_subprocess_shell(
         command,
@@ -984,6 +1103,7 @@ async def execute_command(
         executable=shell,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=environment,
     )
 
     timed_out = False
