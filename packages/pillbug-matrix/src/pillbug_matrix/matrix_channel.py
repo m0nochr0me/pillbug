@@ -2,12 +2,14 @@
 
 import asyncio
 import mimetypes
+import random
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Annotated
 
+from mutagen import File as MutagenFile
 from nio import (
     AsyncClient,
     RoomMessageAudio,
@@ -118,6 +120,23 @@ def _resolve_attachment_path(attachment: OutboundAttachment) -> Path:
     if raw_path.is_absolute():
         return raw_path
     return settings.WORKSPACE_ROOT / raw_path
+
+
+def _generate_mock_waveform(num_samples: int = 64) -> list[int]:
+    return [random.randint(200, 900) for _ in range(num_samples)]
+
+
+def _read_audio_duration_ms(file_path: Path) -> int | None:
+    try:
+        audio = MutagenFile(str(file_path))
+    except Exception:
+        return None
+    if audio is None or audio.info is None:
+        return None
+    length = getattr(audio.info, "length", None)
+    if not length or length <= 0:
+        return None
+    return int(round(length * 1000))
 
 
 def _resolve_msgtype(attachment: OutboundAttachment) -> str:
@@ -428,17 +447,39 @@ class MatrixChannel(BaseChannel):
                     continue
 
                 content_uri = upload_response.content_uri
-                msgtype = _resolve_msgtype(attachment)
+                is_voice_message = file_path.suffix.lower() == ".ogg"
+                msgtype = "m.audio" if is_voice_message else _resolve_msgtype(attachment)
+
+                info: dict[str, object] = {
+                    "mimetype": mime_type,
+                    "size": file_size,
+                }
+                duration_ms: int | None = None
+                if is_voice_message:
+                    duration_ms = await asyncio.to_thread(_read_audio_duration_ms, file_path)
+                    if duration_ms is not None:
+                        info["duration"] = duration_ms
 
                 content: dict[str, object] = {
                     "msgtype": msgtype,
                     "body": attachment.display_name or file_path.name,
                     "url": content_uri,
-                    "info": {
+                    "info": info,
+                }
+
+                if is_voice_message:
+                    audio_block: dict[str, object] = {"waveform": _generate_mock_waveform()}
+                    if duration_ms is not None:
+                        audio_block["duration"] = duration_ms
+                    content["org.matrix.msc1767.audio"] = audio_block
+                    content["org.matrix.msc1767.file"] = {
+                        "url": content_uri,
+                        "name": attachment.display_name or file_path.name,
                         "mimetype": mime_type,
                         "size": file_size,
-                    },
-                }
+                    }
+                    content["org.matrix.msc1767.text"] = attachment.display_name or file_path.name
+                    content["org.matrix.msc3245.voice"] = {}
 
                 response = await self._client.room_send(
                     room_id=room_id,

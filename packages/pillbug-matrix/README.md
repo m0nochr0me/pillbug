@@ -66,6 +66,7 @@ The channel currently behaves as follows:
 - Inbound attachments are downloaded into `downloads/matrix/<sanitized-room-id>/` inside the Pillbug workspace.
 - Downloaded attachments are exposed through generic `inbound_attachments` metadata so supported Gemini multimodal files can be forwarded without Matrix-specific handling in the AI layer.
 - Outbound attachments are uploaded through the Matrix content repository and sent as `m.image`, `m.audio`, `m.video`, or `m.file` based on the attachment metadata or MIME type.
+- Outbound `.ogg` files are always sent as `m.audio` with the MSC3245 voice-message markers (`org.matrix.msc3245.voice`, `org.matrix.msc1767.audio`, `org.matrix.msc1767.file`, `org.matrix.msc1767.text`) and the audio duration in milliseconds so clients like Element (web and mobile) render them as voice messages.
 - While Pillbug is generating a response, the plugin sends Matrix typing notifications.
 - Long outbound replies are chunked into 4000-character messages for readability.
 
