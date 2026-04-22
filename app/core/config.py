@@ -88,6 +88,7 @@ class Settings(BaseSettings):
     GEMINI_MAX_OUTPUT_TOKENS: int = 16536
     GEMINI_THINKING_LEVEL: str = "high"
     GEMINI_API_KEY: str
+    GEMINI_RESPONSE_TIMEOUT_SECONDS: float = 600.0
 
     SESSION_SUMMARIZATION: str | None = "memory"  # or "compress"
     SESSION_SUMMARIZATION_THRESHOLD: int = 1024 * 128  # total tokens
@@ -179,6 +180,14 @@ class Settings(BaseSettings):
     def validate_a2a_outbound_timeout_seconds(cls, value: float) -> float:
         if value <= 0:
             raise ValueError("PB_A2A_OUTBOUND_TIMEOUT_SECONDS must be greater than 0")
+
+        return value
+
+    @field_validator("GEMINI_RESPONSE_TIMEOUT_SECONDS")
+    @classmethod
+    def validate_gemini_response_timeout_seconds(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("PB_GEMINI_RESPONSE_TIMEOUT_SECONDS must be greater than 0")
 
         return value
 

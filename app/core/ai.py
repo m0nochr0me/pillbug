@@ -210,7 +210,7 @@ def _render_todo_list_instruction(todo_snapshot: TodoListSnapshot | None) -> str
         lines.append(f"Plan note: {todo_snapshot.explanation}")
 
     for item in todo_snapshot.items:
-        lines.append(f"{item.id}. [{_TODO_STATUS_LABELS[item.status]}] {item.title}")
+        lines.append(f"{item.id}. [{_TODO_STATUS_LABELS[item.status]}] {item.title}")  # noqa: PERF401
 
     lines.append("Use manage_todo_list to keep this plan accurate when progress changes.")
     return "\n".join(lines)
@@ -448,55 +448,8 @@ class GeminiChatSession:
         message_metadata: list[dict[str, Any]] | None = None,
         channel_name: str | None = None,
     ) -> ChatResponse:
-        message_parts = await self._build_message_parts(message, message_metadata)
-        system_instruction = await self._service.build_system_instruction(
-            session_id=self._session_id,
-            channel_name=channel_name,
-            message_metadata=message_metadata,
-        )
-        self._latest_system_instruction = system_instruction
-
-        async with self._mcp_client as mcp_client:
-            mcp_session_id = mcp_client.transport.get_session_id()
-            if mcp_session_id is not None:
-                bind_mcp_session_to_runtime_session(mcp_session_id, self._session_id)
-
-            response = await self._chat.send_message(
-                message=message_parts,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    temperature=settings.GEMINI_TEMPERATURE,
-                    top_p=settings.GEMINI_TOP_P,
-                    max_output_tokens=settings.GEMINI_MAX_OUTPUT_TOKENS,
-                    thinking_config=types.ThinkingConfig(
-                        thinking_level=types.ThinkingLevel(settings.GEMINI_THINKING_LEVEL)
-                    ),
-                    tools=[mcp_client.session],
-                ),
-            )
-
-        full_response = response.text or self._extract_parts_text(response.parts)
-        self._usage_totals.add_usage_metadata(response.usage_metadata)
-        await self._persist_history()
-        await self._flush_outbound_injections()
-        if full_response.strip():
-            return ChatResponse(
-                text=full_response,
-                usage_metadata=response.usage_metadata,
-            )
-
-        latest_model_response = self._get_latest_model_response_text()
-        if latest_model_response.strip():
-            return ChatResponse(
-                text=latest_model_response,
-                usage_metadata=response.usage_metadata,
-            )
-
-        max_nudges = settings.GEMINI_EMPTY_RESPONSE_MAX_NUDGES
-        for nudge_attempt in range(1, max_nudges + 1):
-            logger.info(
-                f"Gemini returned no text for session={self._session_id}; sending nudge {nudge_attempt}/{max_nudges}"
-            )
+        async with asyncio.timeout(settings.GEMINI_RESPONSE_TIMEOUT_SECONDS):
+            message_parts = await self._build_message_parts(message, message_metadata)
             system_instruction = await self._service.build_system_instruction(
                 session_id=self._session_id,
                 channel_name=channel_name,
@@ -509,8 +462,8 @@ class GeminiChatSession:
                 if mcp_session_id is not None:
                     bind_mcp_session_to_runtime_session(mcp_session_id, self._session_id)
 
-                nudge_response = await self._chat.send_message(
-                    message=self._service.render_required_prompt_text(_EMPTY_RESPONSE_NUDGE_PROMPT_NAME),
+                response = await self._chat.send_message(
+                    message=message_parts,
                     config=types.GenerateContentConfig(
                         system_instruction=system_instruction,
                         temperature=settings.GEMINI_TEMPERATURE,
@@ -523,33 +476,81 @@ class GeminiChatSession:
                     ),
                 )
 
-            nudge_text = nudge_response.text or self._extract_parts_text(nudge_response.parts)
-            self._usage_totals.add_usage_metadata(nudge_response.usage_metadata)
+            full_response = response.text or self._extract_parts_text(response.parts)
+            self._usage_totals.add_usage_metadata(response.usage_metadata)
             await self._persist_history()
             await self._flush_outbound_injections()
-
-            if nudge_text.strip():
-                logger.info(f"Nudge {nudge_attempt} produced text for session={self._session_id}")
+            if full_response.strip():
                 return ChatResponse(
-                    text=nudge_text,
-                    usage_metadata=nudge_response.usage_metadata,
+                    text=full_response,
+                    usage_metadata=response.usage_metadata,
                 )
 
             latest_model_response = self._get_latest_model_response_text()
             if latest_model_response.strip():
                 return ChatResponse(
                     text=latest_model_response,
-                    usage_metadata=nudge_response.usage_metadata,
+                    usage_metadata=response.usage_metadata,
                 )
 
-        logger.warning(
-            f"Gemini returned no text for session={self._session_id} after {max_nudges} nudge(s); responding with fallback text instead"
-        )
+            max_nudges = settings.GEMINI_EMPTY_RESPONSE_MAX_NUDGES
+            for nudge_attempt in range(1, max_nudges + 1):
+                logger.info(
+                    f"Gemini returned no text for session={self._session_id}; sending nudge {nudge_attempt}/{max_nudges}"
+                )
+                system_instruction = await self._service.build_system_instruction(
+                    session_id=self._session_id,
+                    channel_name=channel_name,
+                    message_metadata=message_metadata,
+                )
+                self._latest_system_instruction = system_instruction
 
-        return ChatResponse(
-            text=self._service.render_required_prompt_text(_EMPTY_MODEL_RESPONSE_FALLBACK_PROMPT_NAME),
-            usage_metadata=response.usage_metadata,
-        )
+                async with self._mcp_client as mcp_client:
+                    mcp_session_id = mcp_client.transport.get_session_id()
+                    if mcp_session_id is not None:
+                        bind_mcp_session_to_runtime_session(mcp_session_id, self._session_id)
+
+                    nudge_response = await self._chat.send_message(
+                        message=self._service.render_required_prompt_text(_EMPTY_RESPONSE_NUDGE_PROMPT_NAME),
+                        config=types.GenerateContentConfig(
+                            system_instruction=system_instruction,
+                            temperature=settings.GEMINI_TEMPERATURE,
+                            top_p=settings.GEMINI_TOP_P,
+                            max_output_tokens=settings.GEMINI_MAX_OUTPUT_TOKENS,
+                            thinking_config=types.ThinkingConfig(
+                                thinking_level=types.ThinkingLevel(settings.GEMINI_THINKING_LEVEL)
+                            ),
+                            tools=[mcp_client.session],
+                        ),
+                    )
+
+                nudge_text = nudge_response.text or self._extract_parts_text(nudge_response.parts)
+                self._usage_totals.add_usage_metadata(nudge_response.usage_metadata)
+                await self._persist_history()
+                await self._flush_outbound_injections()
+
+                if nudge_text.strip():
+                    logger.info(f"Nudge {nudge_attempt} produced text for session={self._session_id}")
+                    return ChatResponse(
+                        text=nudge_text,
+                        usage_metadata=nudge_response.usage_metadata,
+                    )
+
+                latest_model_response = self._get_latest_model_response_text()
+                if latest_model_response.strip():
+                    return ChatResponse(
+                        text=latest_model_response,
+                        usage_metadata=nudge_response.usage_metadata,
+                    )
+
+            logger.warning(
+                f"Gemini returned no text for session={self._session_id} after {max_nudges} nudge(s); responding with fallback text instead"
+            )
+
+            return ChatResponse(
+                text=self._service.render_required_prompt_text(_EMPTY_MODEL_RESPONSE_FALLBACK_PROMPT_NAME),
+                usage_metadata=response.usage_metadata,
+            )
 
     async def _build_message_parts(
         self,
