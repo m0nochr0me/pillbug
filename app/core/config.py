@@ -89,6 +89,7 @@ class Settings(BaseSettings):
     GEMINI_THINKING_LEVEL: str = "high"
     GEMINI_API_KEY: str
     GEMINI_RESPONSE_TIMEOUT_SECONDS: float = 600.0
+    GEMINI_MAX_AFC_CALLS: int = 10
 
     SESSION_SUMMARIZATION: str | None = "memory"  # or "compress"
     SESSION_SUMMARIZATION_THRESHOLD: int = 1024 * 128  # total tokens

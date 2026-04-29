@@ -472,6 +472,9 @@ class GeminiChatSession:
                         thinking_config=types.ThinkingConfig(
                             thinking_level=types.ThinkingLevel(settings.GEMINI_THINKING_LEVEL)
                         ),
+                        automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                            maximum_remote_calls=settings.GEMINI_MAX_AFC_CALLS,
+                        ),
                         tools=[mcp_client.session],
                     ),
                 )
@@ -519,6 +522,9 @@ class GeminiChatSession:
                             max_output_tokens=settings.GEMINI_MAX_OUTPUT_TOKENS,
                             thinking_config=types.ThinkingConfig(
                                 thinking_level=types.ThinkingLevel(settings.GEMINI_THINKING_LEVEL)
+                            ),
+                            automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                                maximum_remote_calls=settings.GEMINI_MAX_AFC_CALLS,
                             ),
                             tools=[mcp_client.session],
                         ),
