@@ -15,6 +15,7 @@ import aiofile
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
 from pydantic import ValidationError
 
@@ -52,6 +53,7 @@ _ATTACHMENT_MIME_TYPE_OVERRIDES = {
     ".pdf": "application/pdf",
     ".txt": "text/plain",
 }
+_INLINE_ATTACHMENT_MAX_BYTES = 8 * 1024 * 1024
 _COMPRESSED_SESSION_HISTORY_PROMPT_NAME = "compressed_session_history.prompt.md"
 _DIRECT_REPLY_CHANNEL_MEMO_PROMPT_NAME = "direct_reply_channel_memo.prompt.md"
 _EMPTY_MODEL_RESPONSE_FALLBACK_PROMPT_NAME = "empty_model_response_fallback.prompt.md"
@@ -65,6 +67,25 @@ _TODO_STATUS_LABELS = {
     "in-progress": "in progress",
     "completed": "completed",
 }
+
+
+def _has_file_data_parts(history: list[types.Content]) -> bool:
+    for content in history:
+        for part in content.parts or []:
+            if getattr(part, "file_data", None) is not None:
+                return True
+    return False
+
+
+def _strip_file_data_parts(history: list[types.Content]) -> list[types.Content]:
+    sanitized: list[types.Content] = []
+    for content in history:
+        parts = content.parts or []
+        kept = [part for part in parts if getattr(part, "file_data", None) is None]
+        if not kept:
+            continue
+        sanitized.append(types.Content(role=content.role, parts=kept))
+    return sanitized
 
 
 def _extract_injectable_content(history: list[types.Content]) -> types.Content | None:
@@ -462,7 +483,7 @@ class GeminiChatSession:
                 if mcp_session_id is not None:
                     bind_mcp_session_to_runtime_session(mcp_session_id, self._session_id)
 
-                response = await self._chat.send_message(
+                response = await self._send_chat_message(
                     message=message_parts,
                     config=types.GenerateContentConfig(
                         system_instruction=system_instruction,
@@ -513,7 +534,7 @@ class GeminiChatSession:
                     if mcp_session_id is not None:
                         bind_mcp_session_to_runtime_session(mcp_session_id, self._session_id)
 
-                    nudge_response = await self._chat.send_message(
+                    nudge_response = await self._send_chat_message(
                         message=self._service.render_required_prompt_text(_EMPTY_RESPONSE_NUDGE_PROMPT_NAME),
                         config=types.GenerateContentConfig(
                             system_instruction=system_instruction,
@@ -620,6 +641,23 @@ class GeminiChatSession:
             )
             return None
 
+        file_size = await asyncio.to_thread(lambda: attachment_path.stat().st_size)
+        if file_size <= _INLINE_ATTACHMENT_MAX_BYTES:
+            try:
+                async with aiofile.AIOFile(attachment_path, "rb") as attachment_file:
+                    file_bytes = bytes(await attachment_file.read())  # pyright: ignore[reportArgumentType]
+            except Exception:
+                logger.exception(
+                    f"Failed to read inbound attachment for Gemini session={self._session_id} path={normalized_attachment_path} source={attachment.source}"
+                )
+                return None
+
+            seen_attachment_paths.add(normalized_attachment_path)
+            logger.info(
+                f"Inlined inbound attachment for Gemini session={self._session_id} path={normalized_attachment_path} mime_type={mime_type} bytes={file_size} source={attachment.source}"
+            )
+            return types.Part.from_bytes(data=file_bytes, mime_type=mime_type)
+
         upload_config: dict[str, str] = {"mime_type": mime_type}
         if attachment.display_name and attachment.display_name.strip():
             upload_config["display_name"] = attachment.display_name.strip()
@@ -641,9 +679,45 @@ class GeminiChatSession:
 
         seen_attachment_paths.add(normalized_attachment_path)
         logger.info(
-            f"Uploaded inbound attachment for Gemini session={self._session_id} path={normalized_attachment_path} mime_type={mime_type} source={attachment.source}"
+            f"Uploaded inbound attachment for Gemini session={self._session_id} path={normalized_attachment_path} mime_type={mime_type} bytes={file_size} source={attachment.source}"
         )
         return types.Part.from_uri(file_uri=uploaded_file_uri, mime_type=mime_type)
+
+    @staticmethod
+    def _is_stale_uploaded_file_error(exc: genai_errors.ClientError) -> bool:
+        if getattr(exc, "code", None) != 403:
+            return False
+        message = str(exc)
+        if "PERMISSION_DENIED" not in message:
+            return False
+        return "File " in message or "files/" in message
+
+    async def _send_chat_message(
+        self,
+        *,
+        message: Any,
+        config: types.GenerateContentConfig,
+    ) -> Any:
+        try:
+            return await self._chat.send_message(message=message, config=config)
+        except genai_errors.ClientError as exc:
+            if not self._is_stale_uploaded_file_error(exc):
+                raise
+
+            history = self._get_curated_history()
+            if not _has_file_data_parts(history):
+                raise
+
+            logger.warning(
+                f"Detected stale Gemini uploaded-file reference for session={self._session_id}; "
+                f"stripping file_data parts from history and retrying once"
+            )
+            sanitized_history = _strip_file_data_parts(history)
+            self._chat = self._service.ai_client.aio.chats.create(
+                model=settings.GEMINI_MODEL,
+                history=cast("list[types.ContentOrDict] | None", sanitized_history),
+            )
+            return await self._chat.send_message(message=message, config=config)
 
     async def _persist_history(self) -> None:
         try:
