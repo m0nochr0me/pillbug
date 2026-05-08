@@ -40,6 +40,7 @@ matrix = ["pillbug-matrix"]
 telegram = ["pillbug-telegram"]
 dashboard = ["pillbug-dashboard"]
 trigger = ["pillbug-trigger"]
+websocket = ["pillbug-websocket"]
 
 [project.urls]
 Homepage = "https://github.com/m0nochr0me/pillbug"
@@ -66,6 +67,7 @@ pillbug-matrix = { workspace = true }
 pillbug-telegram = { workspace = true }
 pillbug-dashboard = { workspace = true }
 pillbug-trigger = { workspace = true }
+pillbug-websocket = { workspace = true }
 
 [tool.uv.workspace]
 members = ["packages/*"]
