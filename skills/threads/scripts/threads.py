@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -33,6 +34,9 @@ THREADS_API_VERSION = "v1.0"
 DEFAULT_SCOPES = "threads_basic,threads_content_publish"
 DEFAULT_POLL_TIMEOUT = 60
 DEFAULT_POLL_INTERVAL = 2
+
+THREADS_MAX_IMAGE_BYTES = 8 * 1024 * 1024  # Threads docs: 8 MiB per image
+_INVALID_URL_CHARS_RE = re.compile(r"[\\\s\x00-\x1f\x7f]")
 
 
 def load_dotenv() -> None:
@@ -89,7 +93,7 @@ class ThreadsClient:
         async with self._session.request(method, url, params=params, data=data) as resp:
             text = await resp.text()
             if resp.status >= 400:
-                raise ThreadsError(f"{method} {url} failed ({resp.status}): {text}")
+                raise ThreadsError(_format_graph_error(method, url, resp.status, text))
             return json.loads(text) if text else {}
 
     async def exchange_code(
@@ -177,7 +181,8 @@ class ThreadsClient:
             if state == "FINISHED":
                 return
             if state == "ERROR":
-                raise ThreadsError(f"container {container_id} failed: {status.get('error_message')}")
+                detail = status.get("error_message") or json.dumps(status, ensure_ascii=False)
+                raise ThreadsError(f"container {container_id} failed: {detail}")
             if state == "EXPIRED":
                 raise ThreadsError(f"container {container_id} expired before publishing")
             if time.monotonic() >= deadline:
@@ -196,6 +201,83 @@ class ThreadsClient:
             f"{THREADS_GRAPH_BASE}/{THREADS_API_VERSION}/{user_id}/threads_publish",
             data={"creation_id": container_id, "access_token": access_token},
         )
+
+
+def _format_graph_error(method: str, url: str, status: int, text: str) -> str:
+    """Pull the structured Meta error fields (type, code, subcode, message)
+    out of a Graph API error body so they appear on a single readable line."""
+    base = f"{method} {url} failed ({status})"
+    if not text:
+        return base
+    try:
+        body = json.loads(text)
+    except json.JSONDecodeError:
+        return f"{base}: {text}"
+    err = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(err, dict):
+        return f"{base}: {text}"
+    message = err.get("message") or text
+    tags: list[str] = []
+    if typ := err.get("type"):
+        tags.append(typ)
+    if (code := err.get("code")) is not None:
+        tags.append(f"code={code}")
+    if (sub := err.get("error_subcode")) is not None:
+        tags.append(f"subcode={sub}")
+    suffix = f" [{', '.join(tags)}]" if tags else ""
+    return f"{base}: {message}{suffix}"
+
+
+def _clean_image_url(url: str) -> str:
+    """Trim and reject URLs that show signs of broken shell quoting.
+
+    Backslashes, whitespace inside the URL, and control characters typically
+    mean an outer wrapper over-escaped the argument. Rejecting them here
+    avoids sending a malformed URL to Threads (whose generic 2207052 'media
+    URI requirements were not met' error doesn't say *why* the URL is bad).
+    """
+    cleaned = url.strip()
+    if not cleaned:
+        raise ThreadsError("empty image URL")
+    if _INVALID_URL_CHARS_RE.search(cleaned):
+        raise ThreadsError(
+            f"image URL contains whitespace, backslashes, or control characters; check shell quoting: {url!r}"
+        )
+    parsed = urlparse(cleaned)
+    if parsed.scheme not in ("http", "https"):
+        raise ThreadsError(f"image URL must use http(s): {cleaned!r}")
+    if not parsed.netloc:
+        raise ThreadsError(f"image URL has no host: {cleaned!r}")
+    return cleaned
+
+
+async def _check_image_url(session: aiohttp.ClientSession, url: str) -> None:
+    """HEAD-check the image URL before handing it to Threads.
+
+    Threads collapses several distinct fetch failures into the generic
+    `2207052` subcode after the fact. Checking locally turns those into
+    immediate, specific errors (HTTP status, content-type, size).
+    """
+    timeout = aiohttp.ClientTimeout(total=10)
+    try:
+        async with session.head(url, allow_redirects=True, timeout=timeout) as resp:
+            status = resp.status
+            content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            length_raw = resp.headers.get("Content-Length")
+    except aiohttp.ClientError as exc:
+        raise ThreadsError(f"image URL precheck failed for {url}: {exc}") from exc
+
+    if status != 200:
+        raise ThreadsError(f"image URL precheck failed for {url}: HTTP {status}")
+    if content_type and not content_type.startswith("image/"):
+        raise ThreadsError(f"image URL precheck failed for {url}: Content-Type {content_type!r} is not an image")
+    if length_raw:
+        try:
+            length = int(length_raw)
+        except ValueError:
+            length = None
+        if length is not None and length > THREADS_MAX_IMAGE_BYTES:
+            raise ThreadsError(f"image URL precheck failed for {url}: {length} bytes exceeds Threads' 8 MiB limit")
 
 
 def _build_auth_url(app_id: str, redirect_uri: str, scopes: str) -> str:
@@ -340,7 +422,7 @@ async def cmd_post(args: argparse.Namespace) -> int:
     user_id = creds["user_id"]
     access_token = creds["access_token"]
 
-    image_urls: list[str] = list(args.image_url or [])
+    image_urls: list[str] = [_clean_image_url(u) for u in (args.image_url or [])]
     alts: list[str] = list(args.alt or [])
 
     if not args.text and not image_urls:
@@ -350,6 +432,9 @@ async def cmd_post(args: argparse.Namespace) -> int:
 
     async with aiohttp.ClientSession() as session:
         client = ThreadsClient(session)
+
+        for url in image_urls:
+            await _check_image_url(session, url)
 
         if not image_urls:
             container_id = await client.create_container(
