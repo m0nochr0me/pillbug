@@ -17,6 +17,7 @@ from fastmcp.client.transports import StreamableHttpTransport
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
+from google.oauth2 import service_account
 from pydantic import ValidationError
 
 from app.core.config import settings
@@ -239,11 +240,30 @@ def _render_todo_list_instruction(todo_snapshot: TodoListSnapshot | None) -> str
 
 class GeminiChatService:
     def __init__(self) -> None:
-        self.ai_client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        self.ai_client = self._build_genai_client()
         self._sessions_dir = settings.SESSIONS_DIR
         self._module_root = get_module_root("app")
         self._prompts_dir = self._module_root / "prompts"
         self._outbound_injection_handler: Callable[[str, types.Content], Awaitable[None]] | None = None
+
+    @staticmethod
+    def _build_genai_client() -> genai.Client:
+        if settings.GEMINI_BACKEND == "vertex":
+            credentials = None
+            if settings.GEMINI_VERTEX_CREDENTIALS_PATH is not None:
+                credentials = service_account.Credentials.from_service_account_file(
+                    str(settings.GEMINI_VERTEX_CREDENTIALS_PATH),
+                    scopes=["https://www.googleapis.com/auth/cloud-platform"],
+                )
+
+            return genai.Client(
+                vertexai=True,
+                project=settings.GEMINI_VERTEX_PROJECT,
+                location=settings.GEMINI_VERTEX_LOCATION,
+                credentials=credentials,
+            )
+
+        return genai.Client(api_key=settings.GEMINI_API_KEY)
 
     def set_outbound_injection_handler(self, handler: Callable[[str, types.Content], Awaitable[None]] | None) -> None:
         self._outbound_injection_handler = handler

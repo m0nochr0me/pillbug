@@ -24,6 +24,7 @@ __all__ = ("settings",)
 _RUNTIME_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$")
 _MIN_BEARER_TOKEN_LENGTH = 16
 _SESSION_SUMMARIZATION_MODES = {"memory", "compress"}
+_GEMINI_BACKENDS = {"developer", "vertex"}
 
 
 def _split_csv(value: str) -> tuple[str, ...]:
@@ -87,7 +88,11 @@ class Settings(BaseSettings):
     GEMINI_TOP_P: float = 0.6
     GEMINI_MAX_OUTPUT_TOKENS: int = 16536
     GEMINI_THINKING_LEVEL: str = "high"
-    GEMINI_API_KEY: str
+    GEMINI_BACKEND: str = "developer"
+    GEMINI_API_KEY: str | None = None
+    GEMINI_VERTEX_PROJECT: str | None = None
+    GEMINI_VERTEX_LOCATION: str | None = None
+    GEMINI_VERTEX_CREDENTIALS_PATH: Path | None = None
     GEMINI_RESPONSE_TIMEOUT_SECONDS: float = 600.0
     GEMINI_MAX_AFC_CALLS: int = 10
 
@@ -192,6 +197,16 @@ class Settings(BaseSettings):
 
         return value
 
+    @field_validator("GEMINI_BACKEND", mode="before")
+    @classmethod
+    def validate_gemini_backend(cls, value: str) -> str:
+        normalized = str(value).strip().lower()
+        if normalized not in _GEMINI_BACKENDS:
+            supported = ", ".join(sorted(_GEMINI_BACKENDS))
+            raise ValueError(f"PB_GEMINI_BACKEND must be one of: {supported}")
+
+        return normalized
+
     @field_validator("A2A_PEER_CARD_CACHE_TTL_SECONDS", "A2A_PEER_CARD_FETCH_TIMEOUT_SECONDS")
     @classmethod
     def validate_a2a_peer_card_timers(cls, value: float, info: ValidationInfo) -> float:
@@ -256,6 +271,19 @@ class Settings(BaseSettings):
             raise ValueError(
                 "PB_DASHBOARD_BEARER_TOKEN and PB_A2A_BEARER_TOKEN must differ so dashboard/control access stays isolated from A2A peer access"
             )
+
+        if self.GEMINI_BACKEND == "developer":
+            if not self.GEMINI_API_KEY:
+                raise ValueError("PB_GEMINI_API_KEY is required when PB_GEMINI_BACKEND=developer")
+        else:
+            if not self.GEMINI_VERTEX_PROJECT or not self.GEMINI_VERTEX_LOCATION:
+                raise ValueError(
+                    "PB_GEMINI_VERTEX_PROJECT and PB_GEMINI_VERTEX_LOCATION are required when PB_GEMINI_BACKEND=vertex"
+                )
+            if self.GEMINI_VERTEX_CREDENTIALS_PATH is not None and not self.GEMINI_VERTEX_CREDENTIALS_PATH.is_file():
+                raise ValueError(
+                    f"PB_GEMINI_VERTEX_CREDENTIALS_PATH does not point to an existing file: {self.GEMINI_VERTEX_CREDENTIALS_PATH}"
+                )
 
         return self
 
