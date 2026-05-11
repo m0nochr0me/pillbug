@@ -35,8 +35,20 @@ Optional packages are installed through uv extras:
 ```bash
 uv sync --extra a2a
 uv sync --extra telegram
+uv sync --extra matrix
+uv sync --extra websocket
+uv sync --extra trigger
 uv sync --extra dashboard
+uv sync --extra genai_proxy
 ```
+
+Combine extras when more than one integration is needed, for example:
+
+```bash
+uv sync --extra telegram,matrix,trigger,websocket
+```
+
+The `genai_proxy` extra installs the `pillbug-genai-proxy` console script, a FastAPI translator that exposes the Gemini wire format on top of any OpenAI-compatible chat completions endpoint (llama.cpp, vLLM, LiteLLM, Ollama). Once it is running, point the Pillbug runtime at it with `PB_GEMINI_BASE_URL` instead of hitting the Google Gemini API. See [packages/pillbug-genai-proxy/README.md](../packages/pillbug-genai-proxy/README.md).
 
 ## For Agents
 
@@ -155,6 +167,18 @@ docker build \
   -t pillbug-local:latest \
   .
 ```
+
+Build with Matrix, WebSocket, and trigger support:
+
+```bash
+docker build \
+  --build-arg PILLBUG_INSTALL_EXTRAS=matrix,websocket,trigger \
+  --build-arg EXTRA_PACKAGES="ca-certificates curl jq" \
+  -t pillbug-local:latest \
+  .
+```
+
+For Matrix you must obtain an access token once before starting the runtime. With the matrix extra installed, run `uv run pillbug-matrix-access-token --homeserver https://matrix.example.org --user-id @pillbug:example.org` and copy the printed `PB_MATRIX_*` exports into your env file. See [packages/pillbug-matrix/README.md](../packages/pillbug-matrix/README.md).
 
 1. Run the bootstrap launch once.
 
