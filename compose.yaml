@@ -28,6 +28,22 @@ services:
         source: /opt/ext/pillbug/runtime-a
         target: /home/pillbug
 
+  genai-proxy-b:
+    build:
+      <<: *build-common
+      args:
+        PILLBUG_INSTALL_EXTRAS: genai_proxy
+    container_name: genai-proxy
+    env_file:
+      - ./deploy/genai-proxy.env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: on-failure:5
+    command:
+      - uv
+      - run
+      - pillbug-genai-proxy
+
   pillbug-b:
     build:
       <<: *build-common
@@ -39,6 +55,8 @@ services:
     dns: # Adguard DNS servers
       - 94.140.14.140
       - 94.140.15.15
+    depends_on:
+      - genai-proxy-b
     env_file:
       - ./deploy/runtime-b.env
     ports:

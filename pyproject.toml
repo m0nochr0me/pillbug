@@ -41,6 +41,7 @@ telegram = ["pillbug-telegram"]
 dashboard = ["pillbug-dashboard"]
 trigger = ["pillbug-trigger"]
 websocket = ["pillbug-websocket"]
+genai_proxy = ["pillbug-genai-proxy"]
 
 [project.urls]
 Homepage = "https://github.com/m0nochr0me/pillbug"
@@ -68,6 +69,7 @@ pillbug-telegram = { workspace = true }
 pillbug-dashboard = { workspace = true }
 pillbug-trigger = { workspace = true }
 pillbug-websocket = { workspace = true }
+pillbug-genai-proxy = { workspace = true }
 
 [tool.uv.workspace]
 members = ["packages/*"]

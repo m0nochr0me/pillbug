@@ -1,0 +1,25 @@
+[project]
+name = "pillbug-genai-proxy"
+version = "0.1.0"
+description = "Gemini wire-format proxy that fronts an OpenAI-compatible upstream for Pillbug"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "pillbug",
+    "httpx>=0.28",
+    "uvicorn[standard]>=0.30",
+]
+
+[project.scripts]
+pillbug-genai-proxy = "pillbug_genai_proxy.__main__:entrypoint"
+
+[build-system]
+requires = ["uv_build>=0.10.9,<0.11.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+pillbug = { workspace = true }
+
+[tool.uv.build-backend]
+module-name = "pillbug_genai_proxy"
+module-root = "src"

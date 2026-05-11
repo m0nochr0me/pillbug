@@ -263,7 +263,8 @@ class GeminiChatService:
                 credentials=credentials,
             )
 
-        return genai.Client(api_key=settings.GEMINI_API_KEY)
+        http_options = types.HttpOptions(base_url=settings.GEMINI_BASE_URL) if settings.GEMINI_BASE_URL else None
+        return genai.Client(api_key=settings.GEMINI_API_KEY, http_options=http_options)
 
     def set_outbound_injection_handler(self, handler: Callable[[str, types.Content], Awaitable[None]] | None) -> None:
         self._outbound_injection_handler = handler

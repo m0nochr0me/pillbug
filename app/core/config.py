@@ -90,6 +90,7 @@ class Settings(BaseSettings):
     GEMINI_THINKING_LEVEL: str = "high"
     GEMINI_BACKEND: str = "developer"
     GEMINI_API_KEY: str | None = None
+    GEMINI_BASE_URL: str | None = None
     GEMINI_VERTEX_PROJECT: str | None = None
     GEMINI_VERTEX_LOCATION: str | None = None
     GEMINI_VERTEX_CREDENTIALS_PATH: Path | None = None
@@ -207,6 +208,15 @@ class Settings(BaseSettings):
 
         return normalized
 
+    @field_validator("GEMINI_BASE_URL", mode="before")
+    @classmethod
+    def validate_gemini_base_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+
+        normalized = str(value).strip().rstrip("/")
+        return normalized or None
+
     @field_validator("A2A_PEER_CARD_CACHE_TTL_SECONDS", "A2A_PEER_CARD_FETCH_TIMEOUT_SECONDS")
     @classmethod
     def validate_a2a_peer_card_timers(cls, value: float, info: ValidationInfo) -> float:
@@ -276,6 +286,8 @@ class Settings(BaseSettings):
             if not self.GEMINI_API_KEY:
                 raise ValueError("PB_GEMINI_API_KEY is required when PB_GEMINI_BACKEND=developer")
         else:
+            if self.GEMINI_BASE_URL is not None:
+                raise ValueError("PB_GEMINI_BASE_URL is only honored when PB_GEMINI_BACKEND=developer")
             if not self.GEMINI_VERTEX_PROJECT or not self.GEMINI_VERTEX_LOCATION:
                 raise ValueError(
                     "PB_GEMINI_VERTEX_PROJECT and PB_GEMINI_VERTEX_LOCATION are required when PB_GEMINI_BACKEND=vertex"
