@@ -7,6 +7,20 @@
 
 Pillbug is an async AI agent runtime built for isolated deployment.
 
+## Why Pillbug?
+
+Pillbug is opinionated about one thing: **one agent, one runtime, one workspace, per container.** Everything else — Gemini-first, MCP-native, plugin channels, bring-your-own-memory — follows from that.
+
+Pick Pillbug when you want:
+
+- **Strict per-tenant isolation.** Each runtime has its own workspace, identity, and security boundary. No multi-tenant routing inside the process.
+- **A workspace-sandboxed tool surface.** File reads, edits, search, command execution, scheduling, and URL fetches all live behind a local MCP server scoped to `WORKSPACE_ROOT`.
+- **A composable channel model.** CLI, Telegram, Matrix, WebSocket, A2A, HTTP trigger — each is a plugin package, registered through env config, not hardcoded into the loop.
+- **Production posture out of the box.** Non-root container PID 1, bearer-protected control plane, reloadable security patterns, structured JSON logs.
+- **Backend flexibility without core churn.** Gemini developer or Vertex natively; llama.cpp, vLLM, Ollama, LiteLLM via the bundled OpenAI-compatibility proxy.
+
+Pillbug is probably **not** the right fit if you need multi-agent routing inside a single process, bundled memory, voice or video output flows, or a one-file demo. It is deliberately a runtime, not a platform.
+
 ## Highlights
 
 - One agent, one runtime, and one workspace per container
@@ -19,6 +33,22 @@ Pillbug is an async AI agent runtime built for isolated deployment.
 - Workspace skill discovery from `skills/*/SKILL.md`
 - Optional channel and integration packages: A2A, Telegram, Matrix, WebSocket (Socket.IO), HTTP trigger, dashboard, and the OpenAI-compatibility proxy
 - Per-workspace `AGENTS.md` instructions seeded on first run
+
+## Quickstart
+
+The fastest *is this real?* path. Requires Python 3.14+, [uv](https://docs.astral.sh/uv/), and a Gemini API key.
+
+```bash
+git clone https://github.com/m0nochr0me/pillbug.git
+cd pillbug
+uv sync --locked
+export PB_GEMINI_API_KEY=your_api_key
+./run.sh
+```
+
+The first run **exits intentionally** after seeding `~/.pillbug/workspace/AGENTS.md` and the runtime identity. This is normal — edit that file to set your agent persona, then run `./run.sh` again to start the CLI channel.
+
+For Docker, multi-runtime setups, optional channel extras, or external memory, see [doc/INSTALL.md](doc/INSTALL.md).
 
 ## Docs
 
