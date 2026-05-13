@@ -132,6 +132,8 @@ class Settings(BaseSettings):
     INBOUND_DEBOUNCE_SECONDS: float = 1.5
     INBOUND_MAX_MESSAGE_CHARS: int = 4000
 
+    MEMORY_DIR: str = "memory"
+
     TIMEZONE: str = "UTC"
 
     model_config = SettingsConfigDict(
@@ -173,6 +175,21 @@ class Settings(BaseSettings):
             raise ValueError("PB_SESSION_SUMMARIZATION_THRESHOLD must be greater than 0")
 
         return value
+
+    @field_validator("MEMORY_DIR", mode="before")
+    @classmethod
+    def validate_memory_dir(cls, value: str) -> str:
+        normalized = str(value).strip()
+        if not normalized:
+            raise ValueError("PB_MEMORY_DIR must not be empty")
+
+        candidate = Path(normalized)
+        if candidate.is_absolute():
+            raise ValueError("PB_MEMORY_DIR must be a workspace-relative path")
+        if ".." in candidate.parts:
+            raise ValueError("PB_MEMORY_DIR must not traverse outside the workspace root")
+
+        return candidate.as_posix()
 
     @field_validator("A2A_CONVERGENCE_MAX_HOPS")
     @classmethod

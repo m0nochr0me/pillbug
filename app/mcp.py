@@ -4,6 +4,7 @@ Composition MCP Server
 
 import asyncio
 import hashlib
+import importlib.util
 import json
 import mimetypes
 import os
@@ -1319,6 +1320,16 @@ async def manage_agent_task(
         return await task_scheduler.delete_task(task_id)
 
     raise ValueError(f"Unsupported action: {action}")
+
+
+# Optional bundled memory package: register its MCP tools when `uv sync --extra memory` has installed it.
+if importlib.util.find_spec("pillbug_memory") is not None:
+    from pillbug_memory import register_memory_tools  # pyright: ignore[reportMissingImports]
+
+    _memory_dir = _resolve_workspace_path(settings.MEMORY_DIR)
+    _memory_dir.mkdir(parents=True, exist_ok=True)
+    register_memory_tools(mcp, _memory_dir)
+    logger.info(f"Registered pillbug-memory tools rooted at {_display_path(_memory_dir)}")
 
 
 # Load MCP server configuration from app/mcp.json if it exists, and mount configured servers

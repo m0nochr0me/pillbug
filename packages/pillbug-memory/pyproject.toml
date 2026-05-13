@@ -1,0 +1,20 @@
+[project]
+name = "pillbug-memory"
+version = "0.1.0"
+description = "Optional flat-file Markdown memory store for Pillbug, exposed as MCP tools"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "pillbug",
+]
+
+[build-system]
+requires = ["uv_build>=0.10.9,<0.11.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+pillbug = { workspace = true }
+
+[tool.uv.build-backend]
+module-name = "pillbug_memory"
+module-root = "src"

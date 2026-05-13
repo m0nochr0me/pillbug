@@ -13,6 +13,7 @@ members = [
     "pillbug-dashboard",
     "pillbug-genai-proxy",
     "pillbug-matrix",
+    "pillbug-memory",
     "pillbug-slack",
     "pillbug-telegram",
     "pillbug-trigger",
@@ -1277,6 +1278,9 @@ genai-proxy = [
 matrix = [
     { name = "pillbug-matrix" },
 ]
+memory = [
+    { name = "pillbug-memory" },
+]
 slack = [
     { name = "pillbug-slack" },
 ]
@@ -1315,6 +1319,7 @@ requires-dist = [
     { name = "pillbug-dashboard", marker = "extra == 'dashboard'", editable = "packages/pillbug-dashboard" },
     { name = "pillbug-genai-proxy", marker = "extra == 'genai-proxy'", editable = "packages/pillbug-genai-proxy" },
     { name = "pillbug-matrix", marker = "extra == 'matrix'", editable = "packages/pillbug-matrix" },
+    { name = "pillbug-memory", marker = "extra == 'memory'", editable = "packages/pillbug-memory" },
     { name = "pillbug-slack", marker = "extra == 'slack'", editable = "packages/pillbug-slack" },
     { name = "pillbug-telegram", marker = "extra == 'telegram'", editable = "packages/pillbug-telegram" },
     { name = "pillbug-trigger", marker = "extra == 'trigger'", editable = "packages/pillbug-trigger" },
@@ -1323,7 +1328,7 @@ requires-dist = [
     { name = "pydocket", specifier = ">=0.18.2" },
     { name = "redis", specifier = ">=7.3.0" },
 ]
-provides-extras = ["a2a", "matrix", "slack", "telegram", "dashboard", "trigger", "websocket", "genai-proxy"]
+provides-extras = ["a2a", "matrix", "slack", "telegram", "dashboard", "trigger", "websocket", "genai-proxy", "memory"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1401,6 +1406,17 @@ requires-dist = [
     { name = "mutagen", specifier = ">=1.47" },
     { name = "pillbug", editable = "." },
 ]
+
+[[package]]
+name = "pillbug-memory"
+version = "0.1.0"
+source = { editable = "packages/pillbug-memory" }
+dependencies = [
+    { name = "pillbug" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pillbug", editable = "." }]
 
 [[package]]
 name = "pillbug-slack"

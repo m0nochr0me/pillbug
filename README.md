@@ -102,6 +102,7 @@ Workspace members under `packages/` are installed through uv extras and register
 | `trigger` | [pillbug-trigger](packages/pillbug-trigger) | HTTP ingress for external event sources with per-source prompt templates |
 | `dashboard` | [pillbug-dashboard](packages/pillbug-dashboard) | Operator dashboard service |
 | `genai_proxy` | [pillbug-genai-proxy](packages/pillbug-genai-proxy) | Gemini wire-format proxy that fronts any OpenAI-compatible chat completions endpoint |
+| `memory` | [pillbug-memory](packages/pillbug-memory) | Bundled flat-file Markdown memory store with five MCP tools, rooted in `workspace/memory/` |
 
 ## OpenAI-compatible Backends
 
