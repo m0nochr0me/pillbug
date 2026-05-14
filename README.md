@@ -31,7 +31,7 @@ Pillbug is probably **not** the right fit if you need multi-agent routing inside
 - Built-in session commands, summarization, and session-scoped planning
 - Embedded scheduler for background agent tasks
 - Workspace skill discovery from `skills/*/SKILL.md`
-- Optional channel and integration packages: A2A, Telegram, Matrix, WebSocket (Socket.IO), HTTP trigger, dashboard, and the OpenAI-compatibility proxy
+- Optional channel and integration packages: A2A, Telegram, Slack, Matrix, WebSocket (Socket.IO), HTTP trigger, dashboard, bundled memory, and the OpenAI-compatibility proxy
 - Per-workspace `AGENTS.md` instructions seeded on first run
 
 ## Quickstart
@@ -83,11 +83,11 @@ flowchart LR
 
 ## Memory Management
 
-Pillbug has not bundled memory management features intentionally to allow users to choose their preferred approach.
+Memory lives outside core so each runtime can pick the tier that fits. Three options ship in-tree:
 
-[Arca-Memory](https://github.com/arca-mem/arca-memory) is a *recommended* compatible external memory management service that can be easily integrated via the MCP tools API.
-
-Users can also implement custom memory management solutions by using agent skills or other MCP servers.
+- **Bundled (simple)** — install the `memory` extra for flat-Markdown CRUD under `workspace/memory/` exposed through five MCP tools (`memory_list`, `memory_get`, `memory_add`, `memory_update`, `memory_delete`). Stdlib-only, no database. Good default for single-runtime setups. See [packages/pillbug-memory](packages/pillbug-memory).
+- **External (graph + semantic)** — [Arca-Memory](https://github.com/arca-mem/arca-memory) is a recommended compatible MCP service for buckets, semantic search, and graph traversal. Wire it in through `mcp.json`.
+- **Custom** — bring any other MCP server, or implement memory inside a workspace skill.
 
 ## Optional Packages
 
@@ -97,12 +97,32 @@ Workspace members under `packages/` are installed through uv extras and register
 | - | - | - |
 | `a2a` | [pillbug-a2a](packages/pillbug-a2a) | Agent-to-agent HTTP channel with peer discovery |
 | `telegram` | [pillbug-telegram](packages/pillbug-telegram) | Telegram bot channel |
+| `slack` | [pillbug-slack](packages/pillbug-slack) | Slack channel over Socket Mode (no public HTTP endpoint required) |
 | `matrix` | [pillbug-matrix](packages/pillbug-matrix) | Matrix channel with attachment, voice-message, and typing support |
 | `websocket` | [pillbug-websocket](packages/pillbug-websocket) | Socket.IO channel keyed by client-provided ULID session IDs |
 | `trigger` | [pillbug-trigger](packages/pillbug-trigger) | HTTP ingress for external event sources with per-source prompt templates |
 | `dashboard` | [pillbug-dashboard](packages/pillbug-dashboard) | Operator dashboard service |
 | `genai_proxy` | [pillbug-genai-proxy](packages/pillbug-genai-proxy) | Gemini wire-format proxy that fronts any OpenAI-compatible chat completions endpoint |
 | `memory` | [pillbug-memory](packages/pillbug-memory) | Bundled flat-file Markdown memory store with five MCP tools, rooted in `workspace/memory/` |
+
+The `gmail` extra is a skill-side extra (not a workspace package): it installs the Google API client deps consumed by the bundled [skills/gmail](skills/gmail) workspace skill.
+
+## Bundled Skills
+
+Pillbug ships eight workspace skills under [skills/](skills). The runtime auto-discovers them when they're copied into `<runtime-base>/workspace/skills/` (see [doc/INSTALL.md](doc/INSTALL.md)); each one is a directory with a `SKILL.md` whose frontmatter Pillbug parses at startup.
+
+| Skill | Purpose |
+| - | - |
+| [arca-memory](skills/arca-memory) | Operating guide for the Arca-Memory MCP service (buckets, semantic search, graph traversal) |
+| [bluesky](skills/bluesky) | Publish posts to Bluesky |
+| [feed-reader](skills/feed-reader) | RSS/Atom subscriptions: list new posts, fetch full text, manage feed lists |
+| [financial-assistant](skills/financial-assistant) | Track personal expenses to a CSV ledger with live exchange-rate normalization |
+| [gmail](skills/gmail) | Read Gmail mailboxes via a service account with domain-wide delegation (read-only) |
+| [tavily-search](skills/tavily-search) | Web search through the Tavily API, with a bundled shell wrapper |
+| [text-to-speech](skills/text-to-speech) | Synthesize speech from text via ElevenLabs |
+| [threads](skills/threads) | Publish posts to Threads (Meta) |
+
+Most skills need their own credentials (Bluesky app password, Tavily API key, ElevenLabs key, Gmail service account, etc.) — see each skill's `SKILL.md`. The `gmail` skill additionally requires `uv sync --extra gmail` for the Google API client deps. Drop unwanted skills before copying, or remove them from the runtime workspace at any time.
 
 ## OpenAI-compatible Backends
 
