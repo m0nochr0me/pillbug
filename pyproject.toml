@@ -44,6 +44,10 @@ trigger = ["pillbug-trigger"]
 websocket = ["pillbug-websocket"]
 genai_proxy = ["pillbug-genai-proxy"]
 memory = ["pillbug-memory"]
+gmail = [
+    "google-api-python-client>=2.140",
+    "google-auth>=2.34",
+]
 
 [project.urls]
 Homepage = "https://github.com/m0nochr0me/pillbug"
