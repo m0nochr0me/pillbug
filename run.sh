@@ -2,4 +2,4 @@
 
 set -euo pipefail
 
-exec uv run pillbug "$@"
+exec pillbug "$@"
