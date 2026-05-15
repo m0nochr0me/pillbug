@@ -185,10 +185,25 @@ class AgentTaskTelemetryEntry(BaseModel):
     execution: TaskExecutionTelemetry | None = Field(
         default=None, description="Current execution metadata, when scheduled or running."
     )
+    overdue: bool = Field(
+        default=False,
+        description="Whether the task's scheduled execution is past due beyond the reclaim grace window.",
+    )
 
 
 class SchedulerTelemetrySnapshot(BaseModel):
-    started: bool = Field(default=False, description="Whether the embedded scheduler is currently running.")
+    started: bool = Field(default=False, description="Whether the embedded scheduler has completed startup.")
+    healthy: bool = Field(
+        default=False,
+        description="Whether the Docket worker task is alive and its scheduler loop heartbeat is fresh.",
+    )
+    worker_alive: bool = Field(default=False, description="Whether the Docket worker task is currently running.")
+    worker_last_tick: datetime | None = Field(
+        default=None, description="UTC timestamp of the most recent scheduler loop heartbeat."
+    )
+    worker_restart_count: int = Field(
+        ge=0, default=0, description="Number of times the watchdog has restarted the worker since startup."
+    )
     backend: str = Field(min_length=1, description="Scheduler backend kind such as memory or redis.")
     total_tasks: int = Field(ge=0, description="Total persisted task count.")
     enabled_tasks: int = Field(ge=0, description="Number of enabled tasks.")

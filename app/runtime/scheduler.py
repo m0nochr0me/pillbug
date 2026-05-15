@@ -49,6 +49,13 @@ class _TaskBehavior(Protocol):
 
 
 class PillbugWorker(Worker):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.last_tick: datetime | None = None
+        self._consecutive_loop_errors = 0
+        self._last_loop_error_event: datetime | None = None
+        self._loop_error_cooldown = max(self.scheduling_resolution * 10, timedelta(seconds=60))
+
     async def _scheduler_loop(self, redis: Any) -> None:
         """Move due queued tasks without Docket's Lua script.
 
@@ -59,6 +66,7 @@ class PillbugWorker(Worker):
         """
 
         log_context = self._log_context()
+        self.last_tick = _utcnow()
 
         while not self._worker_stopping.is_set():  # pragma: no branch
             try:
@@ -122,12 +130,43 @@ class PillbugWorker(Worker):
                     logger.debug(
                         f"Moved {due_work}/{total_work} due tasks from {self.docket.queue_key} to {self.docket.stream_key}",
                     )
-            except Exception:  # pragma: no cover
+
+                self.last_tick = _utcnow()
+                if self._consecutive_loop_errors:
+                    recovered_after = self._consecutive_loop_errors
+                    self._consecutive_loop_errors = 0
+                    self._last_loop_error_event = None
+                    with contextlib.suppress(Exception):
+                        await runtime_telemetry.record_event(
+                            event_type="scheduler.loop.recovered",
+                            source="scheduler",
+                            message="Scheduler loop recovered after consecutive errors.",
+                            data={"recovered_after_errors": recovered_after},
+                        )
+            except Exception as exc:  # pragma: no cover
                 logger.exception(
                     "Error in scheduler loop",
                     exc_info=True,
                     extra=log_context,
                 )
+                self._consecutive_loop_errors += 1
+                now = _utcnow()
+                if (
+                    self._last_loop_error_event is None
+                    or now - self._last_loop_error_event >= self._loop_error_cooldown
+                ):
+                    self._last_loop_error_event = now
+                    with contextlib.suppress(Exception):
+                        await runtime_telemetry.record_event(
+                            event_type="scheduler.loop.error",
+                            source="scheduler",
+                            level="error",
+                            message="Scheduler loop iteration failed; due tasks were not dispatched.",
+                            data={
+                                "error": str(exc),
+                                "consecutive_errors": self._consecutive_loop_errors,
+                            },
+                        )
 
             try:
                 await asyncio.wait_for(
@@ -154,6 +193,11 @@ class AgentTaskScheduler:
         self._docket: Docket | None = None
         self._worker: PillbugWorker | None = None
         self._worker_task: asyncio.Task[None] | None = None
+        self._watchdog_task: asyncio.Task[None] | None = None
+        self._worker_restart_count = 0
+        self._watchdog_interval = timedelta(seconds=15)
+        self._heartbeat_stale_after = timedelta(seconds=90)
+        self._stuck_execution_grace = timedelta(minutes=5)
         self._started = False
         runtime_telemetry.bind_scheduler(self)
 
@@ -186,6 +230,12 @@ class AgentTaskScheduler:
             self._docket = docket
             self._worker = worker
             self._worker_task = asyncio.create_task(worker.run_forever(), name="pillbug:docket-worker")
+
+            resolution = worker.scheduling_resolution
+            self._watchdog_interval = max(resolution * 3, timedelta(seconds=15))
+            self._heartbeat_stale_after = max(resolution * 6, timedelta(seconds=90))
+            self._watchdog_task = asyncio.create_task(self._watchdog(), name="pillbug:docket-watchdog")
+
             self._started = True
             await runtime_telemetry.record_event(
                 event_type="scheduler.started",
@@ -198,7 +248,7 @@ class AgentTaskScheduler:
                 for definition in self._tasks.values():
                     self._register_task(definition)
 
-                await self._schedule_missing_tasks()
+                await self._reconcile_tasks()
             except Exception:
                 self._started = False
                 await self.aclose()
@@ -208,11 +258,18 @@ class AgentTaskScheduler:
         worker = self._worker
         docket = self._docket
         worker_task = self._worker_task
+        watchdog_task = self._watchdog_task
 
         self._worker = None
         self._docket = None
         self._worker_task = None
+        self._watchdog_task = None
         self._started = False
+
+        if watchdog_task is not None:
+            watchdog_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watchdog_task
 
         if worker is not None:
             await worker.__aexit__(None, None, None)
@@ -230,6 +287,132 @@ class AgentTaskScheduler:
             message="Embedded task scheduler stopped.",
             data={"backend": self._scheduler_backend()},
         )
+
+    async def _watchdog(self) -> None:
+        """Supervise the Docket worker so a crashed or stalled loop is surfaced and recovered.
+
+        The bare ``asyncio.create_task(worker.run_forever())`` is otherwise unsupervised: a
+        crash leaves no structured log or telemetry event and ``self._started`` stays True, so
+        scheduled tasks silently stop firing while manual run-now still works.
+        """
+
+        while True:
+            try:
+                await asyncio.sleep(self._watchdog_interval.total_seconds())
+            except asyncio.CancelledError:
+                return
+
+            if not self._started:
+                return
+
+            worker_task = self._worker_task
+            if worker_task is None or worker_task.done():
+                error: BaseException | None = None
+                detail: str | None = None
+                if worker_task is None:
+                    detail = "worker task missing"
+                elif worker_task.cancelled():
+                    detail = "worker task was cancelled"
+                else:
+                    error = worker_task.exception()
+                    if error is None:
+                        detail = "worker run loop exited without error"
+                await self._handle_worker_failure("crashed", error=error, detail=detail)
+                continue
+
+            last_tick = getattr(self._worker, "last_tick", None)
+            if last_tick is not None and _utcnow() - last_tick > self._heartbeat_stale_after:
+                await self._handle_worker_failure(
+                    "stalled",
+                    error=None,
+                    detail=f"scheduler loop heartbeat stale since {last_tick.isoformat()}",
+                )
+                continue
+
+            # Worker looks healthy: reconcile the task store against Docket so missing or
+            # stuck executions are rescheduled even when no run or restart triggered it.
+            with contextlib.suppress(Exception):
+                await self._reconcile_tasks()
+
+    async def _handle_worker_failure(
+        self,
+        reason: Literal["crashed", "stalled"],
+        *,
+        error: BaseException | None,
+        detail: str | None = None,
+    ) -> None:
+        message = f"Docket worker {reason}; restarting embedded scheduler worker."
+        logger.error(message, exc_info=error)
+        await runtime_telemetry.record_event(
+            event_type=f"scheduler.worker.{reason}",
+            source="scheduler",
+            level="error",
+            message=message,
+            data={
+                "reason": reason,
+                "error": str(error) if error is not None else detail,
+                "restart_count": self._worker_restart_count,
+            },
+        )
+        await self._restart_worker()
+
+    async def _restart_worker(self) -> None:
+        if not self._started or self._docket is None:
+            return
+
+        old_worker = self._worker
+        old_worker_task = self._worker_task
+        self._worker = None
+        self._worker_task = None
+
+        if old_worker is not None:
+            with contextlib.suppress(Exception):
+                await old_worker.__aexit__(None, None, None)
+        if old_worker_task is not None:
+            old_worker_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await old_worker_task
+
+        try:
+            worker = PillbugWorker(
+                docket=self._docket,
+                concurrency=settings.DOCKET_WORKER_CONCURRENCY,
+                redelivery_timeout=timedelta(seconds=settings.DOCKET_REDELIVERY_TIMEOUT_SECONDS),
+                schedule_automatic_tasks=False,
+            )
+            await worker.__aenter__()
+        except Exception:
+            logger.exception("Failed to restart Docket worker; watchdog will retry")
+            await runtime_telemetry.record_event(
+                event_type="scheduler.worker.restart_failed",
+                source="scheduler",
+                level="error",
+                message="Failed to restart embedded scheduler worker; watchdog will retry.",
+            )
+            return
+
+        self._worker = worker
+        self._worker_task = asyncio.create_task(worker.run_forever(), name="pillbug:docket-worker")
+        self._worker_restart_count += 1
+
+        with contextlib.suppress(Exception):
+            await self._reconcile_tasks()
+
+        logger.info(f"Restarted Docket worker (restart_count={self._worker_restart_count})")
+        await runtime_telemetry.record_event(
+            event_type="scheduler.worker.restarted",
+            source="scheduler",
+            message="Embedded scheduler worker restarted by watchdog.",
+            data={"restart_count": self._worker_restart_count},
+        )
+
+    def _worker_health(self) -> tuple[bool, datetime | None, bool]:
+        """Return (worker_alive, last_tick, healthy) for telemetry surfacing."""
+        worker_task = self._worker_task
+        worker_alive = worker_task is not None and not worker_task.done()
+        last_tick = getattr(self._worker, "last_tick", None)
+        heartbeat_fresh = last_tick is not None and _utcnow() - last_tick <= self._heartbeat_stale_after
+        return worker_alive, last_tick, self._started and worker_alive and heartbeat_fresh
 
     async def list_tasks(self) -> dict[str, Any]:
         await self.ensure_started()
@@ -651,7 +834,14 @@ class AgentTaskScheduler:
             definition.updated_at = _utcnow()
             await self._persist_locked()
 
-    async def _schedule_missing_tasks(self) -> None:
+    async def _reconcile_tasks(self) -> None:
+        """Reconcile the persisted task store against Docket execution state.
+
+        Missing executions are scheduled, terminal ones are rescheduled, and executions
+        stuck overdue in a non-terminal, non-running state are reclaimed. Every decision is
+        logged so a task that silently stops firing leaves a trace.
+        """
+
         if self._docket is None:
             return
 
@@ -667,17 +857,53 @@ class AgentTaskScheduler:
             if not definition.enabled:
                 continue
 
-            if definition.execution_key in active_keys:
-                continue
+            await self._reconcile_task(definition)
 
-            execution = await self._docket.get_execution(definition.execution_key)
-            if execution is not None:
-                await execution.sync()
-                state = getattr(execution.state, "value", execution.state)
-                if state not in {"completed", "failed", "cancelled"}:
-                    continue
+    async def _reconcile_task(self, definition: AgentTaskDefinition) -> None:
+        if self._docket is None:
+            return
 
+        task_id = definition.task_id
+        execution = await self._docket.get_execution(definition.execution_key)
+        if execution is None:
             await self._schedule_task(definition, replace=False)
+            logger.info(f"Scheduled missing execution for task {task_id}")
+            return
+
+        await execution.sync()
+        state = str(getattr(execution.state, "value", execution.state))
+
+        if state in {"completed", "failed", "cancelled"}:
+            await self._schedule_task(definition, replace=False)
+            logger.info(f"Rescheduled task {task_id} after terminal execution state '{state}'")
+            return
+
+        if state == "running":
+            return
+
+        when = execution.when
+        if when is None or _utcnow() - when <= self._stuck_execution_grace:
+            return
+
+        overdue_seconds = (_utcnow() - when).total_seconds()
+        logger.warning(
+            f"Reclaiming stuck execution for task {task_id} "
+            f"(state='{state}', due={when.isoformat()}, overdue={overdue_seconds:.0f}s)"
+        )
+        await runtime_telemetry.record_event(
+            event_type="scheduler.execution.reclaimed",
+            source="scheduler",
+            level="warning",
+            message="Reclaimed a scheduled task execution that was overdue and never dispatched.",
+            data={
+                "task_id": task_id,
+                "name": definition.name,
+                "state": state,
+                "due_at": when.isoformat(),
+                "overdue_seconds": round(overdue_seconds),
+            },
+        )
+        await self._schedule_task(definition, replace=True)
 
     async def _cancel_orphaned_executions(self, active_keys: set[str], known_keys: set[str]) -> None:
         if self._docket is None:
@@ -957,6 +1183,13 @@ class AgentTaskScheduler:
 
         return telemetry_by_key
 
+    def _is_execution_overdue(self, execution: TaskExecutionTelemetry | None) -> bool:
+        if execution is None or execution.when is None:
+            return False
+        if execution.state in {"running", "completed", "failed", "cancelled"}:
+            return False
+        return _utcnow() - execution.when > self._stuck_execution_grace
+
     def _last_run_telemetry(self, definition: AgentTaskDefinition) -> TaskRunTelemetry | None:
         if definition.last_run is None:
             return None
@@ -984,6 +1217,7 @@ class AgentTaskScheduler:
             if last_run is not None:
                 recent_runs.append(last_run)
 
+            execution = execution_by_key.get(definition.execution_key)
             task_entries.append(
                 AgentTaskTelemetryEntry(
                     task_id=definition.task_id,
@@ -995,15 +1229,21 @@ class AgentTaskScheduler:
                     created_at=definition.created_at,
                     updated_at=definition.updated_at,
                     last_run=last_run,
-                    execution=execution_by_key.get(definition.execution_key),
+                    execution=execution,
+                    overdue=self._is_execution_overdue(execution),
                 )
             )
 
         task_entries.sort(key=lambda entry: entry.updated_at, reverse=True)
         recent_runs.sort(key=lambda run: run.finished_at, reverse=True)
 
+        worker_alive, worker_last_tick, healthy = self._worker_health()
         scheduler_snapshot = SchedulerTelemetrySnapshot(
             started=self._started,
+            healthy=healthy,
+            worker_alive=worker_alive,
+            worker_last_tick=worker_last_tick,
+            worker_restart_count=self._worker_restart_count,
             backend=self._scheduler_backend(),
             total_tasks=len(definitions),
             enabled_tasks=sum(1 for definition in definitions if definition.enabled),
