@@ -1332,6 +1332,15 @@ if importlib.util.find_spec("pillbug_memory") is not None:
     logger.info(f"Registered pillbug-memory tools rooted at {_display_path(_memory_dir)}")
 
 
+# Optional bundled trigger package: register the trigger sources management tool only when
+# the trigger channel is enabled on this runtime, so disabled deployments don't see the surface.
+if "trigger" in settings.enabled_channels() and importlib.util.find_spec("pillbug_trigger") is not None:
+    from pillbug_trigger import register_trigger_tools  # pyright: ignore[reportMissingImports]
+
+    register_trigger_tools(mcp)
+    logger.info("Registered pillbug-trigger management tool")
+
+
 # Load MCP server configuration from app/mcp.json if it exists, and mount configured servers
 if (mcp_config_file := settings.BASE_DIR / "mcp.json").is_file():
     logger.info(f"Loading MCP config from {mcp_config_file}")
