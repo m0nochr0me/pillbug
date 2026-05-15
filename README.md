@@ -9,7 +9,7 @@ Pillbug is an async AI agent runtime built for isolated deployment.
 
 ## Why Pillbug?
 
-Pillbug is opinionated about one thing: **one agent, one runtime, one workspace, per container.** Everything else — Gemini-first, MCP-native, plugin channels, bring-your-own-memory — follows from that.
+Pillbug is opinionated about one thing: **every agent runs alone, sandboxed in its own container.** Everything else — Gemini-first, MCP-native, plugin channels, bring-your-own-memory — follows from that.
 
 Pick Pillbug when you want:
 
@@ -23,7 +23,7 @@ Pillbug is probably **not** the right fit if you need multi-agent routing inside
 
 ## Highlights
 
-- One agent, one runtime, and one workspace per container
+- A single agent per container, with its own runtime and workspace
 - Async runtime with debounced inbound message handling
 - Native audio recognition and vision support via multi-modal Gemini API
 - Gemini developer and Vertex AI backends, plus OpenAI-compatible upstreams (llama.cpp, vLLM, Ollama, LiteLLM) through the bundled translation proxy
