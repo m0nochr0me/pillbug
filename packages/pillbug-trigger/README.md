@@ -25,6 +25,16 @@ export PB_CHANNEL_PLUGIN_FACTORIES=trigger=pillbug_trigger:create_channel
 export PB_TRIGGER_BEARER_TOKEN=your-secret-token
 ```
 
+Optionally register the trigger sources management MCP tool by adding the
+plugin to `PB_MCP_TOOL_FACTORIES`:
+
+```bash
+export PB_MCP_TOOL_FACTORIES=trigger=pillbug_trigger:register_trigger_tools
+```
+
+The plugin self-gates on `trigger` being in `PB_ENABLED_CHANNELS`, so leaving
+the entry in place on a runtime that hasn't enabled the channel is harmless.
+
 ## Source Configuration
 
 Per-source reaction prompts now live in a JSON file. By default the trigger channel creates `~/.pillbug/trigger_sources.json` on first use.

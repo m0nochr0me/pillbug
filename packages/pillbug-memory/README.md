@@ -11,22 +11,28 @@ embeddings, no subprocess — `pathlib` + `aiofile` only.
 uv sync --extra memory
 ```
 
-When the extra is installed, the runtime auto-registers five MCP tools against
-the local composition server at startup: `memory_list`, `memory_get`,
-`memory_add`, `memory_update`, `memory_delete`. There is nothing else to wire
-up — no channel plugin, no extra env vars beyond an optional path override.
+After installing the extra, register the plugin in `PB_MCP_TOOL_FACTORIES`:
+
+```bash
+export PB_MCP_TOOL_FACTORIES=memory=pillbug_memory:register_memory_tools
+```
+
+The runtime then exposes five MCP tools against the local composition server at
+startup: `memory_list`, `memory_get`, `memory_add`, `memory_update`,
+`memory_delete`. No channel plugin or other wiring is required.
 
 ## Configuration
 
-| Variable        | Default  | Notes                                            |
-| --------------- | -------- | ------------------------------------------------ |
-| `PB_MEMORY_DIR` | `memory` | Workspace-relative path. Absolute or `..` paths are rejected. |
+| Variable                | Default   | Notes                                                                                   |
+| ----------------------- | --------- | --------------------------------------------------------------------------------------- |
+| `PB_MCP_TOOL_FACTORIES` | _(empty)_ | Add `memory=pillbug_memory:register_memory_tools` (comma-separated with other plugins). |
+| `PB_MEMORY_DIR`         | `memory`  | Workspace-relative path. Absolute or `..` paths are rejected.                           |
 
 The directory is created lazily on first write.
 
 ## File layout
 
-```
+```text
 workspace/memory/
   MEMORY.md            # ledger maintained by the package; safe to hand-edit
   <id>.md              # one memory per file, frontmatter + body

@@ -129,6 +129,7 @@ class Settings(BaseSettings):
 
     ENABLED_CHANNELS: str = "cli"
     CHANNEL_PLUGIN_FACTORIES: str = ""
+    MCP_TOOL_FACTORIES: str = ""
     INBOUND_DEBOUNCE_SECONDS: float = 1.5
     INBOUND_MAX_MESSAGE_CHARS: int = 4000
 
@@ -368,6 +369,18 @@ class Settings(BaseSettings):
                 )
 
             mappings[channel_name.strip()] = import_path.strip()
+
+        return mappings
+
+    def mcp_tool_factories(self) -> dict[str, str]:
+        mappings: dict[str, str] = {}
+
+        for raw_mapping in _split_csv(self.MCP_TOOL_FACTORIES):
+            plugin_name, separator, import_path = raw_mapping.partition("=")
+            if not separator or not plugin_name.strip() or not import_path.strip():
+                raise ValueError("PB_MCP_TOOL_FACTORIES entries must use the format name=package.module:factory")
+
+            mappings[plugin_name.strip()] = import_path.strip()
 
         return mappings
 

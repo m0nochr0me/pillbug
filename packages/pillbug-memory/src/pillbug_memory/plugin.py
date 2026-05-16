@@ -1,20 +1,25 @@
 """Register flat-file memory tools against the runtime FastMCP server."""
 
-from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from fastmcp import FastMCP
 
 from pillbug_memory.schema import MemoryType
 from pillbug_memory.store import MemoryNotFoundError, MemoryStore
 
+if TYPE_CHECKING:
+    from app.runtime.mcp_plugins import McpRegistrationContext
+
 __all__ = ("register_memory_tools",)
 
 
-def register_memory_tools(mcp: FastMCP, memory_dir: Path) -> MemoryStore:
+def register_memory_tools(mcp: FastMCP, ctx: McpRegistrationContext) -> MemoryStore:
     """Register the five memory MCP tools and return the underlying store."""
 
+    memory_dir = ctx.resolve_workspace_path(ctx.settings.MEMORY_DIR)
+    memory_dir.mkdir(parents=True, exist_ok=True)
     store = MemoryStore(memory_dir)
+    ctx.logger.info(f"pillbug-memory store rooted at {memory_dir}")
 
     @mcp.tool
     async def memory_list(

@@ -4,7 +4,6 @@ Composition MCP Server
 
 import asyncio
 import hashlib
-import importlib.util
 import json
 import mimetypes
 import os
@@ -33,6 +32,7 @@ from app.core.telemetry import runtime_telemetry
 from app.core.url_shortener import local_url_shortener
 from app.middleware.compactor import CompactorMiddleware
 from app.runtime.channels import describe_channel_telemetry, get_channel_plugin, register_channel_conversation
+from app.runtime.mcp_plugins import load_mcp_tool_plugins
 from app.runtime.scheduler import task_scheduler
 from app.runtime.session_binding import (
     bind_runtime_session_todo_snapshot,
@@ -1322,23 +1322,10 @@ async def manage_agent_task(
     raise ValueError(f"Unsupported action: {action}")
 
 
-# Optional bundled memory package: register its MCP tools when `uv sync --extra memory` has installed it.
-if importlib.util.find_spec("pillbug_memory") is not None:
-    from pillbug_memory import register_memory_tools  # pyright: ignore[reportMissingImports]
-
-    _memory_dir = _resolve_workspace_path(settings.MEMORY_DIR)
-    _memory_dir.mkdir(parents=True, exist_ok=True)
-    register_memory_tools(mcp, _memory_dir)
-    logger.info(f"Registered pillbug-memory tools rooted at {_display_path(_memory_dir)}")
-
-
-# Optional bundled trigger package: register the trigger sources management tool only when
-# the trigger channel is enabled on this runtime, so disabled deployments don't see the surface.
-if "trigger" in settings.enabled_channels() and importlib.util.find_spec("pillbug_trigger") is not None:
-    from pillbug_trigger import register_trigger_tools  # pyright: ignore[reportMissingImports]
-
-    register_trigger_tools(mcp)
-    logger.info("Registered pillbug-trigger management tool")
+# Optional MCP tool plugins listed in PB_MCP_TOOL_FACTORIES.
+# Each factory has signature `(mcp, ctx)` and is responsible for self-gating
+# (e.g. checking that a companion channel is enabled).
+load_mcp_tool_plugins(mcp)
 
 
 # Load MCP server configuration from app/mcp.json if it exists, and mount configured servers

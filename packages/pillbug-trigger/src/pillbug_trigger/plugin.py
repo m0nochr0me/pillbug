@@ -1,12 +1,15 @@
 """Register the trigger management MCP tool against the runtime FastMCP server."""
 
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from fastmcp import FastMCP
 
 from pillbug_trigger import store
 from pillbug_trigger.config import settings
 from pillbug_trigger.schema import TriggerSourceConfig, Urgency
+
+if TYPE_CHECKING:
+    from app.runtime.mcp_plugins import McpRegistrationContext
 
 __all__ = ("register_trigger_tools",)
 
@@ -15,8 +18,17 @@ def _serialize(config: TriggerSourceConfig) -> dict[str, Any]:
     return config.model_dump(mode="json")
 
 
-def register_trigger_tools(mcp: FastMCP) -> None:
-    """Register the single `manage_trigger_sources` CRUD tool."""
+def register_trigger_tools(mcp: FastMCP, ctx: McpRegistrationContext) -> None:
+    """Register the single `manage_trigger_sources` CRUD tool.
+
+    Self-gates on the trigger channel being enabled, so disabled deployments
+    don't expose the surface even when this plugin is listed in
+    `PB_MCP_TOOL_FACTORIES`.
+    """
+
+    if "trigger" not in ctx.settings.enabled_channels():
+        ctx.logger.info("Skipping pillbug-trigger MCP tool registration: 'trigger' channel is not enabled")
+        return
 
     @mcp.tool
     async def manage_trigger_sources(
