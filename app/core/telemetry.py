@@ -46,6 +46,7 @@ class RuntimeTelemetry:
             workspace_root=str(settings.WORKSPACE_ROOT),
             model=settings.GEMINI_MODEL,
             enabled_channels=settings.enabled_channels(),
+            approvals_bypassed=settings.DANGEROUSLY_APPROVE_EVERYTHING,
         )
         self._events: deque[TelemetryEvent] = deque(maxlen=250)
         self._subscribers: set[asyncio.Queue[TelemetryEvent]] = set()
@@ -56,7 +57,12 @@ class RuntimeTelemetry:
         self._scheduler: _SchedulerTelemetryProvider | None = None
 
     def metadata(self) -> RuntimeMetadata:
-        return self._metadata.model_copy(deep=True)
+        # approvals_bypassed must reflect the live setting so toggling
+        # PB_DANGEROUSLY_APPROVE_EVERYTHING is visible without a restart.
+        return self._metadata.model_copy(
+            deep=True,
+            update={"approvals_bypassed": settings.DANGEROUSLY_APPROVE_EVERYTHING},
+        )
 
     def bind_application_loop(self, provider: _ApplicationLoopTelemetryProvider) -> None:
         self._application_loop = provider

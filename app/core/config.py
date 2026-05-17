@@ -4,10 +4,11 @@ Config Maker
 
 # pyright: basic
 
+import json
 import re
 import sys
 from datetime import datetime
-from functools import cached_property
+from functools import cached_property, lru_cache
 from pathlib import Path
 from typing import Self
 from urllib.parse import quote
@@ -29,6 +30,83 @@ _GEMINI_BACKENDS = {"developer", "vertex"}
 
 def _split_csv(value: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
+@lru_cache(maxsize=8)
+def _compile_execute_command_allowlist(value: str) -> tuple[re.Pattern[str], ...]:
+    return tuple(re.compile(pattern) for pattern in _split_csv(value))
+
+
+_ALLOWED_OUTBOUND_LIMIT_KEYS = frozenset({"per_session", "per_minute", "per_hour"})
+
+_DEFAULT_INBOUND_ATTACHMENT_ROOTS: dict[str, str] = {
+    "telegram": "inbox/telegram",
+    "a2a": "inbox/a2a",
+    "cli": "inbox/cli",
+}
+
+
+@lru_cache(maxsize=8)
+def _parse_inbound_attachment_roots(value: str) -> dict[str, str]:
+    """Parse PB_INBOUND_ATTACHMENT_ROOTS_JSON into `{channel: relative_sub_root}`.
+
+    Per-channel sub-roots must be workspace-relative and may not traverse outside it.
+    An empty/missing value returns `{}`; defaults are applied separately by the helper
+    on `Settings` so an operator can override individual channels without restating all.
+    """
+    stripped = value.strip()
+    if not stripped:
+        return {}
+    decoded = json.loads(stripped)
+    if not isinstance(decoded, dict):
+        raise ValueError("PB_INBOUND_ATTACHMENT_ROOTS_JSON must be a JSON object")
+    normalized: dict[str, str] = {}
+    for channel, sub_root in decoded.items():
+        if not isinstance(channel, str) or not channel.strip():
+            raise ValueError("PB_INBOUND_ATTACHMENT_ROOTS_JSON channel keys must be non-empty strings")
+        if not isinstance(sub_root, str) or not sub_root.strip():
+            raise ValueError(f"PB_INBOUND_ATTACHMENT_ROOTS_JSON: sub-root for {channel!r} must be a non-empty string")
+        candidate = Path(sub_root.strip())
+        if candidate.is_absolute():
+            raise ValueError(f"PB_INBOUND_ATTACHMENT_ROOTS_JSON: sub-root for {channel!r} must be workspace-relative")
+        if ".." in candidate.parts:
+            raise ValueError(
+                f"PB_INBOUND_ATTACHMENT_ROOTS_JSON: sub-root for {channel!r} must not traverse outside the workspace"
+            )
+        normalized[channel.strip()] = candidate.as_posix()
+    return normalized
+
+
+@lru_cache(maxsize=8)
+def _parse_outbound_send_limits(value: str) -> dict[str, dict[str, int]]:
+    """Parse PB_OUTBOUND_SEND_LIMITS_JSON into a `{channel: {window: cap}}` mapping."""
+    stripped = value.strip()
+    if not stripped:
+        return {}
+    decoded = json.loads(stripped)
+    if not isinstance(decoded, dict):
+        raise ValueError("PB_OUTBOUND_SEND_LIMITS_JSON must be a JSON object")
+
+    normalized: dict[str, dict[str, int]] = {}
+    for channel, raw_limits in decoded.items():
+        if not isinstance(channel, str) or not channel.strip():
+            raise ValueError("PB_OUTBOUND_SEND_LIMITS_JSON channel keys must be non-empty strings")
+        if not isinstance(raw_limits, dict):
+            raise ValueError(f"PB_OUTBOUND_SEND_LIMITS_JSON limits for {channel!r} must be an object")
+        channel_limits: dict[str, int] = {}
+        for window, cap in raw_limits.items():
+            if window not in _ALLOWED_OUTBOUND_LIMIT_KEYS:
+                raise ValueError(
+                    f"PB_OUTBOUND_SEND_LIMITS_JSON: unknown limit window {window!r} for channel {channel!r}; "
+                    f"allowed: {sorted(_ALLOWED_OUTBOUND_LIMIT_KEYS)}"
+                )
+            if not isinstance(cap, int) or isinstance(cap, bool) or cap < 0:
+                raise ValueError(
+                    f"PB_OUTBOUND_SEND_LIMITS_JSON: limit {window!r} for channel {channel!r} must be a non-negative integer"
+                )
+            channel_limits[window] = cap
+        normalized[channel.strip()] = channel_limits
+    return normalized
 
 
 def _validate_runtime_identifier(value: str, *, source: str) -> str:
@@ -121,6 +199,16 @@ class Settings(BaseSettings):
     MCP_FETCH_URL_MAX_BYTES: int = 20 * 1024 * 1024
     MCP_FETCH_URL_TIMEOUT_SECONDS: float = 30.0
 
+    EXECUTE_COMMAND_ENV_PASSTHROUGH: str = ""
+    EXECUTE_COMMAND_ALLOWLIST: str = ""
+    OUTBOUND_AUTOSEND_CHANNELS: str = "cli"
+    OUTBOUND_SEND_LIMITS_JSON: str = ""
+    INBOUND_ATTACHMENT_ROOTS_JSON: str = ""
+    DANGEROUSLY_APPROVE_EVERYTHING: bool = False
+
+    CACHE_HIT_RATIO_WARN_THRESHOLD: float = 0.3
+    CACHE_HIT_RATIO_WARN_WINDOW: int = 5
+
     DOCKET_NAME: str = "pillbug"
     DOCKET_URL: str | None = None
     DOCKET_WORKER_CONCURRENCY: int = 3
@@ -191,6 +279,18 @@ class Settings(BaseSettings):
             raise ValueError("PB_MEMORY_DIR must not traverse outside the workspace root")
 
         return candidate.as_posix()
+
+    @field_validator("DANGEROUSLY_APPROVE_EVERYTHING")
+    @classmethod
+    def warn_when_dangerous_mode_enabled(cls, value: bool) -> bool:
+        if value:
+            print(
+                "[pillbug] WARNING: PB_DANGEROUSLY_APPROVE_EVERYTHING=true — "
+                "command/outbound approval gates are bypassed. Use only in dev/eval/trusted environments.",
+                file=sys.stderr,
+                flush=True,
+            )
+        return value
 
     @field_validator("A2A_CONVERGENCE_MAX_HOPS")
     @classmethod
@@ -371,6 +471,22 @@ class Settings(BaseSettings):
             mappings[channel_name.strip()] = import_path.strip()
 
         return mappings
+
+    def execute_command_env_passthrough(self) -> tuple[str, ...]:
+        return _split_csv(self.EXECUTE_COMMAND_ENV_PASSTHROUGH)
+
+    def execute_command_allowlist_patterns(self) -> tuple[re.Pattern[str], ...]:
+        return _compile_execute_command_allowlist(self.EXECUTE_COMMAND_ALLOWLIST)
+
+    def outbound_autosend_channels(self) -> tuple[str, ...]:
+        return _split_csv(self.OUTBOUND_AUTOSEND_CHANNELS)
+
+    def outbound_send_limits(self) -> dict[str, dict[str, int]]:
+        return _parse_outbound_send_limits(self.OUTBOUND_SEND_LIMITS_JSON)
+
+    def inbound_attachment_roots(self) -> dict[str, str]:
+        configured = _parse_inbound_attachment_roots(self.INBOUND_ATTACHMENT_ROOTS_JSON)
+        return {**_DEFAULT_INBOUND_ATTACHMENT_ROOTS, **configured}
 
     def mcp_tool_factories(self) -> dict[str, str]:
         mappings: dict[str, str] = {}

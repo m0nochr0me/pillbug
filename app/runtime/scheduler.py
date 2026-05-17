@@ -16,8 +16,13 @@ from app.core.ai import GeminiChatService, chat_service
 from app.core.config import settings
 from app.core.log import logger
 from app.core.telemetry import runtime_telemetry
+from app.runtime.task_runtime_state import (
+    clear_task_forbidden_actions,
+    set_task_forbidden_actions,
+)
 from app.schema.tasks import (
     AgentTaskDefinition,
+    AgentTaskGoal,
     AgentTaskRunRecord,
     AgentTaskStore,
     CronTaskSchedule,
@@ -513,6 +518,7 @@ class AgentTaskScheduler:
         enabled: bool = True,
         repeat: bool = False,
         clean_session: bool = True,
+        goal: AgentTaskGoal | None = None,
     ) -> dict[str, Any]:
         await self.ensure_started()
 
@@ -528,6 +534,7 @@ class AgentTaskScheduler:
             ),
             enabled=enabled,
             clean_session=clean_session,
+            goal=goal,
         )
 
         async with self._lock:
@@ -562,6 +569,8 @@ class AgentTaskScheduler:
         enabled: bool | None = None,
         repeat: bool | None = None,
         clean_session: bool | None = None,
+        goal: AgentTaskGoal | None = None,
+        clear_goal: bool = False,
     ) -> dict[str, Any]:
         await self.ensure_started()
 
@@ -604,6 +613,13 @@ class AgentTaskScheduler:
 
             if enabled is not None and enabled != updated.enabled:
                 updated.enabled = enabled
+                changed = True
+
+            if clear_goal and updated.goal is not None:
+                updated.goal = None
+                changed = True
+            elif goal is not None and updated.goal != goal:
+                updated.goal = goal
                 changed = True
 
             if not changed:
@@ -724,12 +740,24 @@ class AgentTaskScheduler:
             },
         )
 
+        # P2 #12: register per-run forbidden actions before the session opens so the MCP
+        # gate sees them on the first tool call.
+        goal = definition.goal
+        forbidden_actions = goal.forbidden_actions if goal is not None else ()
+        if forbidden_actions:
+            set_task_forbidden_actions(definition.resolved_session_id, forbidden_actions)
+
+        max_steps_per_run = goal.max_steps_per_run if goal is not None else None
+
         try:
             if definition.clean_session:
                 session = await self._chat_service.reset_session(definition.resolved_session_id)
             else:
                 session = await self._chat_service.restore_session(definition.resolved_session_id)
-            response = await session.send_message(self._build_model_input(definition))
+            response = await session.send_message(
+                self._build_model_input(definition),
+                max_remote_calls=max_steps_per_run,
+            )
             raw_response = response.text or ""
             action, parsed_message = self._parse_task_response(raw_response, definition.schedule.kind)
             if isinstance(definition.schedule, DelayedTaskSchedule) and not self._repeat_enabled(definition.schedule):
@@ -749,6 +777,9 @@ class AgentTaskScheduler:
             )
             raise
         finally:
+            if forbidden_actions:
+                clear_task_forbidden_actions(definition.resolved_session_id)
+
             latest = await self._task_snapshot(task_id)
             if behavior is not None and (latest is None or not latest.enabled or latest.revision != revision):
                 behavior.cancel()
@@ -762,18 +793,16 @@ class AgentTaskScheduler:
                 behavior.cancel()
                 await self._disable_task(task_id, revision)
 
-            await self._record_run(
-                task_id=task_id,
-                revision=revision,
-                run_record=AgentTaskRunRecord(
-                    state="failed" if error else "completed",
-                    action=action,
-                    started_at=started_at,
-                    finished_at=_utcnow(),
-                    response_text=parsed_message or raw_response or None,
-                    error=error,
-                ),
+            run_record = AgentTaskRunRecord(
+                state="failed" if error else "completed",
+                action=action,
+                started_at=started_at,
+                finished_at=_utcnow(),
+                response_text=parsed_message or raw_response or None,
+                error=error,
             )
+            await self._record_run(task_id=task_id, revision=revision, run_record=run_record)
+            await self._append_progress_entry(definition, revision, run_record, trigger=trigger)
 
             if error is None:
                 await runtime_telemetry.record_event(
@@ -782,6 +811,60 @@ class AgentTaskScheduler:
                     message="Scheduled task execution completed.",
                     data={"task_id": task_id, "revision": revision, "action": action, "trigger": trigger},
                 )
+
+    def _progress_log_path(self, definition: AgentTaskDefinition) -> Path:
+        if definition.goal is not None and definition.goal.progress_log_path:
+            return Path(definition.goal.progress_log_path)
+        return settings.TASKS_DIR / definition.task_id / "progress.jsonl"
+
+    async def _append_progress_entry(
+        self,
+        definition: AgentTaskDefinition,
+        revision: int,
+        run_record: AgentTaskRunRecord,
+        *,
+        trigger: Literal["scheduler", "control"],
+    ) -> None:
+        """P2 #12: append a JSONL line summarizing this run for later retrospection."""
+        goal = definition.goal
+        entry: dict[str, Any] = {
+            "timestamp": run_record.finished_at.isoformat(),
+            "task_id": definition.task_id,
+            "revision": revision,
+            "trigger": trigger,
+            "schedule_kind": definition.schedule.kind,
+            "started_at": run_record.started_at.isoformat(),
+            "finished_at": run_record.finished_at.isoformat(),
+            "state": run_record.state,
+            "action": run_record.action,
+            "prompt_head": definition.prompt[:200],
+            "response_head": (run_record.response_text or "")[:500],
+            "error": run_record.error,
+        }
+        if goal is not None:
+            entry["goal"] = {
+                "done_condition": goal.done_condition,
+                "validation_prompt": goal.validation_prompt,
+                "max_steps_per_run": goal.max_steps_per_run,
+                "max_cost_per_run_usd": goal.max_cost_per_run_usd,
+                "forbidden_actions": list(goal.forbidden_actions),
+            }
+
+        progress_path = self._progress_log_path(definition)
+        try:
+            await asyncio.to_thread(progress_path.parent.mkdir, parents=True, exist_ok=True)
+            await asyncio.to_thread(
+                self._append_jsonl_line,
+                progress_path,
+                json.dumps(entry, default=str) + "\n",
+            )
+        except Exception:
+            logger.exception(f"Failed to append progress entry for task {definition.task_id}")
+
+    @staticmethod
+    def _append_jsonl_line(path: Path, line: str) -> None:
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(line)
 
     async def _load_store(self) -> None:
         if not await asyncio.to_thread(self._store_path.is_file):

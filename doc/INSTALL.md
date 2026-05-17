@@ -355,6 +355,9 @@ After that bootstrap pass, make sure each runtime base directory contains these 
 - `security_patterns.json`
 - `workspace/AGENTS.md`
 - `workspace/skills/` if you want bundled custom skills available in that runtime
+- `workspace/plans/active/` (empty; populated when the model enters planning mode)
+- `workspace/inbox/<channel>/` for each channel that delivers attachments (defaults: `cli`, `telegram`, `a2a`)
+- `workspace/fetched/` (created on first `fetch_url`; artifacts carry a `trust: untrusted` banner)
 - `mcp.json`
 - `trigger_sources.json`
 
@@ -364,8 +367,16 @@ What creates them:
 - `security_patterns.json`: created automatically on first launch
 - `workspace/AGENTS.md`: created automatically on first launch, then the process exits
 - `workspace/skills/`: copy from the repository `skills/` directory after the workspace exists; Pillbug discovers custom skills from `workspace/skills/*/SKILL.md`
+- `workspace/plans/active/` and `workspace/inbox/<channel>/`: ensured by `workspace_init()` on every launch
 - `mcp.json`: copy from `doc/common/example_mcp.json` and edit it for your environment
 - `trigger_sources.json`: created as `[]` by the trigger plugin when that channel is enabled, or copy from `doc/common/example_trigger_sources.json` to pre-seed real rules
+
+Runtime state outside the workspace (auto-created under `PB_BASE_DIR` as needed):
+
+- `approvals/<id>.json` — command-draft approval records produced by `draft_command`.
+- `drafts/<id>.json` — outbound-draft records produced by `draft_outbound_message` and any `send_*` call against a non-autosend channel.
+- `tasks/agent_tasks.json` — scheduled-task registry (when not using a Redis-backed Docket).
+- `tasks/<task_id>/progress.jsonl` — per-task run log when the task carries a `goal` record.
 
 Minimum post-bootstrap edits:
 

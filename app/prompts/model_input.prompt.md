@@ -1,6 +1,10 @@
-{{ base_context }}
-
 {{ agents_md }}
+{% if skills %}
+
+---
+
+{{ skills }}
+{% endif %}
 {% if channel_memos %}
 
 ---
@@ -13,15 +17,7 @@
 {% endif %}
 {% endfor %}
 {% endif %}
-{% if todo_list %}
 
 ---
 
-{{ todo_list }}
-{% endif %}
-{% if skills %}
-
----
-
-{{ skills }}
-{% endif %}
+{{ base_context }}

@@ -10,6 +10,28 @@ _NAME_PREFIX = "name:"
 _DESCRIPTION_PREFIX = "description:"
 _QUOTE_CHARS = "\"'"
 
+SKILL_FILE_NAME = "SKILL.md"
+SKILLS_DIRECTORY_NAME = "skills"
+
+
+def workspace_skill_name_for_path(path: Path) -> str | None:
+    """Return the skill directory name when `path` is a workspace skills/<name>/SKILL.md file.
+
+    Centralizes the path predicate so the read_file hook (plan P2 #18) and the
+    discovery loop stay consistent if the layout changes. Returns None for anything
+    that is not a workspace skill file.
+    """
+
+    if path.name != SKILL_FILE_NAME:
+        return None
+    skill_dir = path.parent
+    if skill_dir.parent.name != SKILLS_DIRECTORY_NAME:
+        return None
+    skill_name = skill_dir.name
+    if not skill_name or skill_name == SKILLS_DIRECTORY_NAME:
+        return None
+    return skill_name
+
 
 def _strip_wrapping_quotes(value: str) -> str:
     normalized = value.strip()

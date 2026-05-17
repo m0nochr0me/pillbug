@@ -6,6 +6,7 @@ import asyncio
 import mimetypes
 from collections.abc import Awaitable, Callable
 from datetime import datetime
+from functools import cache
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import quote
@@ -34,6 +35,7 @@ from app.schema.ai import ChatResponse, ChatSessionSnapshot, ChatSessionUsageTot
 from app.schema.messages import extract_a2a_origin_route
 from app.schema.todo import TodoListSnapshot
 from app.util.base_dir import get_module_root
+from app.util.rehydration import RehydrationBundle, render_rehydration_text, summarize_tool_observation
 from app.util.skills import discover_workspace_skills
 from app.util.workspace import resolve_path_within_root
 
@@ -163,6 +165,29 @@ def _legacy_attachment_from_metadata(metadata: dict[str, Any]) -> InboundAttachm
     )
 
 
+def resolve_inbound_attachment_path(attachment_path: str, channel_source: str | None) -> Path | None:
+    """Resolve an inbound attachment within the per-channel sub-root (plan P2 #17).
+
+    Returns the resolved path when both the workspace sandbox and (if configured) the
+    per-channel sub-root accept it; returns None when the attachment escapes either
+    boundary. Channels without an explicit sub-root entry fall back to the workspace
+    root unchanged so unrelated plugins keep working.
+    """
+    try:
+        resolved = resolve_path_within_root(attachment_path, settings.WORKSPACE_ROOT)
+    except ValueError:
+        return None
+    sub_root = settings.inbound_attachment_roots().get(channel_source or "")
+    if sub_root is None:
+        return resolved
+    expected_root = (settings.WORKSPACE_ROOT / sub_root).resolve()
+    try:
+        resolved.relative_to(expected_root)
+    except ValueError:
+        return None
+    return resolved
+
+
 def _extract_inbound_attachments(metadata: dict[str, Any]) -> list[InboundAttachment]:
     attachments: list[InboundAttachment] = []
     raw_attachments = metadata.get("inbound_attachments")
@@ -218,6 +243,26 @@ def _resolve_direct_reply_channel_name(
         return None
 
     return origin_channel_name
+
+
+@cache
+def _load_agents_md_cached(path: str, mtime_ns: int) -> str:
+    # P1 #8: mtime-keyed cache mirrors `_load_security_patterns_from_disk` in
+    # app/runtime/pipeline.py. Keeps AGENTS.md off the hot path while still picking up
+    # edits that change the file's mtime.
+    del mtime_ns
+    return Path(path).read_text(encoding="utf-8")
+
+
+async def _read_agents_md(agents_md_path: Path) -> str:
+    def _read() -> str:
+        try:
+            mtime_ns = agents_md_path.stat().st_mtime_ns
+        except OSError:
+            return ""
+        return _load_agents_md_cached(str(agents_md_path), mtime_ns)
+
+    return await asyncio.to_thread(_read)
 
 
 def _render_todo_list_instruction(todo_snapshot: TodoListSnapshot | None) -> str | None:
@@ -399,7 +444,7 @@ class GeminiChatService:
     async def get_channel_instruction_memos(self) -> list[str]:
         memos: list[str] = []
 
-        for channel_name in settings.enabled_channels():
+        for channel_name in sorted(settings.enabled_channels()):
             channel = get_channel_plugin(channel_name, create=True)
             if channel is None:
                 continue
@@ -431,33 +476,32 @@ class GeminiChatService:
     async def build_system_instruction(
         self,
         *,
-        session_id: str | None = None,
         channel_name: str | None = None,
         message_metadata: list[dict[str, Any]] | None = None,
     ) -> str | None:
-        async with aiofile.AIOFile(settings.WORKSPACE_ROOT / "AGENTS.md", "r", encoding="utf-8") as agents_file:
-            agents_md = str(await agents_file.read())
-            todo_list = _render_todo_list_instruction(
-                get_runtime_session_todo_snapshot(session_id) if session_id is not None else None
+        # P1 #5: the system instruction holds only stable content (agents_md → skills →
+        # channel_memos → base_context). The per-session todo snapshot moved to the user
+        # turn so it doesn't fragment Gemini's automatic prefix cache. base_context still
+        # carries the volatile datetime line; it lives at the end so the cached prefix is
+        # everything before it.
+        agents_md = await _read_agents_md(settings.WORKSPACE_ROOT / "AGENTS.md")
+        skills_prompt: str | None = None
+        if skills := await self.discover_skills():
+            skills_prompt = self.render_prompt_text(
+                _SKILLS_PROMPT_NAME,
+                skills=skills,
             )
-            skills_prompt: str | None = None
-            if skills := await self.discover_skills():
-                skills_prompt = self.render_prompt_text(
-                    _SKILLS_PROMPT_NAME,
-                    skills=skills,
-                )
-            channel_memos = await self.get_channel_instruction_memos()
-            return self.render_prompt_text(
-                _MODEL_INPUT_PROMPT_NAME,
-                base_context=await self.get_base_context(
-                    channel_name=channel_name,
-                    message_metadata=message_metadata,
-                ),
-                agents_md=agents_md,
-                channel_memos=tuple(channel_memos),
-                todo_list=todo_list,
-                skills=skills_prompt.strip() if skills_prompt else None,
-            )
+        channel_memos = await self.get_channel_instruction_memos()
+        return self.render_prompt_text(
+            _MODEL_INPUT_PROMPT_NAME,
+            base_context=await self.get_base_context(
+                channel_name=channel_name,
+                message_metadata=message_metadata,
+            ),
+            agents_md=agents_md,
+            channel_memos=tuple(channel_memos),
+            skills=skills_prompt.strip() if skills_prompt else None,
+        )
 
 
 class GeminiChatSession:
@@ -474,52 +518,85 @@ class GeminiChatSession:
             usage_totals.model_copy(deep=True) if usage_totals is not None else ChatSessionUsageTotals()
         )
         self._latest_system_instruction: str | None = None
-        self._mcp_client = Client(
-            StreamableHttpTransport(
-                f"http://{settings.MCP_HOST}:{settings.MCP_PORT}/mcp",
-            )
-        )
+        self._mcp_client = self._build_mcp_client()
+        self._mcp_client_opened = False
         self._chat = service.ai_client.aio.chats.create(
             model=settings.GEMINI_MODEL,
             history=cast("list[types.ContentOrDict] | None", history),
         )
+
+    @staticmethod
+    def _build_mcp_client() -> Client:
+        return Client(
+            StreamableHttpTransport(
+                f"http://{settings.MCP_HOST}:{settings.MCP_PORT}/mcp",
+            )
+        )
+
+    async def _ensure_mcp_client_open(self) -> Client:
+        """P1 #7: open the MCP transport once per session, not once per turn.
+
+        Rebuilds the client once on `ConnectionError` so a server restart between turns
+        doesn't permanently break the session.
+        """
+        if self._mcp_client_opened:
+            return self._mcp_client
+        try:
+            await self._mcp_client.__aenter__()
+        except ConnectionError:
+            logger.warning(f"MCP client connect failed for session={self._session_id}; rebuilding once")
+            self._mcp_client = self._build_mcp_client()
+            await self._mcp_client.__aenter__()
+        self._mcp_client_opened = True
+        mcp_session_id = self._mcp_client.transport.get_session_id()
+        if mcp_session_id is not None:
+            bind_mcp_session_to_runtime_session(mcp_session_id, self._session_id)
+        return self._mcp_client
+
+    async def aclose(self) -> None:
+        if not self._mcp_client_opened:
+            return
+        try:
+            await self._mcp_client.__aexit__(None, None, None)
+        except Exception:
+            logger.exception(f"Failed to close MCP client for session={self._session_id}")
+        finally:
+            self._mcp_client_opened = False
 
     async def send_message(
         self,
         message: str,
         message_metadata: list[dict[str, Any]] | None = None,
         channel_name: str | None = None,
+        max_remote_calls: int | None = None,
     ) -> ChatResponse:
+        # P2 #12: scheduled tasks can lower the per-run AFC cap via `max_remote_calls`.
+        effective_max_remote_calls = max_remote_calls if max_remote_calls is not None else settings.GEMINI_MAX_AFC_CALLS
         async with asyncio.timeout(settings.GEMINI_RESPONSE_TIMEOUT_SECONDS):
             message_parts = await self._build_message_parts(message, message_metadata)
             system_instruction = await self._service.build_system_instruction(
-                session_id=self._session_id,
                 channel_name=channel_name,
                 message_metadata=message_metadata,
             )
             self._latest_system_instruction = system_instruction
 
-            async with self._mcp_client as mcp_client:
-                mcp_session_id = mcp_client.transport.get_session_id()
-                if mcp_session_id is not None:
-                    bind_mcp_session_to_runtime_session(mcp_session_id, self._session_id)
-
-                response = await self._send_chat_message(
-                    message=message_parts,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_instruction,
-                        temperature=settings.GEMINI_TEMPERATURE,
-                        top_p=settings.GEMINI_TOP_P,
-                        max_output_tokens=settings.GEMINI_MAX_OUTPUT_TOKENS,
-                        thinking_config=types.ThinkingConfig(
-                            thinking_level=types.ThinkingLevel(settings.GEMINI_THINKING_LEVEL)
-                        ),
-                        automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                            maximum_remote_calls=settings.GEMINI_MAX_AFC_CALLS,
-                        ),
-                        tools=[mcp_client.session],
+            mcp_client = await self._ensure_mcp_client_open()
+            response = await self._send_chat_message(
+                message=message_parts,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    temperature=settings.GEMINI_TEMPERATURE,
+                    top_p=settings.GEMINI_TOP_P,
+                    max_output_tokens=settings.GEMINI_MAX_OUTPUT_TOKENS,
+                    thinking_config=types.ThinkingConfig(
+                        thinking_level=types.ThinkingLevel(settings.GEMINI_THINKING_LEVEL)
                     ),
-                )
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                        maximum_remote_calls=effective_max_remote_calls,
+                    ),
+                    tools=[mcp_client.session],
+                ),
+            )
 
             full_response = response.text or self._extract_parts_text(response.parts)
             self._usage_totals.add_usage_metadata(response.usage_metadata)
@@ -544,33 +621,28 @@ class GeminiChatSession:
                     f"Gemini returned no text for session={self._session_id}; sending nudge {nudge_attempt}/{max_nudges}"
                 )
                 system_instruction = await self._service.build_system_instruction(
-                    session_id=self._session_id,
                     channel_name=channel_name,
                     message_metadata=message_metadata,
                 )
                 self._latest_system_instruction = system_instruction
 
-                async with self._mcp_client as mcp_client:
-                    mcp_session_id = mcp_client.transport.get_session_id()
-                    if mcp_session_id is not None:
-                        bind_mcp_session_to_runtime_session(mcp_session_id, self._session_id)
-
-                    nudge_response = await self._send_chat_message(
-                        message=self._service.render_required_prompt_text(_EMPTY_RESPONSE_NUDGE_PROMPT_NAME),
-                        config=types.GenerateContentConfig(
-                            system_instruction=system_instruction,
-                            temperature=settings.GEMINI_TEMPERATURE,
-                            top_p=settings.GEMINI_TOP_P,
-                            max_output_tokens=settings.GEMINI_MAX_OUTPUT_TOKENS,
-                            thinking_config=types.ThinkingConfig(
-                                thinking_level=types.ThinkingLevel(settings.GEMINI_THINKING_LEVEL)
-                            ),
-                            automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                                maximum_remote_calls=settings.GEMINI_MAX_AFC_CALLS,
-                            ),
-                            tools=[mcp_client.session],
+                mcp_client = await self._ensure_mcp_client_open()
+                nudge_response = await self._send_chat_message(
+                    message=self._service.render_required_prompt_text(_EMPTY_RESPONSE_NUDGE_PROMPT_NAME),
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        temperature=settings.GEMINI_TEMPERATURE,
+                        top_p=settings.GEMINI_TOP_P,
+                        max_output_tokens=settings.GEMINI_MAX_OUTPUT_TOKENS,
+                        thinking_config=types.ThinkingConfig(
+                            thinking_level=types.ThinkingLevel(settings.GEMINI_THINKING_LEVEL)
                         ),
-                    )
+                        automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                            maximum_remote_calls=effective_max_remote_calls,
+                        ),
+                        tools=[mcp_client.session],
+                    ),
+                )
 
                 nudge_text = nudge_response.text or self._extract_parts_text(nudge_response.parts)
                 self._usage_totals.add_usage_metadata(nudge_response.usage_metadata)
@@ -600,12 +672,26 @@ class GeminiChatSession:
                 usage_metadata=response.usage_metadata,
             )
 
+    def _build_todo_snapshot_part(self) -> types.Part | None:
+        # P1 #5: the per-session todo list moved out of the system instruction so it does
+        # not invalidate the cached prefix on every turn. Prepend it as the first user-turn
+        # part instead so the model still sees current plan state.
+        todo_snapshot = get_runtime_session_todo_snapshot(self._session_id)
+        rendered = _render_todo_list_instruction(todo_snapshot)
+        if not rendered:
+            return None
+        header = "Current plan state (do not restate; use to inform the next action):"
+        return types.Part.from_text(text=f"{header}\n{rendered}")
+
     async def _build_message_parts(
         self,
         message: str,
         message_metadata: list[dict[str, Any]] | None,
     ) -> list[types.Part]:
-        message_parts = [types.Part.from_text(text=message)]
+        message_parts: list[types.Part] = []
+        if (todo_part := self._build_todo_snapshot_part()) is not None:
+            message_parts.append(todo_part)
+        message_parts.append(types.Part.from_text(text=message))
         if not message_metadata:
             return message_parts
 
@@ -641,11 +727,11 @@ class GeminiChatSession:
                 )
             return None
 
-        try:
-            attachment_path = resolve_path_within_root(normalized_attachment_path, settings.WORKSPACE_ROOT)
-        except ValueError:
+        attachment_path = resolve_inbound_attachment_path(normalized_attachment_path, attachment.source)
+        if attachment_path is None:
             logger.warning(
-                f"Skipping inbound attachment outside workspace for Gemini session={self._session_id} path={normalized_attachment_path}"
+                f"Skipping inbound attachment outside the per-channel root for Gemini "
+                f"session={self._session_id} path={normalized_attachment_path} source={attachment.source}"
             )
             return None
 
@@ -778,12 +864,35 @@ class GeminiChatSession:
     def total_token_count(self) -> int:
         return self._usage_totals.total_token_count
 
-    async def replace_history_with_summary(self, summary_text: str) -> None:
+    def snapshot_for_compaction(self) -> tuple[list[types.Content], ChatSessionUsageTotals]:
+        # P1 #10: deep-copy history + usage totals before compress so a failed turn can roll back.
+        history = [content.model_copy(deep=True) for content in self._get_curated_history()]
+        usage_totals = self._usage_totals.model_copy(deep=True)
+        return history, usage_totals
+
+    async def restore_from_snapshot(
+        self,
+        snapshot: tuple[list[types.Content], ChatSessionUsageTotals],
+    ) -> None:
+        history, usage_totals = snapshot
+        self._chat = self._service.ai_client.aio.chats.create(
+            model=settings.GEMINI_MODEL,
+            history=cast("list[types.ContentOrDict] | None", history),
+        )
+        self._usage_totals = usage_totals.model_copy(deep=True)
+        await self._persist_history()
+
+    async def replace_history_with_summary(
+        self,
+        summary_text: str,
+        *,
+        rehydration: RehydrationBundle | None = None,
+    ) -> None:
         normalized_summary = summary_text.strip()
         if not normalized_summary:
             raise ValueError("summary_text must not be blank")
 
-        compressed_history = [
+        compressed_history: list[types.Content] = [
             types.Content(
                 role="user",
                 parts=[
@@ -796,12 +905,47 @@ class GeminiChatSession:
                 ],
             )
         ]
+
+        # P1 #9: append a rehydration turn so the model retains live plan state,
+        # loaded skills, pending approvals, and recent tool observations across compaction.
+        if rehydration is not None:
+            rehydration_text = render_rehydration_text(rehydration)
+            if rehydration_text:
+                compressed_history.append(
+                    types.Content(
+                        role="user",
+                        parts=[types.Part.from_text(text=rehydration_text)],
+                    )
+                )
+
         self._chat = self._service.ai_client.aio.chats.create(
             model=settings.GEMINI_MODEL,
             history=cast("list[types.ContentOrDict] | None", compressed_history),
         )
         self._usage_totals = ChatSessionUsageTotals()
         await self._persist_history()
+
+    def collect_recent_tool_observations(self, *, max_count: int = 5, max_chars: int = 500) -> tuple[str, ...]:
+        """Walk the chat history for the most recent function_response parts.
+
+        Returns a tuple sized at most `max_count`, oldest-first, with each entry capped
+        at `max_chars` characters. Safe to call before `replace_history_with_summary`.
+        """
+        history = self._get_curated_history()
+        observations: list[str] = []
+        for content in reversed(history):
+            for part in getattr(content, "parts", None) or ():
+                function_response = getattr(part, "function_response", None)
+                if function_response is None:
+                    continue
+                tool_name = getattr(function_response, "name", None) or "tool"
+                response_payload = getattr(function_response, "response", None)
+                observations.append(f"{tool_name}: {summarize_tool_observation(response_payload, max_chars=max_chars)}")
+                if len(observations) >= max_count:
+                    break
+            if len(observations) >= max_count:
+                break
+        return tuple(reversed(observations))
 
     async def inject_model_turn(self, content: types.Content) -> None:
         updated_history = [*self._get_curated_history(), content]

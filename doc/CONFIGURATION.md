@@ -111,6 +111,40 @@ Mode behavior:
 
 If both `PB_DASHBOARD_BEARER_TOKEN` and `PB_A2A_BEARER_TOKEN` are configured, they must differ so dashboard access stays isolated from peer-runtime access.
 
+Bearer-protected control endpoints introduced by the harness hardening plan:
+
+- `POST /control/approvals/{draft_id}/approve` and `/deny`: Decide command drafts created by `draft_command`.
+- `POST /control/drafts/{draft_id}/commit` and `/discard`: Decide outbound drafts created by `draft_outbound_message` or any `send_*` tool whose target channel is not in `PB_OUTBOUND_AUTOSEND_CHANNELS`.
+- `POST /control/sessions/{session_id}/planning-mode`: Force a session into or out of planning mode. Body: `{"state": "planning" | "normal", "objective": "...", "scope": "...", "plan_summary": "..."}`. Returns 409 if the transition is invalid (e.g. exit while NORMAL) and 422 if `objective` is missing on enter.
+
+## Safety And Approvals
+
+The runtime is gated by approval flows and an opt-in planning mode. The settings below tune that surface.
+
+- `PB_EXECUTE_COMMAND_ALLOWLIST`: CSV of Python regex patterns. A `execute_command` invocation whose command does not match any pattern returns a structured `denied` envelope and is not spawned. Empty default — off-allowlist commands must go through `draft_command` → operator approval → `run_approved_command`.
+- `PB_EXECUTE_COMMAND_ENV_PASSTHROUGH`: CSV of additional environment-variable names to forward into subprocesses started by `execute_command` and `run_approved_command`. The default subprocess environment is the union of `PATH`, `HOME`, `LANG`, `LC_*`, `TERM`, `TZ`, the Pillbug-set variables (`PB_RUNTIME_ID`, `PB_WORKSPACE_ROOT`, `PB_SESSION_KEY`, `PB_SESSION_KEY_SAFE`), and any names listed here. Any name matching `(?i)(token|secret|key|password|credential)` is blocked even when explicitly passed through, unless it is prefixed with `PB_PUBLIC_`.
+- `PB_OUTBOUND_AUTOSEND_CHANNELS`: CSV of channels whose outbound drafts auto-commit and dispatch immediately. Default `cli`. Channels not listed here require operator commit via the control API or the in-channel `/yes` runtime command.
+- `PB_OUTBOUND_SEND_LIMITS_JSON`: JSON map `{"<channel>": {"per_session": N, "per_minute": M, "per_hour": K}}` rate-limiting outbound sends per `(channel, conversation_id)`. CLI is unlimited by default; other channels default to `{"per_session": 20, "per_minute": 5, "per_hour": 60}`. An empty per-channel object (e.g. `{"telegram": {}}`) makes that channel unlimited. A send that would exceed the budget returns a `rate_limited` envelope and is not dispatched.
+- `PB_INBOUND_ATTACHMENT_ROOTS_JSON`: JSON map `{"<channel>": "<workspace-relative subdir>"}` restricting where each channel may attach files from. Defaults: `telegram → inbox/telegram`, `a2a → inbox/a2a`, `cli → inbox/cli`. Attachments resolved outside the channel's sub-root are dropped with a warning log. Operator overrides merge into the defaults.
+- `PB_DANGEROUSLY_APPROVE_EVERYTHING`: Bypass the allowlist and outbound autosend checks. Default `false`. When `true`, every `execute_command` is allowed, every send is treated as autosend, and `draft_command` auto-marks the draft `approved` with `decided_by="dangerous_mode"`. Intended for local dev, CI, and trusted internal deployments; startup logs an `ERROR`-level banner and `/telemetry/runtime` surfaces `metadata.approvals_bypassed=true`.
+
+In-channel runtime commands for the human operator (in addition to the existing `/clear`, `/usage`, `/summarize`):
+
+- `/yes <draft_id>`: Approve and dispatch in one step. Command drafts run the subprocess and reply with a stdout/exit-code summary; outbound drafts commit and send.
+- `/no <draft_id>`: Deny a command draft or discard an outbound draft.
+- `/drafts`: List pending drafts of both kinds (oldest first, capped at 10) with id, kind, source, short preview, and age.
+
+These verbs inherit the channel's existing trust model — no separate auth layer.
+
+Persistent state introduced by approvals lives under `{PB_BASE_DIR}/approvals/<id>.json` for command drafts and `{PB_BASE_DIR}/drafts/<id>.json` for outbound drafts.
+
+## Cache And Telemetry
+
+- `PB_CACHE_HIT_RATIO_WARN_THRESHOLD`: Float in `[0, 1]`. When a session's running cache-hit ratio drops below this threshold over the last `PB_CACHE_HIT_RATIO_WARN_WINDOW` turns, the runtime emits a warning-level telemetry event. Default `0.3`. The `session.response.completed` event always carries `prompt_tokens`, `cached_content_tokens`, `cache_hit_ratio`, `output_tokens`, and `latency_ms`, and `/telemetry/sessions` surfaces a `cache_summary` per session.
+- `PB_CACHE_HIT_RATIO_WARN_WINDOW`: Integer window size (in turns) for the running cache-hit ratio. Default `5`.
+
+Every MCP tool invocation emits paired `tool.call.started` / `tool.call.completed` telemetry events with `tool_name`, `runtime_session_key`, `args_hash` (SHA256 of canonical args JSON), a redacted `args_summary`, `duration_ms`, and `result_status`. Args summaries strip well-known secret-looking patterns before persistence.
+
 ## Scheduler And Task Storage
 
 - `PB_DOCKET_URL`: Optional Redis-backed Docket endpoint for scheduled tasks.
@@ -118,11 +152,24 @@ If both `PB_DASHBOARD_BEARER_TOKEN` and `PB_A2A_BEARER_TOKEN` are configured, th
 
 Scheduled tasks are persisted at `~/.pillbug/tasks/agent_tasks.json` when using local storage.
 
+### Scheduled-task Goal Contract
+
+`manage_agent_task` accepts an optional `goal` sub-record per task:
+
+- `done_condition`: Human-readable predicate the task should converge on.
+- `validation_prompt`: Prompt the runtime uses to evaluate `done_condition` after each run.
+- `max_steps_per_run`: Hard cap on automatic function calls for a single task run. Overrides `PB_GEMINI_MAX_AFC_CALLS` for that task. Minimum `1`.
+- `max_cost_per_run_usd`: Advisory ceiling. Currently recorded in the progress log but not enforced — Gemini pricing is not yet wired in.
+- `forbidden_actions`: Tuple of tool names or `tool.subaction` prefixes (e.g. `manage_agent_task.create`) that are gated for that run. A forbidden call returns a structured `denied` envelope without invoking the tool.
+- `progress_log_path`: Workspace-relative path. Defaults to `{PB_BASE_DIR}/tasks/<task_id>/progress.jsonl`. Each run appends one JSON-per-line entry with task metadata, the goal snapshot, and the run outcome.
+
 ## URL Fetching Limits
 
 - `PB_MCP_FETCH_URL_MAX_BYTES`: Maximum streamed download size before a fetch is stopped.
 - `PB_MCP_FETCH_URL_OUTPUT_DIR`: Workspace-relative directory where fetched resources are saved.
 - `PB_MCP_FETCH_URL_TIMEOUT_SECONDS`: Timeout for remote fetch requests.
+
+Every fetched artifact is tagged with a `trust: untrusted` YAML frontmatter banner (inline for text and readable-HTML output, sibling `.metadata.json` for binary content). `read_file` parses that banner and surfaces a `provenance` field on its result so the model is reminded that content under `workspace/fetched/` is data, not instruction.
 
 ## Optional Telegram Settings
 

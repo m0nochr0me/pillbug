@@ -10,6 +10,7 @@ _mcp_runtime_sessions: dict[str, str] = {}
 _runtime_session_origin_metadata: dict[str, dict[str, object]] = {}
 _runtime_session_todo_snapshots: dict[str, TodoListSnapshot] = {}
 _pending_outbound_injections: dict[str, list[str]] = {}
+_runtime_session_loaded_skills: dict[str, set[str]] = {}
 
 
 def bind_mcp_session_to_runtime_session(mcp_session_id: str, runtime_session_key: str) -> None:
@@ -88,6 +89,30 @@ def record_pending_outbound_injection(source_session_key: str, target_session_ke
 
 def consume_pending_outbound_injections(source_session_key: str) -> list[str]:
     return _pending_outbound_injections.pop(source_session_key.strip(), [])
+
+
+def record_runtime_session_skill_load(runtime_session_key: str, skill_name: str) -> bool:
+    """Mark a skill as loaded for the session. Returns True only on the first load.
+
+    The returned bool lets the read_file hook (plan P2 #18) emit a `skill.loaded`
+    telemetry event exactly once per (session, skill) instead of on every reread.
+    """
+    normalized_key = runtime_session_key.strip()
+    normalized_skill = skill_name.strip()
+    if not normalized_key or not normalized_skill:
+        return False
+    loaded = _runtime_session_loaded_skills.setdefault(normalized_key, set())
+    if normalized_skill in loaded:
+        return False
+    loaded.add(normalized_skill)
+    return True
+
+
+def get_runtime_session_loaded_skills(runtime_session_key: str) -> tuple[str, ...]:
+    normalized_key = runtime_session_key.strip()
+    if not normalized_key:
+        return ()
+    return tuple(sorted(_runtime_session_loaded_skills.get(normalized_key, ())))
 
 
 def split_runtime_session_key(runtime_session_key: str) -> tuple[str, str] | None:

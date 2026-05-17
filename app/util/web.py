@@ -5,8 +5,10 @@ Readable web-document extraction and fetch helpers.
 import hashlib
 import mimetypes
 import re
+from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
+from typing import Any
 from urllib.parse import urljoin, urlparse
 
 from app.util.compaction import apply_compaction_stages
@@ -17,7 +19,20 @@ __all__ = (
     "extract_readable_html",
     "looks_like_html",
     "looks_like_text",
+    "parse_trust_banner",
     "render_readable_html_document",
+    "render_trust_banner",
+    "render_trust_banner_metadata",
+)
+
+TRUST_UNTRUSTED = "untrusted"
+_TRUST_BANNER_FIELDS = (
+    "source",
+    "final_url",
+    "fetched_at",
+    "trust",
+    "content_type",
+    "content_mode",
 )
 
 _FILENAME_SAFE_PATTERN = re.compile(r"[^A-Za-z0-9._-]+")
@@ -320,6 +335,86 @@ def render_readable_html_document(title: str | None, source_url: str, body: str)
 
     lines = [f"# {heading}", "", f"Source: {source_url}", "", normalized_body]
     return "\n".join(line for line in lines if line is not None).strip() + "\n"
+
+
+def render_trust_banner_metadata(
+    *,
+    source_url: str,
+    final_url: str,
+    fetched_at: datetime,
+    content_type: str,
+    content_mode: str,
+    trust: str = TRUST_UNTRUSTED,
+) -> dict[str, Any]:
+    return {
+        "source": source_url,
+        "final_url": final_url,
+        "fetched_at": fetched_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "trust": trust,
+        "content_type": content_type,
+        "content_mode": content_mode,
+    }
+
+
+def render_trust_banner(
+    *,
+    source_url: str,
+    final_url: str,
+    fetched_at: datetime,
+    content_type: str,
+    content_mode: str,
+    trust: str = TRUST_UNTRUSTED,
+) -> str:
+    metadata = render_trust_banner_metadata(
+        source_url=source_url,
+        final_url=final_url,
+        fetched_at=fetched_at,
+        content_type=content_type,
+        content_mode=content_mode,
+        trust=trust,
+    )
+    lines = ["---"]
+    for field in _TRUST_BANNER_FIELDS:
+        lines.append(f"{field}: {metadata[field]}")
+    lines.append("---")
+    return "\n".join(lines) + "\n\n"
+
+
+def parse_trust_banner(content: str) -> tuple[dict[str, str], str] | None:
+    """Parse a leading YAML-frontmatter trust banner.
+
+    Returns (provenance, remaining_content) when a recognizable banner is present at the
+    very start of `content`. Recognition requires the opening `---`, a closing `---`, and
+    a `trust:` field — to avoid mistaking unrelated frontmatter (e.g. SKILL.md) for a
+    fetched-content trust banner.
+    """
+    if not content.startswith("---\n"):
+        return None
+
+    closing_index = content.find("\n---", 4)
+    if closing_index == -1:
+        return None
+
+    header = content[4:closing_index]
+    rest_start = closing_index + len("\n---")
+    if rest_start < len(content) and content[rest_start] == "\n":
+        rest_start += 1
+    if rest_start < len(content) and content[rest_start] == "\n":
+        rest_start += 1
+
+    provenance: dict[str, str] = {}
+    for line in header.splitlines():
+        if not line.strip():
+            continue
+        key, sep, value = line.partition(":")
+        if not sep:
+            return None
+        provenance[key.strip()] = value.strip()
+
+    if "trust" not in provenance:
+        return None
+
+    return provenance, content[rest_start:]
 
 
 async def extract_readable_html(payload: bytes, final_url: str, charset: str | None) -> tuple[str | None, str]:

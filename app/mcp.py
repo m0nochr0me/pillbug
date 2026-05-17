@@ -3,6 +3,7 @@ Composition MCP Server
 """
 
 import asyncio
+import fnmatch
 import hashlib
 import json
 import mimetypes
@@ -12,6 +13,7 @@ import secrets
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -31,21 +33,45 @@ from app.core.log import logger, uvicorn_log_config
 from app.core.telemetry import runtime_telemetry
 from app.core.url_shortener import local_url_shortener
 from app.middleware.compactor import CompactorMiddleware
+from app.middleware.telemetry import TelemetryMiddleware
+from app.runtime.approvals import approval_store, outbound_draft_store
 from app.runtime.channels import describe_channel_telemetry, get_channel_plugin, register_channel_conversation
 from app.runtime.mcp_plugins import load_mcp_tool_plugins
+from app.runtime.outbound_budget import DEFAULT_NON_CLI_LIMITS, outbound_send_budget
 from app.runtime.scheduler import task_scheduler
 from app.runtime.session_binding import (
     bind_runtime_session_todo_snapshot,
     get_runtime_session_for_mcp_session,
     get_runtime_session_origin_metadata,
     record_pending_outbound_injection,
+    record_runtime_session_skill_load,
     split_runtime_session_key,
 )
+from app.runtime.session_mode import (
+    SessionMode,
+    get_planning_state,
+    get_session_mode,
+    planning_block_reminder,
+)
+from app.runtime.session_mode import (
+    enter_planning_mode as _registry_enter_planning,
+)
+from app.runtime.session_mode import (
+    exit_planning_mode as _registry_exit_planning,
+)
+from app.runtime.task_runtime_state import task_forbidden_actions_for_session
 from app.schema.control import (
+    ApprovalDecision,
+    ApprovedAction,
     AuthScope,
     AuthTokenBinding,
     ControlMessageRequest,
     OperatorResponse,
+    OutboundAttachmentDraft,
+    OutboundDraft,
+    OutboundDraftDecision,
+    OutboundDraftKind,
+    PlanningModeRequest,
     RuntimeAuthConfiguration,
 )
 from app.schema.messages import (
@@ -56,15 +82,22 @@ from app.schema.messages import (
     extract_a2a_origin_channel_metadata,
     extract_a2a_origin_route,
 )
+from app.schema.tasks import AgentTaskGoal
 from app.schema.telemetry import ChannelsTelemetrySnapshot, RuntimeMetadata
 from app.schema.todo import TodoItem, TodoListSnapshot
+from app.util.skills import workspace_skill_name_for_path
+from app.util.text import classify_shell_stderr
+from app.util.tool_result import envelope_error, tool_error
 from app.util.web import (
     build_fetch_output_path,
     decode_text_payload,
     extract_readable_html,
     looks_like_html,
     looks_like_text,
+    parse_trust_banner,
     render_readable_html_document,
+    render_trust_banner,
+    render_trust_banner_metadata,
 )
 from app.util.workspace import (
     async_read_text_file,
@@ -80,6 +113,7 @@ __all__ = ("create_mcp_server", "mcp", "mcp_app")
 
 mcp = FastMCP(f"{__project__}-composition-server")
 mcp.add_middleware(LoggingMiddleware(include_payloads=True, max_payload_length=1000))
+mcp.add_middleware(TelemetryMiddleware())
 
 _TODO_LIST_STATE_KEY = "todo_list"
 
@@ -470,6 +504,7 @@ def get_runtime_info() -> dict[str, Any]:
 
 
 @mcp.tool
+@envelope_error
 async def list_files(
     directory: str = ".",
     include_hidden: bool = False,
@@ -481,10 +516,10 @@ async def list_files(
     target_directory = _resolve_workspace_path(directory)
 
     if not await asyncio.to_thread(target_directory.exists):
-        raise ValueError(f"Directory does not exist: {directory}")
+        return tool_error("not_found", f"Directory does not exist: {directory}")
 
     if not await asyncio.to_thread(target_directory.is_dir):
-        raise ValueError(f"Path is not a directory: {directory}")
+        return tool_error("invalid_arguments", f"Path is not a directory: {directory}")
 
     def build_entries() -> list[dict[str, Any]]:
         entries: list[dict[str, Any]] = []
@@ -517,28 +552,35 @@ async def list_files(
 
 
 @mcp.tool
+@envelope_error
 async def read_file(
     path: str,
     start_line: int = 1,
     page_size: int = settings.MCP_DEFAULT_PAGE_SIZE,
+    ctx: Context = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     """
     Reads a UTF-8 text file from the workspace with line-based pagination.
     """
 
     if start_line < 1:
-        raise ValueError("start_line must be at least 1")
+        return tool_error("invalid_arguments", "start_line must be at least 1")
 
     page_size = _validate_page_size(page_size)
     target_file = _resolve_workspace_path(path)
 
     if not await asyncio.to_thread(target_file.exists):
-        raise ValueError(f"File does not exist: {path}")
+        return tool_error(
+            "not_found",
+            f"File does not exist: {path}",
+            next_valid_actions=("find_files", "list_files"),
+        )
 
     if not await asyncio.to_thread(target_file.is_file):
-        raise ValueError(f"Path is not a file: {path}")
+        return tool_error("invalid_arguments", f"Path is not a file: {path}")
 
     content = await async_read_text_file(target_file)
+    provenance = parse_trust_banner(content)
     lines = content.splitlines(keepends=True)
     total_lines = len(lines)
     start_index = min(start_line - 1, total_lines)
@@ -547,7 +589,28 @@ async def read_file(
 
     logger.debug(f"Read {len(page_lines)} lines from {_display_path(target_file)} starting at line {start_line}")
 
-    return {
+    # P1 #9 hook: when the model reads a SKILL.md, record the load so the rehydration
+    # bundle can remind it which skills are already in context after a compress.
+    # P2 #18: emit a one-shot `skill.loaded` telemetry event so operators can see hot skills.
+    if ctx is not None:
+        skill_name = workspace_skill_name_for_path(target_file)
+        if skill_name is not None:
+            runtime_session_key = get_runtime_session_for_mcp_session(ctx.session_id)
+            if runtime_session_key:
+                newly_loaded = record_runtime_session_skill_load(runtime_session_key, skill_name)
+                if newly_loaded:
+                    await runtime_telemetry.record_event(
+                        event_type="skill.loaded",
+                        source="mcp",
+                        level="info",
+                        message=f"skill loaded: {skill_name}",
+                        data={
+                            "skill_name": skill_name,
+                            "runtime_session_key": runtime_session_key,
+                        },
+                    )
+
+    result: dict[str, Any] = {
         "path": _display_path(target_file),
         "start_line": start_line,
         "end_line": end_line,
@@ -556,27 +619,42 @@ async def read_file(
         "has_more": end_line < total_lines,
         "content": "".join(page_lines),
     }
+    if provenance is not None:
+        result["provenance"] = provenance[0]
+    return result
 
 
 @mcp.tool
+@envelope_error
 async def write_new_file(
     path: str,
     content: str,
     make_parents: bool = True,
+    ctx: Context = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     """
     Creates a new UTF-8 text file in the workspace and fails if it already exists.
     """
 
+    if blocked := _enforce_planning_gate("write_new_file", ctx):
+        return blocked
+
     target_file = _resolve_workspace_path(path)
 
     if await asyncio.to_thread(target_file.exists):
-        raise ValueError(f"File already exists: {path}")
+        return tool_error(
+            "conflict",
+            f"File already exists: {path}",
+            next_valid_actions=("replace_file_text", "read_file"),
+        )
 
     if make_parents:
         await asyncio.to_thread(target_file.parent.mkdir, parents=True, exist_ok=True)
     elif not await asyncio.to_thread(target_file.parent.exists):
-        raise ValueError(f"Parent directory does not exist: {_display_path(target_file.parent)}")
+        return tool_error(
+            "not_found",
+            f"Parent directory does not exist: {_display_path(target_file.parent)}",
+        )
 
     chars_written = await async_write_text_file(target_file, content, mode="x")
     logger.info(f"Created file {_display_path(target_file)}")
@@ -588,36 +666,49 @@ async def write_new_file(
 
 
 @mcp.tool
+@envelope_error
 async def replace_file_text(
     path: str,
     old_text: str,
     new_text: str,
     replace_all: bool = False,
     expected_occurrences: int | None = None,
+    ctx: Context = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     """
     Replaces literal text inside an existing UTF-8 text file.
     """
 
+    if blocked := _enforce_planning_gate("replace_file_text", ctx):
+        return blocked
+
     if not old_text:
-        raise ValueError("old_text must not be empty")
+        return tool_error("invalid_arguments", "old_text must not be empty")
 
     target_file = _resolve_workspace_path(path)
 
     if not await asyncio.to_thread(target_file.exists):
-        raise ValueError(f"File does not exist: {path}")
+        return tool_error("not_found", f"File does not exist: {path}")
 
     if not await asyncio.to_thread(target_file.is_file):
-        raise ValueError(f"Path is not a file: {path}")
+        return tool_error("invalid_arguments", f"Path is not a file: {path}")
 
     content = await async_read_text_file(target_file)
     occurrences = content.count(old_text)
 
     if occurrences == 0:
-        raise ValueError("old_text was not found in the file")
+        return tool_error(
+            "not_found",
+            "old_text was not found in the file",
+            next_valid_actions=("search_file_regex", "read_file"),
+        )
 
     if expected_occurrences is not None and occurrences != expected_occurrences:
-        raise ValueError(f"Expected {expected_occurrences} occurrences of old_text, but found {occurrences}")
+        return tool_error(
+            "conflict",
+            f"Expected {expected_occurrences} occurrences of old_text, but found {occurrences}",
+            details={"occurrences_found": occurrences, "expected": expected_occurrences},
+        )
 
     replacement_count = occurrences if replace_all else 1
     updated_content = content.replace(old_text, new_text, replacement_count)
@@ -632,6 +723,7 @@ async def replace_file_text(
 
 
 @mcp.tool
+@envelope_error
 async def search_file_regex(
     path: str,
     pattern: str,
@@ -645,15 +737,15 @@ async def search_file_regex(
     max_results = _validate_max_results(max_results)
 
     if not await asyncio.to_thread(target_file.exists):
-        raise ValueError(f"File does not exist: {path}")
+        return tool_error("not_found", f"File does not exist: {path}")
 
     if not await asyncio.to_thread(target_file.is_file):
-        raise ValueError(f"Path is not a file: {path}")
+        return tool_error("invalid_arguments", f"Path is not a file: {path}")
 
     try:
         regex = re.compile(pattern)
     except re.error as exc:
-        raise ValueError(f"Invalid regular expression: {exc}") from exc
+        return tool_error("invalid_arguments", f"Invalid regular expression: {exc}")
 
     content = await async_read_text_file(target_file)
     matches: list[dict[str, Any]] = []
@@ -690,6 +782,7 @@ async def search_file_regex(
 
 
 @mcp.tool
+@envelope_error
 async def find_files(
     pattern: str,
     include_hidden: bool = False,
@@ -723,7 +816,381 @@ async def find_files(
     }
 
 
+def _approvals_bypassed() -> bool:
+    """P1 #22: when true, approval gates are short-circuited (yolo mode)."""
+    return settings.DANGEROUSLY_APPROVE_EVERYTHING
+
+
+def _channel_is_autosend(channel_name: str) -> bool:
+    if _approvals_bypassed():
+        return True
+    return channel_name in settings.outbound_autosend_channels()
+
+
+def _outbound_source_label(ctx: Context | None) -> str:
+    if ctx is not None:
+        runtime_session_key = get_runtime_session_for_mcp_session(ctx.session_id)
+        if runtime_session_key:
+            return runtime_session_key
+    return "mcp"
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def _resolve_runtime_session_key(ctx: Context | None) -> str | None:
+    if ctx is None:
+        return None
+    return get_runtime_session_for_mcp_session(ctx.session_id)
+
+
+def _build_agent_task_goal(
+    *,
+    done_condition: str | None,
+    validation_prompt: str | None,
+    max_steps_per_run: int | None,
+    max_cost_per_run_usd: float | None,
+    forbidden_actions: list[str] | None,
+    progress_log_path: str | None,
+) -> AgentTaskGoal | None:
+    """Construct an AgentTaskGoal from the manage_agent_task kwargs, or None when all empty."""
+    has_any_field = any(
+        value is not None and value != []
+        for value in (
+            done_condition,
+            validation_prompt,
+            max_steps_per_run,
+            max_cost_per_run_usd,
+            forbidden_actions,
+            progress_log_path,
+        )
+    )
+    if not has_any_field:
+        return None
+    return AgentTaskGoal(
+        done_condition=done_condition,
+        validation_prompt=validation_prompt,
+        max_steps_per_run=max_steps_per_run,
+        max_cost_per_run_usd=max_cost_per_run_usd,
+        forbidden_actions=tuple(forbidden_actions or ()),
+        progress_log_path=progress_log_path,
+    )
+
+
+_PLANNING_READ_ONLY_TOOLS: tuple[str, ...] = (
+    "list_files",
+    "read_file",
+    "find_files",
+    "search_file_regex",
+    "fetch_url",
+    "exit_planning_mode",
+)
+
+
+def _enforce_planning_gate(tool_name: str, ctx: Context | None) -> dict[str, Any] | None:
+    """P2 #11: deny mutating tools while the session is in planning mode.
+
+    Also enforces per-task `goal.forbidden_actions` (plan P2 #12) for scheduled-task
+    sessions; both checks share this gate so the call sites stay symmetric.
+    """
+    runtime_session_key = _resolve_runtime_session_key(ctx)
+    if runtime_session_key is None:
+        return None
+    if get_session_mode(runtime_session_key) is SessionMode.PLANNING:
+        return tool_error(
+            "denied",
+            planning_block_reminder(),
+            next_valid_actions=_PLANNING_READ_ONLY_TOOLS,
+            details={
+                "tool": tool_name,
+                "session_key": runtime_session_key,
+                "reason": "planning_mode_blocked",
+            },
+        )
+    forbidden = task_forbidden_actions_for_session(runtime_session_key)
+    if forbidden and _tool_matches_forbidden_action(tool_name, forbidden):
+        return tool_error(
+            "denied",
+            f"Tool {tool_name!r} is in this task's forbidden_actions list.",
+            details={
+                "tool": tool_name,
+                "session_key": runtime_session_key,
+                "reason": "task_forbidden_action",
+                "forbidden_actions": sorted(forbidden),
+            },
+        )
+    return None
+
+
+def _tool_matches_forbidden_action(tool_name: str, forbidden: frozenset[str]) -> bool:
+    """Match a tool name against the forbidden_actions set.
+
+    A bare entry like `manage_agent_task` blocks every sub-action; the tool itself
+    passes its action-suffixed name (e.g. `manage_agent_task.create`) so we match on
+    both the full name and on the part before any `.` boundary.
+    """
+    if tool_name in forbidden:
+        return True
+    prefix = tool_name.partition(".")[0]
+    return prefix in forbidden
+
+
+_PLANNING_ARTIFACT_DIRECTORY = "plans/active"
+
+
+def _planning_artifact_path(session_key: str, timestamp: datetime) -> Path:
+    safe_session_key = session_key.replace(":", "__").replace("/", "_") or "session"
+    timestamp_label = timestamp.strftime("%Y%m%dT%H%M%SZ")
+    return _resolve_workspace_path(f"{_PLANNING_ARTIFACT_DIRECTORY}/{safe_session_key}-{timestamp_label}.md")
+
+
+def _render_planning_artifact(
+    *,
+    session_key: str,
+    objective: str,
+    scope: str | None,
+    plan_summary: str,
+    entered_at: datetime,
+    exited_at: datetime,
+    source: str,
+) -> str:
+    front_matter_lines = [
+        "---",
+        f"session_key: {session_key}",
+        f"source: {source}",
+        f"entered_at: {entered_at.isoformat()}",
+        f"exited_at: {exited_at.isoformat()}",
+        f"objective: {objective}",
+    ]
+    if scope is not None:
+        front_matter_lines.append(f"scope: {scope}")
+    front_matter_lines.append("---")
+    front_matter_lines.append("")
+    return "\n".join(front_matter_lines) + "\n" + plan_summary.rstrip() + "\n"
+
+
+async def _write_planning_artifact(
+    *,
+    session_key: str,
+    objective: str,
+    scope: str | None,
+    plan_summary: str,
+    entered_at: datetime,
+    exited_at: datetime,
+    source: str,
+) -> Path:
+    target_file = _planning_artifact_path(session_key, exited_at)
+    await asyncio.to_thread(target_file.parent.mkdir, parents=True, exist_ok=True)
+    content = _render_planning_artifact(
+        session_key=session_key,
+        objective=objective,
+        scope=scope,
+        plan_summary=plan_summary,
+        entered_at=entered_at,
+        exited_at=exited_at,
+        source=source,
+    )
+    await async_write_text_file(target_file, content, mode="w")
+    return target_file
+
+
+def _requires_approval_envelope(record: OutboundDraft) -> dict[str, Any]:
+    return {
+        "status": "requires_approval",
+        "draft_id": record.id,
+        "kind": record.kind.value,
+        "channel": record.channel,
+        "target": record.target,
+        "next_valid_actions": ["wait_for_operator_commit"],
+        "message": (
+            f"Outbound draft recorded; operator must commit via "
+            f"POST /control/drafts/{record.id}/commit before this send takes effect."
+        ),
+    }
+
+
+async def _dispatch_send_message(record: OutboundDraft, *, ctx: Context | None) -> dict[str, Any]:
+    channel_plugin = get_channel_plugin(record.channel, create=True)
+    if channel_plugin is None:
+        return tool_error("not_found", f"Channel is not enabled or available: {record.channel}")
+
+    conversation_id = record.target
+    await channel_plugin.send_message(conversation_id or "", record.message, metadata=None)
+    _track_outbound_conversation(record.channel, conversation_id)
+
+    if settings.SESSION_CONTINUITY and ctx is not None:
+        source_session_key = get_runtime_session_for_mcp_session(ctx.session_id)
+        target_session_key = f"{record.channel}:{conversation_id}" if conversation_id else record.channel
+        if source_session_key and source_session_key != target_session_key:
+            record_pending_outbound_injection(source_session_key, target_session_key)
+
+    logger.info(f"Sent outbound message via channel={record.channel} destination={conversation_id or '<default>'}")
+    return {
+        "channel": record.channel,
+        "conversation_id": conversation_id or None,
+        "chars_sent": len(record.message),
+    }
+
+
+async def _dispatch_send_file(record: OutboundDraft) -> dict[str, Any]:
+    if record.attachment is None:
+        return tool_error("invalid_arguments", "send_file draft is missing the attachment payload")
+
+    channel_plugin = get_channel_plugin(record.channel, create=True)
+    if channel_plugin is None:
+        return tool_error("not_found", f"Channel is not enabled or available: {record.channel}")
+
+    conversation_id = record.target
+    resolved_path = _resolve_workspace_path(record.attachment.path)
+    if not resolved_path.is_file():
+        return tool_error("not_found", f"File not found in workspace: {_display_path(resolved_path)}")
+
+    mime_type = mimetypes.guess_type(resolved_path.name)[0]
+    attachment = OutboundAttachment(
+        path=str(resolved_path),
+        mime_type=mime_type,
+        display_name=record.attachment.caption,
+        send_as=record.attachment.send_as,
+    )
+
+    await channel_plugin.send_message(
+        conversation_id or "",
+        record.attachment.caption or record.message or "",
+        attachments=(attachment,),
+    )
+
+    logger.info(
+        f"Sent file via channel={record.channel} destination={conversation_id or '<default>'} path={_display_path(resolved_path)}"
+    )
+    return {
+        "channel": record.channel,
+        "conversation_id": conversation_id or None,
+        "file": _display_path(resolved_path),
+        "send_as": record.attachment.send_as or "auto",
+    }
+
+
+async def _dispatch_send_a2a_message(record: OutboundDraft, *, ctx: Context | None) -> dict[str, Any]:
+    channel_plugin = _get_a2a_channel_plugin(create=True)
+    metadata = _get_outbound_a2a_metadata(ctx)
+    await channel_plugin.send_message(record.target, record.message, metadata=metadata)
+    _track_outbound_conversation("a2a", record.target)
+    return {
+        "channel": "a2a",
+        "mode": "async",
+        "target": record.target,
+        "chars_sent": len(record.message),
+    }
+
+
+async def _dispatch_request_a2a_response(record: OutboundDraft, *, ctx: Context | None) -> dict[str, Any]:
+    channel_plugin = _get_a2a_channel_plugin(create=True)
+    send_request = getattr(channel_plugin, "send_request", None)
+    if not callable(send_request):
+        return tool_error(
+            "permission_denied",
+            "Configured A2A channel does not support synchronous requests",
+        )
+
+    send_request_callable = cast("Callable[..., Awaitable[A2AEnvelope]]", send_request)
+    metadata = _get_outbound_a2a_metadata(ctx)
+    response_envelope = await send_request_callable(
+        record.target,
+        record.message,
+        metadata=metadata,
+        timeout_seconds=record.timeout_seconds if record.timeout_seconds is not None else 60.0,
+    )
+    return {
+        "channel": "a2a",
+        "mode": "sync",
+        "target": record.target,
+        "sender_runtime_id": response_envelope.sender_runtime_id,
+        "conversation_id": response_envelope.conversation_id,
+        "intent": response_envelope.intent.value,
+        "response_text": response_envelope.text,
+        "message_id": response_envelope.message_id,
+        "reply_to_message_id": response_envelope.reply_to_message_id,
+        "hop_count": response_envelope.convergence_state.hop_count,
+        "max_hops": response_envelope.convergence_state.max_hops,
+        "stop_requested": response_envelope.convergence_state.stop_requested,
+    }
+
+
+def _outbound_limits_for_channel(channel: str) -> dict[str, int] | None:
+    """Resolve the rolling-window budget for `channel`. None = unlimited (plan P2 #15)."""
+    configured = settings.outbound_send_limits()
+    if channel in configured:
+        return configured[channel] or None
+    if channel == "cli":
+        return None
+    return dict(DEFAULT_NON_CLI_LIMITS)
+
+
+def _check_outbound_budget(channel: str, conversation_id: str) -> dict[str, Any] | None:
+    limits = _outbound_limits_for_channel(channel)
+    if limits is None:
+        return None
+    reason = outbound_send_budget.check_and_charge(channel, conversation_id, limits)
+    if reason is None:
+        return None
+    return tool_error(
+        "rate_limited",
+        f"Outbound send budget exceeded for channel {channel!r} ({reason})",
+        next_valid_actions=("wait", "request_approval"),
+        details={
+            "channel": channel,
+            "conversation_id": conversation_id,
+            "reason": reason,
+            "limits": dict(limits),
+        },
+    )
+
+
+async def _dispatch_outbound_draft(record: OutboundDraft, *, ctx: Context | None) -> dict[str, Any]:
+    if blocked := _check_outbound_budget(record.channel, record.target):
+        await runtime_telemetry.record_event(
+            event_type="outbound.rate_limited",
+            source="mcp",
+            level="warning",
+            message=f"rate_limited: {record.channel}",
+            data={
+                "draft_id": record.id,
+                "channel": record.channel,
+                "target": record.target,
+                "reason": blocked["details"]["reason"],
+            },
+        )
+        return blocked
+    if record.kind == OutboundDraftKind.SEND_MESSAGE:
+        return await _dispatch_send_message(record, ctx=ctx)
+    if record.kind == OutboundDraftKind.SEND_FILE:
+        return await _dispatch_send_file(record)
+    if record.kind == OutboundDraftKind.SEND_A2A_MESSAGE:
+        return await _dispatch_send_a2a_message(record, ctx=ctx)
+    if record.kind == OutboundDraftKind.REQUEST_A2A_RESPONSE:
+        return await _dispatch_request_a2a_response(record, ctx=ctx)
+    return tool_error("internal_error", f"Unknown outbound draft kind: {record.kind}")
+
+
+async def _emit_outbound_draft_event(record: OutboundDraft) -> None:
+    await runtime_telemetry.record_event(
+        event_type="control.draft_created",
+        source="mcp",
+        level="info",
+        message="drafted",
+        data={
+            "draft_id": record.id,
+            "kind": record.kind.value,
+            "channel": record.channel,
+            "target": record.target,
+            "source": record.source,
+        },
+    )
+
+
 @mcp.tool
+@envelope_error
 async def send_message(
     channel: str,
     message: str,
@@ -742,10 +1209,17 @@ async def send_message(
 
     The channel argument accepts either a bare channel name for default destinations such as cli,
     or a session-style target in the form channel_name:conversation_id such as telegram:123456789.
+
+    Channels in PB_OUTBOUND_AUTOSEND_CHANNELS (default 'cli') dispatch immediately; off-allowlist
+    targets return a requires_approval envelope with a draft_id the operator must commit via
+    POST /control/drafts/{draft_id}/commit.
     """
 
+    if blocked := _enforce_planning_gate("send_message", ctx):
+        return blocked
+
     if not message.strip():
-        raise ValueError("message must not be empty")
+        return tool_error("invalid_arguments", "message must not be empty")
 
     channel_name, conversation_id = _parse_channel_target(channel)
     _assert_not_echoing_a2a_origin(
@@ -755,32 +1229,32 @@ async def send_message(
     )
     channel_plugin = get_channel_plugin(channel_name, create=True)
     if channel_plugin is None:
-        raise ValueError(f"Channel is not enabled or available: {channel_name}")
+        return tool_error("not_found", f"Channel is not enabled or available: {channel_name}")
 
-    await channel_plugin.send_message(conversation_id, message, metadata=None)
-    _track_outbound_conversation(channel_name, conversation_id)
+    record = await outbound_draft_store.create(
+        kind=OutboundDraftKind.SEND_MESSAGE,
+        channel=channel_name,
+        target=conversation_id or "",
+        message=message,
+        source=_outbound_source_label(ctx),
+    )
+    await _emit_outbound_draft_event(record)
 
-    if settings.SESSION_CONTINUITY and ctx is not None:
-        source_session_key = get_runtime_session_for_mcp_session(ctx.session_id)
-        target_session_key = f"{channel_name}:{conversation_id}" if conversation_id else channel_name
-        if source_session_key and source_session_key != target_session_key:
-            record_pending_outbound_injection(source_session_key, target_session_key)
+    if _channel_is_autosend(channel_name):
+        committed = await outbound_draft_store.commit(record.id, decided_by="autosend")
+        return await _dispatch_outbound_draft(committed, ctx=ctx)
 
-    logger.info(f"Sent outbound message via channel={channel_name} destination={conversation_id or '<default>'}")
-
-    return {
-        "channel": channel_name,
-        "conversation_id": conversation_id or None,
-        "chars_sent": len(message),
-    }
+    return _requires_approval_envelope(record)
 
 
 @mcp.tool
+@envelope_error
 async def send_file(
     channel: str,
     path: str,
     caption: str | None = None,
     send_as: str | None = None,
+    ctx: Context = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     """
     Sends a workspace file as an attachment to a configured channel.
@@ -794,44 +1268,45 @@ async def send_file(
     voice (Telegram voice message, best with .ogg opus files),
     audio (music/audio player), photo, video, or document (default, any file type).
     If omitted, the channel infers the delivery method from the file MIME type.
+
+    Targets outside PB_OUTBOUND_AUTOSEND_CHANNELS return requires_approval until the operator
+    commits the draft via POST /control/drafts/{draft_id}/commit.
     """
+
+    if blocked := _enforce_planning_gate("send_file", ctx):
+        return blocked
 
     channel_name, conversation_id = _parse_channel_target(channel)
     channel_plugin = get_channel_plugin(channel_name, create=True)
     if channel_plugin is None:
-        raise ValueError(f"Channel is not enabled or available: {channel_name}")
+        return tool_error("not_found", f"Channel is not enabled or available: {channel_name}")
 
     resolved_path = _resolve_workspace_path(path)
     if not resolved_path.is_file():
-        raise ValueError(f"File not found in workspace: {_display_path(resolved_path)}")
+        return tool_error(
+            "not_found",
+            f"File not found in workspace: {_display_path(resolved_path)}",
+        )
 
-    mime_type = mimetypes.guess_type(resolved_path.name)[0]
-    attachment = OutboundAttachment(
-        path=str(resolved_path),
-        mime_type=mime_type,
-        display_name=caption,
-        send_as=send_as,
+    record = await outbound_draft_store.create(
+        kind=OutboundDraftKind.SEND_FILE,
+        channel=channel_name,
+        target=conversation_id or "",
+        message=caption or "",
+        source=_outbound_source_label(ctx),
+        attachment=OutboundAttachmentDraft(path=str(resolved_path), caption=caption, send_as=send_as),
     )
+    await _emit_outbound_draft_event(record)
 
-    await channel_plugin.send_message(
-        conversation_id,
-        caption or "",
-        attachments=(attachment,),
-    )
+    if _channel_is_autosend(channel_name):
+        committed = await outbound_draft_store.commit(record.id, decided_by="autosend")
+        return await _dispatch_outbound_draft(committed, ctx=ctx)
 
-    logger.info(
-        f"Sent file via channel={channel_name} destination={conversation_id or '<default>'} path={_display_path(resolved_path)}"
-    )
-
-    return {
-        "channel": channel_name,
-        "conversation_id": conversation_id or None,
-        "file": _display_path(resolved_path),
-        "send_as": send_as or "auto",
-    }
+    return _requires_approval_envelope(record)
 
 
 @mcp.tool
+@envelope_error
 async def send_a2a_message(
     target: str,
     message: str,
@@ -848,25 +1323,33 @@ async def send_a2a_message(
     to respond to the original requester. The runtime will route that final response back to the preserved origin channel.
     """
 
+    if blocked := _enforce_planning_gate("send_a2a_message", ctx):
+        return blocked
+
     if not message.strip():
-        raise ValueError("message must not be empty")
+        return tool_error("invalid_arguments", "message must not be empty")
 
     normalized_target = _normalize_a2a_target(target)
-    channel_plugin = _get_a2a_channel_plugin(create=True)
-    metadata = _get_outbound_a2a_metadata(ctx)
+    _get_a2a_channel_plugin(create=True)  # validate channel availability up front
 
-    await channel_plugin.send_message(normalized_target, message, metadata=metadata)
-    _track_outbound_conversation("a2a", normalized_target)
+    record = await outbound_draft_store.create(
+        kind=OutboundDraftKind.SEND_A2A_MESSAGE,
+        channel="a2a",
+        target=normalized_target,
+        message=message,
+        source=_outbound_source_label(ctx),
+    )
+    await _emit_outbound_draft_event(record)
 
-    return {
-        "channel": "a2a",
-        "mode": "async",
-        "target": normalized_target,
-        "chars_sent": len(message),
-    }
+    if _channel_is_autosend("a2a"):
+        committed = await outbound_draft_store.commit(record.id, decided_by="autosend")
+        return await _dispatch_outbound_draft(committed, ctx=ctx)
+
+    return _requires_approval_envelope(record)
 
 
 @mcp.tool
+@envelope_error
 async def request_a2a_response(
     target: str,
     message: str,
@@ -882,40 +1365,165 @@ async def request_a2a_response(
     The returned response_text can be used directly in your final answer or incorporated into a larger response.
     """
 
+    if blocked := _enforce_planning_gate("request_a2a_response", ctx):
+        return blocked
+
     if not message.strip():
-        raise ValueError("message must not be empty")
+        return tool_error("invalid_arguments", "message must not be empty")
 
     normalized_target = _normalize_a2a_target(target)
     timeout_seconds = _validate_command_timeout(timeout_seconds)
     channel_plugin = _get_a2a_channel_plugin(create=True)
     send_request = getattr(channel_plugin, "send_request", None)
     if not callable(send_request):
-        raise ValueError("Configured A2A channel does not support synchronous requests")
+        return tool_error(
+            "permission_denied",
+            "Configured A2A channel does not support synchronous requests",
+        )
 
-    send_request_callable = cast("Callable[..., Awaitable[A2AEnvelope]]", send_request)
-
-    metadata = _get_outbound_a2a_metadata(ctx)
-    response_envelope = await send_request_callable(
-        normalized_target,
-        message,
-        metadata=metadata,
+    record = await outbound_draft_store.create(
+        kind=OutboundDraftKind.REQUEST_A2A_RESPONSE,
+        channel="a2a",
+        target=normalized_target,
+        message=message,
+        source=_outbound_source_label(ctx),
         timeout_seconds=timeout_seconds,
     )
+    await _emit_outbound_draft_event(record)
+
+    if _channel_is_autosend("a2a"):
+        committed = await outbound_draft_store.commit(record.id, decided_by="autosend")
+        return await _dispatch_outbound_draft(committed, ctx=ctx)
+
+    return _requires_approval_envelope(record)
+
+
+@mcp.tool
+@envelope_error
+async def draft_outbound_message(
+    channel: str,
+    message: str,
+    attachment_path: str | None = None,
+    attachment_caption: str | None = None,
+    attachment_send_as: str | None = None,
+    ctx: Context = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    """
+    Records an outbound-message draft for operator review without dispatching.
+
+    Use this when you know a target channel is off PB_OUTBOUND_AUTOSEND_CHANNELS and you want
+    explicit operator confirmation before the message is sent. For autosend channels,
+    send_message / send_file already draft+commit in one step.
+
+    The channel argument accepts the send_message format (bare name like 'cli', or
+    'channel_name:conversation_id'). To draft a file attachment, populate attachment_path with
+    a workspace-relative path; the operator can preview the file before committing.
+    """
+
+    if not message.strip() and not attachment_path:
+        return tool_error(
+            "invalid_arguments",
+            "message must not be empty unless attachment_path is provided",
+        )
+
+    channel_name, conversation_id = _parse_channel_target(channel)
+    channel_plugin = get_channel_plugin(channel_name, create=True)
+    if channel_plugin is None:
+        return tool_error("not_found", f"Channel is not enabled or available: {channel_name}")
+
+    if attachment_path is None:
+        kind = OutboundDraftKind.SEND_MESSAGE
+        attachment = None
+    else:
+        resolved_path = _resolve_workspace_path(attachment_path)
+        if not resolved_path.is_file():
+            return tool_error(
+                "not_found",
+                f"File not found in workspace: {_display_path(resolved_path)}",
+            )
+        kind = OutboundDraftKind.SEND_FILE
+        attachment = OutboundAttachmentDraft(
+            path=str(resolved_path),
+            caption=attachment_caption,
+            send_as=attachment_send_as,
+        )
+
+    record = await outbound_draft_store.create(
+        kind=kind,
+        channel=channel_name,
+        target=conversation_id or "",
+        message=message,
+        source=_outbound_source_label(ctx),
+        attachment=attachment,
+    )
+    await _emit_outbound_draft_event(record)
 
     return {
-        "channel": "a2a",
-        "mode": "sync",
-        "target": normalized_target,
-        "sender_runtime_id": response_envelope.sender_runtime_id,
-        "conversation_id": response_envelope.conversation_id,
-        "intent": response_envelope.intent.value,
-        "response_text": response_envelope.text,
-        "message_id": response_envelope.message_id,
-        "reply_to_message_id": response_envelope.reply_to_message_id,
-        "hop_count": response_envelope.convergence_state.hop_count,
-        "max_hops": response_envelope.convergence_state.max_hops,
-        "stop_requested": response_envelope.convergence_state.stop_requested,
+        "status": "draft_created",
+        "draft_id": record.id,
+        "kind": record.kind.value,
+        "channel": record.channel,
+        "target": record.target,
+        "next_valid_actions": (
+            ["commit_outbound_message"] if _channel_is_autosend(channel_name) else ["wait_for_operator_commit"]
+        ),
+        "message": (
+            f"Draft {record.id} recorded. {'Use commit_outbound_message to dispatch.' if _channel_is_autosend(channel_name) else 'Operator must commit via POST /control/drafts/' + record.id + '/commit.'}"
+        ),
     }
+
+
+@mcp.tool
+@envelope_error
+async def commit_outbound_message(
+    draft_id: str,
+    ctx: Context = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    """
+    Dispatches a previously drafted outbound message. Single-shot.
+
+    Only autosend channels (PB_OUTBOUND_AUTOSEND_CHANNELS) may be committed by the model;
+    non-autosend channels return approval_required and must be committed by an operator via
+    POST /control/drafts/{draft_id}/commit.
+    """
+
+    if blocked := _enforce_planning_gate("commit_outbound_message", ctx):
+        return blocked
+
+    if not draft_id.strip():
+        return tool_error("invalid_arguments", "draft_id must not be empty")
+
+    record = await outbound_draft_store.get(draft_id)
+    if record is None:
+        return tool_error(
+            "not_found",
+            f"Outbound draft not found: {draft_id}",
+            details={"draft_id": draft_id},
+        )
+
+    if record.status == "committed":
+        return tool_error(
+            "already_used",
+            f"Outbound draft already committed: {draft_id}",
+            details={"draft_id": draft_id, "status": "committed"},
+        )
+    if record.status == "discarded":
+        return tool_error(
+            "denied",
+            f"Outbound draft was discarded by operator: {draft_id}",
+            details={"draft_id": draft_id, "status": "discarded"},
+        )
+
+    if not _channel_is_autosend(record.channel):
+        return tool_error(
+            "approval_required",
+            f"Channel {record.channel} is not in PB_OUTBOUND_AUTOSEND_CHANNELS; operator must commit via control API.",
+            next_valid_actions=("wait_for_operator_commit",),
+            details={"draft_id": draft_id, "channel": record.channel},
+        )
+
+    committed = await outbound_draft_store.commit(record.id, decided_by="autosend")
+    return await _dispatch_outbound_draft(committed, ctx=ctx)
 
 
 _peer_card_cache: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -953,6 +1561,7 @@ async def _get_cached_peer_card(
 
 
 @mcp.tool
+@envelope_error
 async def list_a2a_peers(
     fetch_cards: bool = True,
     force_refresh: bool = False,
@@ -1016,6 +1625,7 @@ async def list_a2a_peers(
 
 
 @mcp.tool
+@envelope_error
 async def manage_todo_list(
     action: Literal["get", "set", "clear"] = "get",
     todo_list: list[TodoItem] | None = None,
@@ -1042,7 +1652,7 @@ async def manage_todo_list(
 
     if normalized_action == "set":
         if todo_list is None:
-            raise ValueError("todo_list is required for set")
+            return tool_error("invalid_arguments", "todo_list is required for set")
 
         snapshot = TodoListSnapshot(items=todo_list, explanation=explanation)
         await ctx.set_state(_TODO_LIST_STATE_KEY, snapshot.model_dump(mode="json"))
@@ -1050,11 +1660,194 @@ async def manage_todo_list(
         logger.debug(f"Updated todo list with {len(snapshot.items)} items")
         return _serialize_todo_snapshot("set", snapshot)
 
-    raise ValueError(f"Unsupported action: {action}")
+    return tool_error(
+        "invalid_arguments",
+        f"Unsupported action: {action}",
+        details={"supported_actions": ["get", "set", "clear"]},
+    )
+
+
+@mcp.tool
+@envelope_error
+async def enter_planning_mode(
+    objective: str,
+    scope: str | None = None,
+    ctx: Context = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    """
+    Switches the current session into planning mode (plan P2 #11).
+
+    Use this for ambiguous or high-impact requests. While planning, the model can
+    still read freely (list_files, read_file, find_files, search_file_regex,
+    fetch_url) but the following mutating tools return a denied envelope:
+    execute_command, run_approved_command, write_new_file, replace_file_text,
+    send_message, send_file, send_a2a_message, request_a2a_response,
+    commit_outbound_message, and the create/update/delete actions of
+    manage_agent_task. draft_command and draft_outbound_message remain available
+    for staging proposals while a plan is being drafted.
+
+    Call exit_planning_mode(plan_summary) to record the plan as an artifact under
+    plans/active/ and re-enable mutating tools.
+    """
+
+    normalized_objective = objective.strip()
+    if not normalized_objective:
+        return tool_error("invalid_arguments", "objective must not be empty")
+
+    runtime_session_key = _resolve_runtime_session_key(ctx)
+    if runtime_session_key is None:
+        return tool_error(
+            "permission_denied",
+            "Planning mode requires a runtime-session-bound MCP context.",
+        )
+
+    state = _registry_enter_planning(
+        runtime_session_key,
+        objective=normalized_objective,
+        scope=scope,
+        source="model",
+    )
+
+    await runtime_telemetry.record_event(
+        event_type="session.planning.entered",
+        source="mcp",
+        message="Session entered planning mode.",
+        data={
+            "session_key": runtime_session_key,
+            "objective": state.objective,
+            "scope": state.scope,
+            "source": state.source,
+        },
+    )
+
+    return {
+        "status": "ok",
+        "mode": SessionMode.PLANNING.value,
+        "session_key": runtime_session_key,
+        "objective": state.objective,
+        "scope": state.scope,
+        "reminder": planning_block_reminder(),
+        "next_valid_actions": list(_PLANNING_READ_ONLY_TOOLS),
+    }
+
+
+@mcp.tool
+@envelope_error
+async def exit_planning_mode(
+    plan_summary: str,
+    ctx: Context = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    """
+    Exits planning mode and records the plan as a workspace artifact under
+    plans/active/ (plan P2 #11). On success, mutating tools are re-enabled for
+    this session.
+
+    The plan_summary should be a concrete plan: ordered steps, concrete commands
+    or send targets, and the success criteria. Operators reading plans/active/
+    rely on this content to decide whether to let the model proceed.
+    """
+
+    normalized_summary = plan_summary.strip()
+    if not normalized_summary:
+        return tool_error("invalid_arguments", "plan_summary must not be empty")
+
+    runtime_session_key = _resolve_runtime_session_key(ctx)
+    if runtime_session_key is None:
+        return tool_error(
+            "permission_denied",
+            "Planning mode requires a runtime-session-bound MCP context.",
+        )
+
+    if get_session_mode(runtime_session_key) is not SessionMode.PLANNING:
+        return tool_error(
+            "conflict",
+            "Session is not in planning mode.",
+            next_valid_actions=("enter_planning_mode",),
+            details={"session_key": runtime_session_key, "mode": SessionMode.NORMAL.value},
+        )
+
+    state = get_planning_state(runtime_session_key)
+    objective = state.objective if state is not None else ""
+    scope = state.scope if state is not None else None
+    entered_at = state.entered_at if state is not None else _utcnow()
+    enter_source = state.source if state is not None else "model"
+
+    exited_at = _utcnow()
+    plan_path = await _write_planning_artifact(
+        session_key=runtime_session_key,
+        objective=objective,
+        scope=scope,
+        plan_summary=normalized_summary,
+        entered_at=entered_at,
+        exited_at=exited_at,
+        source=enter_source,
+    )
+    plan_display_path = _display_path(plan_path)
+
+    _registry_exit_planning(runtime_session_key)
+
+    await runtime_telemetry.record_event(
+        event_type="session.planning.exited",
+        source="mcp",
+        message="Session exited planning mode.",
+        data={
+            "session_key": runtime_session_key,
+            "plan_path": plan_display_path,
+            "source": "model",
+        },
+    )
+
+    return {
+        "status": "ok",
+        "mode": SessionMode.NORMAL.value,
+        "session_key": runtime_session_key,
+        "plan_path": plan_display_path,
+        "objective": objective,
+        "scope": scope,
+    }
+
+
+_DEFAULT_COMMAND_ENV_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "LANG",
+        "TERM",
+        "TZ",
+    }
+)
+
+_DEFAULT_COMMAND_ENV_ALLOWLIST_PATTERNS: tuple[str, ...] = ("LC_*",)
+
+_SENSITIVE_ENV_NAME_PATTERN = re.compile(r"(token|secret|key|password|credential)", re.IGNORECASE)
+_SENSITIVE_OVERRIDE_PREFIX = "PB_PUBLIC_"
+
+
+def _env_name_is_sensitive(name: str) -> bool:
+    if name.startswith(_SENSITIVE_OVERRIDE_PREFIX):
+        return False
+    return bool(_SENSITIVE_ENV_NAME_PATTERN.search(name))
+
+
+def _env_name_is_allowed(name: str, passthrough: frozenset[str]) -> bool:
+    if name in _DEFAULT_COMMAND_ENV_ALLOWLIST:
+        return True
+    if name in passthrough:
+        return True
+    return any(fnmatch.fnmatchcase(name, pattern) for pattern in _DEFAULT_COMMAND_ENV_ALLOWLIST_PATTERNS)
 
 
 def _build_command_environment(ctx: Context | None) -> dict[str, str]:
-    environment = dict(os.environ)
+    passthrough = frozenset(settings.execute_command_env_passthrough())
+    environment: dict[str, str] = {}
+
+    for env_name, env_value in os.environ.items():
+        if not _env_name_is_allowed(env_name, passthrough):
+            continue
+        if _env_name_is_sensitive(env_name):
+            continue
+        environment[env_name] = env_value
+
     environment["PB_RUNTIME_ID"] = settings.runtime_id
     environment["PB_WORKSPACE_ROOT"] = str(settings.WORKSPACE_ROOT)
 
@@ -1067,33 +1860,33 @@ def _build_command_environment(ctx: Context | None) -> dict[str, str]:
     return environment
 
 
-@mcp.tool
-async def execute_command(
+def _command_is_allowlisted(command: str) -> bool:
+    if _approvals_bypassed():
+        return True
+    patterns = settings.execute_command_allowlist_patterns()
+    if not patterns:
+        return False
+    stripped = command.strip()
+    return any(pattern.fullmatch(stripped) for pattern in patterns)
+
+
+async def _run_shell_command(
     command: str,
-    directory: str = ".",
-    timeout_seconds: float = settings.MCP_DEFAULT_COMMAND_TIMEOUT_SECONDS,
-    ctx: Context = None,  # type: ignore[assignment]
+    *,
+    directory: str,
+    timeout_seconds: float,
+    ctx: Context | None,
 ) -> dict[str, Any]:
-    """
-    Executes a shell command inside the workspace and returns its captured output.
-
-    The subprocess environment is augmented with PB_RUNTIME_ID, PB_WORKSPACE_ROOT, and, when the
-    caller is bound to a runtime session, PB_SESSION_KEY (channel:conversation:user) and
-    PB_SESSION_KEY_SAFE (filesystem-safe form with ':' replaced by '__'). Helper scripts can
-    read these via os.environ to locate per-session state without re-deriving identity.
-    """
-
-    if not command.strip():
-        raise ValueError("command must not be empty")
+    """Spawn the validated command; returns the structured result dict or an envelope on input errors."""
 
     timeout_seconds = _validate_command_timeout(timeout_seconds)
     target_directory = _resolve_workspace_path(directory)
 
     if not await asyncio.to_thread(target_directory.exists):
-        raise ValueError(f"Directory does not exist: {directory}")
+        return tool_error("not_found", f"Directory does not exist: {directory}")
 
     if not await asyncio.to_thread(target_directory.is_dir):
-        raise ValueError(f"Path is not a directory: {directory}")
+        return tool_error("invalid_arguments", f"Path is not a directory: {directory}")
 
     shell = _get_command_shell()
     environment = _build_command_environment(ctx)
@@ -1118,18 +1911,31 @@ async def execute_command(
 
     stdout = stdout_bytes.decode("utf-8", errors="replace")
     stderr = stderr_bytes.decode("utf-8", errors="replace")
+    shell_error = classify_shell_stderr(stderr)
     combined_output, combined_truncated = truncate_text(stdout + stderr, settings.MCP_MAX_COMMAND_OUTPUT_CHARS)
     stdout, stdout_truncated = truncate_text(stdout, settings.MCP_MAX_COMMAND_OUTPUT_CHARS)
     stderr, stderr_truncated = truncate_text(stderr, settings.MCP_MAX_COMMAND_OUTPUT_CHARS)
 
-    logger.info(f"Executed command in {_display_path(target_directory)} with exit code {process.returncode}: {command}")
+    exit_code = process.returncode
+    if timed_out:
+        run_status = "timeout"
+    elif exit_code is None or exit_code == 0:
+        run_status = "ok"
+    elif exit_code < 0:
+        run_status = "signal_terminated"
+    else:
+        run_status = "non_zero_exit"
+
+    logger.info(f"Executed command in {_display_path(target_directory)} with exit code {exit_code}: {command}")
 
     return {
         "command": command,
         "directory": _display_path(target_directory),
         "shell": shell,
-        "exit_code": process.returncode,
+        "status": run_status,
+        "exit_code": exit_code,
         "timed_out": timed_out,
+        "shell_error": shell_error,
         "stdout": stdout,
         "stderr": stderr,
         "combined_output": combined_output,
@@ -1140,6 +1946,225 @@ async def execute_command(
 
 
 @mcp.tool
+@envelope_error
+async def execute_command(
+    command: str,
+    directory: str = ".",
+    timeout_seconds: float = settings.MCP_DEFAULT_COMMAND_TIMEOUT_SECONDS,
+    ctx: Context = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    """
+    Executes a shell command inside the workspace and returns its captured output.
+
+    Only commands that match a regex in PB_EXECUTE_COMMAND_ALLOWLIST run directly. Anything off
+    the allowlist returns a denied envelope; use draft_command + run_approved_command to route
+    the request through an operator approval instead.
+
+    The subprocess environment is augmented with PB_RUNTIME_ID, PB_WORKSPACE_ROOT, and, when the
+    caller is bound to a runtime session, PB_SESSION_KEY (channel:conversation:user) and
+    PB_SESSION_KEY_SAFE (filesystem-safe form with ':' replaced by '__'). Helper scripts can
+    read these via os.environ to locate per-session state without re-deriving identity.
+    """
+
+    if blocked := _enforce_planning_gate("execute_command", ctx):
+        return blocked
+
+    if not command.strip():
+        return tool_error("invalid_arguments", "command must not be empty")
+
+    if not _command_is_allowlisted(command):
+        return tool_error(
+            "denied",
+            "Command is not on PB_EXECUTE_COMMAND_ALLOWLIST. Use draft_command to request operator approval.",
+            next_valid_actions=("draft_command",),
+            details={
+                "command": command,
+                "reason": "command_not_on_allowlist",
+            },
+        )
+
+    return await _run_shell_command(
+        command,
+        directory=directory,
+        timeout_seconds=timeout_seconds,
+        ctx=ctx,
+    )
+
+
+@mcp.tool
+@envelope_error
+async def draft_command(
+    command: str,
+    justification: str,
+    directory: str = ".",
+    timeout_seconds: float | None = None,
+    ctx: Context = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    """
+    Records a proposed shell command for operator approval and returns a draft_id.
+
+    Use this when execute_command returned a denied envelope or when you know a command is
+    off-allowlist. The operator approves or denies through the control API
+    (POST /control/approvals/{draft_id}/approve | deny). Once approved, redeem the draft with
+    run_approved_command(draft_id); drafts are single-shot.
+    """
+
+    normalized_command = command.strip()
+    if not normalized_command:
+        return tool_error("invalid_arguments", "command must not be empty")
+
+    normalized_justification = justification.strip()
+    if not normalized_justification:
+        return tool_error(
+            "invalid_arguments",
+            "justification must not be empty; operators need a rationale to decide on the draft",
+        )
+
+    source = "mcp"
+    if ctx is not None:
+        runtime_session_key = get_runtime_session_for_mcp_session(ctx.session_id)
+        if runtime_session_key:
+            source = runtime_session_key
+
+    record = await approval_store.create_draft(
+        command=normalized_command,
+        justification=normalized_justification,
+        source=source,
+        directory=directory,
+        timeout_seconds=timeout_seconds,
+    )
+
+    logger.info(f"Drafted command {record.id} for approval (source={source}): {normalized_command}")
+    await runtime_telemetry.record_event(
+        event_type="control.approval_request",
+        source="mcp",
+        level="info",
+        message="drafted",
+        data={
+            "draft_id": record.id,
+            "source": source,
+            "command": normalized_command,
+            "justification": normalized_justification,
+            "directory": directory,
+            "timeout_seconds": timeout_seconds,
+        },
+    )
+
+    if _approvals_bypassed():
+        approved = await approval_store.approve(
+            record.id,
+            decided_by="dangerous_mode",
+            comment="auto-approved: PB_DANGEROUSLY_APPROVE_EVERYTHING",
+        )
+        return {
+            "status": "approval_required",
+            "draft_id": approved.id,
+            "command": approved.command,
+            "directory": approved.directory,
+            "timeout_seconds": approved.timeout_seconds,
+            "next_valid_actions": ["run_approved_command"],
+            "message": (
+                f"Draft {approved.id} auto-approved by PB_DANGEROUSLY_APPROVE_EVERYTHING; "
+                "call run_approved_command to execute."
+            ),
+        }
+
+    return {
+        "status": "approval_required",
+        "draft_id": record.id,
+        "command": record.command,
+        "directory": record.directory,
+        "timeout_seconds": record.timeout_seconds,
+        "next_valid_actions": ["wait_for_operator", "run_approved_command"],
+        "message": (
+            "Draft recorded. Wait for the operator to approve via "
+            f"POST /control/approvals/{record.id}/approve before calling run_approved_command."
+        ),
+    }
+
+
+@mcp.tool
+@envelope_error
+async def run_approved_command(
+    draft_id: str,
+    ctx: Context = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    """
+    Executes a previously drafted shell command after operator approval. Single-shot.
+
+    Returns the execute_command-style result on success. If the draft is missing, denied, or
+    already used, returns a structured envelope so the model can react without exception traces.
+    """
+
+    if blocked := _enforce_planning_gate("run_approved_command", ctx):
+        return blocked
+
+    if not draft_id.strip():
+        return tool_error("invalid_arguments", "draft_id must not be empty")
+
+    try:
+        record = await approval_store.consume(draft_id)
+    except LookupError as exc:
+        return tool_error(
+            "not_found",
+            str(exc),
+            next_valid_actions=("draft_command",),
+            details={"draft_id": draft_id},
+        )
+    except PermissionError as exc:
+        existing = await approval_store.get(draft_id)
+        error_type = "already_used" if existing is not None and existing.status == "used" else "approval_required"
+        return tool_error(
+            error_type,
+            str(exc),
+            next_valid_actions=("draft_command",) if error_type == "already_used" else ("wait_for_operator",),
+            details={
+                "draft_id": draft_id,
+                "status": existing.status if existing is not None else None,
+            },
+        )
+
+    timeout_seconds = (
+        record.timeout_seconds if record.timeout_seconds is not None else settings.MCP_DEFAULT_COMMAND_TIMEOUT_SECONDS
+    )
+
+    result = await _run_shell_command(
+        record.command,
+        directory=record.directory,
+        timeout_seconds=timeout_seconds,
+        ctx=ctx,
+    )
+
+    if isinstance(result, dict) and result.get("status") == "error":
+        # Surface the spawn error but keep the approval state as used so the model cannot
+        # silently rerun the same draft against a moving filesystem.
+        return result
+
+    await runtime_telemetry.record_event(
+        event_type="control.approval_used",
+        source="mcp",
+        level="info",
+        message="executed",
+        data={
+            "draft_id": draft_id,
+            "decided_by": record.decided_by,
+            "command": record.command,
+        },
+    )
+
+    result["approval"] = ApprovedAction(
+        draft_id=record.id,
+        command=record.command,
+        status=record.status,
+        decided_by=record.decided_by,
+        decided_at=record.decided_at,
+        used_at=record.used_at,
+    ).model_dump(mode="json")
+    return result
+
+
+@mcp.tool
+@envelope_error
 async def fetch_url(
     url: str,
     output_path: str | None = None,
@@ -1154,7 +2179,7 @@ async def fetch_url(
 
     normalized_url = url.strip()
     if not normalized_url:
-        raise ValueError("url must not be empty")
+        return tool_error("invalid_arguments", "url must not be empty")
 
     max_bytes = _validate_fetch_url_max_bytes(max_bytes)
     timeout_seconds = _validate_command_timeout(timeout_seconds)
@@ -1171,16 +2196,20 @@ async def fetch_url(
                 response.raise_for_status()
 
                 if response.content_length is not None and response.content_length > max_bytes:
-                    raise ValueError(
-                        f"Resource size {response.content_length} bytes exceeds the configured limit of {max_bytes} bytes"
+                    return tool_error(
+                        "invalid_arguments",
+                        f"Resource size {response.content_length} bytes exceeds the configured limit of {max_bytes} bytes",
+                        details={"content_length": response.content_length, "max_bytes": max_bytes},
                     )
 
                 payload = bytearray()
                 async for chunk in response.content.iter_chunked(64 * 1024):
                     payload.extend(chunk)
                     if len(payload) > max_bytes:
-                        raise ValueError(
-                            f"Resource exceeded the configured limit of {max_bytes} bytes while downloading"
+                        return tool_error(
+                            "invalid_arguments",
+                            f"Resource exceeded the configured limit of {max_bytes} bytes while downloading",
+                            details={"max_bytes": max_bytes},
                         )
 
                 final_url = str(response.url)
@@ -1188,7 +2217,7 @@ async def fetch_url(
                 charset = response.charset
                 status_code = response.status
         except aiohttp.ClientError as exc:
-            raise ValueError(f"Unable to fetch URL: {exc}") from exc
+            return tool_error("internal_error", f"Unable to fetch URL: {exc}")
 
     shortened_urls = await local_url_shortener.shorten_many((normalized_url, final_url))
     readable_html = looks_like_html(content_type, final_url)
@@ -1196,7 +2225,7 @@ async def fetch_url(
     if output_path is not None:
         target_file = _resolve_workspace_path(output_path)
         if await asyncio.to_thread(target_file.exists) and not await asyncio.to_thread(target_file.is_file):
-            raise ValueError(f"Path is not a file: {output_path}")
+            return tool_error("invalid_arguments", f"Path is not a file: {output_path}")
     else:
         target_file = build_fetch_output_path(
             final_url,
@@ -1207,28 +2236,57 @@ async def fetch_url(
 
     await asyncio.to_thread(target_file.parent.mkdir, parents=True, exist_ok=True)
 
+    fetched_at = datetime.now(tz=UTC)
+    provenance_sidecar: str | None = None
+
     if readable_html:
         title, readable_text = await extract_readable_html(bytes(payload), final_url, charset)
-        stored_content = render_readable_html_document(
+        document = render_readable_html_document(
             title,
             shortened_urls.get(final_url, final_url),
             readable_text,
         )
+        banner = render_trust_banner(
+            source_url=normalized_url,
+            final_url=final_url,
+            fetched_at=fetched_at,
+            content_type=content_type,
+            content_mode="readable-html",
+        )
+        stored_content = banner + document
         stored_bytes = len(stored_content.encode("utf-8"))
         await async_write_text_file(target_file, stored_content, mode="w")
         content_mode = "readable-html"
     elif looks_like_text(content_type, final_url):
         text_content = decode_text_payload(bytes(payload), charset)
-        stored_bytes = len(text_content.encode("utf-8"))
-        await async_write_text_file(target_file, text_content, mode="w")
+        banner = render_trust_banner(
+            source_url=normalized_url,
+            final_url=final_url,
+            fetched_at=fetched_at,
+            content_type=content_type,
+            content_mode="text",
+        )
+        stored_content = banner + text_content
+        stored_bytes = len(stored_content.encode("utf-8"))
+        await async_write_text_file(target_file, stored_content, mode="w")
         content_mode = "text"
     else:
         stored_bytes = await async_write_bytes_file(target_file, bytes(payload))
         content_mode = "binary"
+        sidecar_path = target_file.parent / f"{target_file.name}.metadata.json"
+        sidecar_metadata = render_trust_banner_metadata(
+            source_url=normalized_url,
+            final_url=final_url,
+            fetched_at=fetched_at,
+            content_type=content_type,
+            content_mode="binary",
+        )
+        await async_write_text_file(sidecar_path, json.dumps(sidecar_metadata, indent=2) + "\n", mode="w")
+        provenance_sidecar = _display_path(sidecar_path)
 
     logger.info(f"Fetched URL {normalized_url} into {_display_path(target_file)}")
 
-    return {
+    result = {
         "url": normalized_url,
         "short_url": shortened_urls.get(normalized_url, normalized_url),
         "final_url": final_url,
@@ -1241,9 +2299,13 @@ async def fetch_url(
         "bytes_saved": stored_bytes,
         "max_bytes": max_bytes,
     }
+    if provenance_sidecar is not None:
+        result["provenance_sidecar"] = provenance_sidecar
+    return result
 
 
 @mcp.tool
+@envelope_error
 async def manage_agent_task(
     action: Literal["list", "get", "create", "update", "delete"],
     task_id: str | None = None,
@@ -1255,6 +2317,14 @@ async def manage_agent_task(
     enabled: bool | None = None,
     repeat: bool | None = None,
     clean_session: bool | None = None,
+    done_condition: str | None = None,
+    validation_prompt: str | None = None,
+    max_steps_per_run: int | None = None,
+    max_cost_per_run_usd: float | None = None,
+    forbidden_actions: list[str] | None = None,
+    progress_log_path: str | None = None,
+    clear_goal: bool = False,
+    ctx: Context = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     """
     Creates, lists, reads, updates, and deletes scheduled background AI tasks.
@@ -1265,61 +2335,109 @@ async def manage_agent_task(
     Cron tasks use cron_expression.
     Delayed tasks use delay_seconds. They are one-shot by default and only repeat when repeat=true is explicitly set.
     Tasks run in a clean session by default (no history from previous runs). Set clean_session=false to preserve session history across runs.
+
+    If a scheduled task's prompt instructs the model to send_message / send_a2a_message to a
+    channel that is not in PB_OUTBOUND_AUTOSEND_CHANNELS, every cron run will accumulate a
+    pending outbound draft that the operator must commit. Configure the autosend allowlist for
+    the destination channel if the task is meant to fire-and-forget.
     """
 
     normalized_action = action.strip().lower()
 
-    if normalized_action == "list":
-        return await task_scheduler.list_tasks()
+    if normalized_action in {"create", "update", "delete"}:
+        if blocked := _enforce_planning_gate(f"manage_agent_task.{normalized_action}", ctx):
+            return blocked
 
-    if normalized_action == "get":
-        if not task_id:
-            raise ValueError("task_id is required for get")
-        return await task_scheduler.get_task(task_id)
+    try:
+        if normalized_action == "list":
+            return await task_scheduler.list_tasks()
 
-    if normalized_action == "create":
-        if not name or not name.strip():
-            raise ValueError("name is required for create")
-        if not prompt or not prompt.strip():
-            raise ValueError("prompt is required for create")
-        if not schedule_type or not schedule_type.strip():
-            raise ValueError("schedule_type is required for create")
+        if normalized_action == "get":
+            if not task_id:
+                return tool_error("invalid_arguments", "task_id is required for get")
+            return await task_scheduler.get_task(task_id)
 
-        return await task_scheduler.create_task(
-            name=name,
-            prompt=prompt,
-            schedule_type=schedule_type,
-            cron_expression=cron_expression,
-            delay_seconds=delay_seconds,
-            timezone_name=settings.TIMEZONE,
-            enabled=enabled if enabled is not None else True,
-            repeat=repeat if repeat is not None else False,
-            clean_session=clean_session if clean_session is not None else True,
-        )
+        if normalized_action == "create":
+            if not name or not name.strip():
+                return tool_error("invalid_arguments", "name is required for create")
+            if not prompt or not prompt.strip():
+                return tool_error("invalid_arguments", "prompt is required for create")
+            if not schedule_type or not schedule_type.strip():
+                return tool_error("invalid_arguments", "schedule_type is required for create")
 
-    if normalized_action == "update":
-        if not task_id:
-            raise ValueError("task_id is required for update")
+            goal = _build_agent_task_goal(
+                done_condition=done_condition,
+                validation_prompt=validation_prompt,
+                max_steps_per_run=max_steps_per_run,
+                max_cost_per_run_usd=max_cost_per_run_usd,
+                forbidden_actions=forbidden_actions,
+                progress_log_path=progress_log_path,
+            )
 
-        return await task_scheduler.update_task(
-            task_id,
-            name=name,
-            prompt=prompt,
-            schedule_type=schedule_type,
-            cron_expression=cron_expression,
-            delay_seconds=delay_seconds,
-            timezone_name=settings.TIMEZONE,
-            enabled=enabled,
-            repeat=repeat,
-            clean_session=clean_session,
-        )
+            return await task_scheduler.create_task(
+                name=name,
+                prompt=prompt,
+                schedule_type=schedule_type,
+                cron_expression=cron_expression,
+                delay_seconds=delay_seconds,
+                timezone_name=settings.TIMEZONE,
+                enabled=enabled if enabled is not None else True,
+                repeat=repeat if repeat is not None else False,
+                clean_session=clean_session if clean_session is not None else True,
+                goal=goal,
+            )
 
-    if normalized_action == "delete":
-        if not task_id:
-            raise ValueError("task_id is required for delete")
-        return await task_scheduler.delete_task(task_id)
+        if normalized_action == "update":
+            if not task_id:
+                return tool_error("invalid_arguments", "task_id is required for update")
 
-    raise ValueError(f"Unsupported action: {action}")
+            goal = _build_agent_task_goal(
+                done_condition=done_condition,
+                validation_prompt=validation_prompt,
+                max_steps_per_run=max_steps_per_run,
+                max_cost_per_run_usd=max_cost_per_run_usd,
+                forbidden_actions=forbidden_actions,
+                progress_log_path=progress_log_path,
+            )
+
+            return await task_scheduler.update_task(
+                task_id,
+                name=name,
+                prompt=prompt,
+                schedule_type=schedule_type,
+                cron_expression=cron_expression,
+                delay_seconds=delay_seconds,
+                timezone_name=settings.TIMEZONE,
+                enabled=enabled,
+                repeat=repeat,
+                clean_session=clean_session,
+                goal=goal,
+                clear_goal=clear_goal,
+            )
+
+        if normalized_action == "delete":
+            if not task_id:
+                return tool_error("invalid_arguments", "task_id is required for delete")
+            return await task_scheduler.delete_task(task_id)
+    except ValueError as exc:
+        # Scheduler raises ValueError for "Task not found" and schedule validation errors;
+        # translate "Task not found" to a typed not_found envelope and leave the rest as
+        # invalid_arguments so the model can recover.
+        message = str(exc)
+        if message.startswith("Task not found"):
+            return tool_error(
+                "not_found",
+                message,
+                next_valid_actions=("list",),
+                details={"task_id": task_id},
+            )
+        return tool_error("invalid_arguments", message)
+
+    return tool_error(
+        "invalid_arguments",
+        f"Unsupported action: {action}",
+        details={"supported_actions": ["list", "get", "create", "update", "delete"]},
+    )
 
 
 # Optional MCP tool plugins listed in PB_MCP_TOOL_FACTORIES.
@@ -1497,6 +2615,139 @@ async def clear_control_session(session_id: str, request: Request) -> dict[str, 
     )
 
 
+@mcp_app.post("/control/sessions/{session_id}/planning-mode")
+async def set_session_planning_mode(
+    session_id: str,
+    payload: PlanningModeRequest,
+    request: Request,
+) -> dict[str, Any]:
+    scope = await _authorize_control(request.headers.get("authorization"))
+    application_loop = request.app.state.application_loop
+    if application_loop is None:
+        await _audit_control_action(
+            request,
+            action="session.planning-mode",
+            scope=scope,
+            level="warning",
+            message="rejected",
+            details={"session_id": session_id, "reason": "application_loop_not_running"},
+        )
+        raise HTTPException(status_code=503, detail="Application loop is not running.")
+
+    try:
+        session_key = application_loop._resolve_session_key(session_id)
+    except ValueError as exc:
+        await _audit_control_action(
+            request,
+            action="session.planning-mode",
+            scope=scope,
+            level="warning",
+            message="rejected",
+            details={"session_id": session_id, "error": str(exc)},
+        )
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    if payload.state == "planning":
+        state = _registry_enter_planning(
+            session_key,
+            objective=payload.objective or "",
+            scope=payload.scope,
+            source="control-api",
+        )
+        await runtime_telemetry.record_event(
+            event_type="session.planning.entered",
+            source="control-api",
+            message="Session entered planning mode.",
+            data={
+                "session_key": session_key,
+                "objective": state.objective,
+                "scope": state.scope,
+                "source": state.source,
+            },
+        )
+        details = {
+            "session_id": session_key,
+            "mode": SessionMode.PLANNING.value,
+            "objective": state.objective,
+            "scope": state.scope,
+        }
+        await _audit_control_action(
+            request,
+            action="session.planning-mode",
+            scope=scope,
+            message="accepted",
+            details=details,
+        )
+        return _operator_response(
+            action="session.planning-mode",
+            message=f"Session {session_key} entered planning mode.",
+            scope=scope,
+            details=details,
+        )
+
+    if get_session_mode(session_key) is not SessionMode.PLANNING:
+        await _audit_control_action(
+            request,
+            action="session.planning-mode",
+            scope=scope,
+            level="warning",
+            message="rejected",
+            details={"session_id": session_key, "reason": "not_in_planning_mode"},
+        )
+        raise HTTPException(status_code=409, detail=f"Session {session_key} is not in planning mode.")
+
+    plan_state = get_planning_state(session_key)
+    objective = plan_state.objective if plan_state is not None else ""
+    plan_scope = plan_state.scope if plan_state is not None else None
+    entered_at = plan_state.entered_at if plan_state is not None else _utcnow()
+    enter_source = plan_state.source if plan_state is not None else "control-api"
+
+    exited_at = _utcnow()
+    plan_path = await _write_planning_artifact(
+        session_key=session_key,
+        objective=objective,
+        scope=plan_scope,
+        plan_summary=payload.plan_summary or "(operator-cleared without plan summary)",
+        entered_at=entered_at,
+        exited_at=exited_at,
+        source="control-api",
+    )
+    plan_display_path = _display_path(plan_path)
+
+    _registry_exit_planning(session_key)
+
+    await runtime_telemetry.record_event(
+        event_type="session.planning.exited",
+        source="control-api",
+        message="Session exited planning mode.",
+        data={
+            "session_key": session_key,
+            "plan_path": plan_display_path,
+            "source": "control-api",
+            "entered_by": enter_source,
+        },
+    )
+    details = {
+        "session_id": session_key,
+        "mode": SessionMode.NORMAL.value,
+        "plan_path": plan_display_path,
+        "entered_by": enter_source,
+    }
+    await _audit_control_action(
+        request,
+        action="session.planning-mode",
+        scope=scope,
+        message="accepted",
+        details=details,
+    )
+    return _operator_response(
+        action="session.planning-mode",
+        message=f"Session {session_key} exited planning mode.",
+        scope=scope,
+        details=details,
+    )
+
+
 @mcp_app.post("/control/messages/send")
 async def post_control_message(payload: ControlMessageRequest, request: Request) -> dict[str, Any]:
     scope = await _authorize_control(request.headers.get("authorization"))
@@ -1651,6 +2902,221 @@ async def run_control_task_now(task_id: str, request: Request) -> dict[str, Any]
     return _operator_response(
         action="task.run-now",
         message=f"Ran task {task_id} immediately.",
+        scope=scope,
+        details=details,
+    )
+
+
+async def _decide_approval(
+    draft_id: str,
+    *,
+    request: Request,
+    payload: ApprovalDecision,
+    decision: Literal["approve", "deny"],
+) -> dict[str, Any]:
+    scope = await _authorize_control(request.headers.get("authorization"))
+    action = f"approvals.{decision}"
+    try:
+        if decision == "approve":
+            record = await approval_store.approve(
+                draft_id,
+                decided_by=scope.value,
+                comment=payload.comment,
+            )
+        else:
+            record = await approval_store.deny(
+                draft_id,
+                decided_by=scope.value,
+                comment=payload.comment,
+            )
+    except LookupError as exc:
+        await _audit_control_action(
+            request,
+            action=action,
+            scope=scope,
+            level="warning",
+            message="rejected",
+            details={"draft_id": draft_id, "reason": "not_found"},
+        )
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        await _audit_control_action(
+            request,
+            action=action,
+            scope=scope,
+            level="warning",
+            message="rejected",
+            details={"draft_id": draft_id, "reason": "wrong_state"},
+        )
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    details = {
+        "draft_id": record.id,
+        "status": record.status,
+        "command": record.command,
+        "comment": payload.comment,
+    }
+    await _audit_control_action(
+        request,
+        action=action,
+        scope=scope,
+        message="accepted",
+        details=details,
+    )
+    return _operator_response(
+        action=action,
+        message=f"Draft {record.id} {record.status}.",
+        scope=scope,
+        details=details,
+    )
+
+
+@mcp_app.post("/control/approvals/{draft_id}/approve")
+async def approve_command_draft(
+    draft_id: str,
+    request: Request,
+    payload: ApprovalDecision | None = None,
+) -> dict[str, Any]:
+    return await _decide_approval(
+        draft_id,
+        request=request,
+        payload=payload or ApprovalDecision(),
+        decision="approve",
+    )
+
+
+@mcp_app.post("/control/approvals/{draft_id}/deny")
+async def deny_command_draft(
+    draft_id: str,
+    request: Request,
+    payload: ApprovalDecision | None = None,
+) -> dict[str, Any]:
+    return await _decide_approval(
+        draft_id,
+        request=request,
+        payload=payload or ApprovalDecision(),
+        decision="deny",
+    )
+
+
+@mcp_app.post("/control/drafts/{draft_id}/commit")
+async def commit_outbound_draft_via_control(
+    draft_id: str,
+    request: Request,
+    payload: OutboundDraftDecision | None = None,
+) -> dict[str, Any]:
+    scope = await _authorize_control(request.headers.get("authorization"))
+    decision = payload or OutboundDraftDecision()
+    try:
+        record = await outbound_draft_store.commit(
+            draft_id,
+            decided_by=scope.value,
+            comment=decision.comment,
+        )
+    except LookupError as exc:
+        await _audit_control_action(
+            request,
+            action="drafts.commit",
+            scope=scope,
+            level="warning",
+            message="rejected",
+            details={"draft_id": draft_id, "reason": "not_found"},
+        )
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        await _audit_control_action(
+            request,
+            action="drafts.commit",
+            scope=scope,
+            level="warning",
+            message="rejected",
+            details={"draft_id": draft_id, "reason": "wrong_state"},
+        )
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    dispatch_result = await _dispatch_outbound_draft(record, ctx=None)
+    dispatch_failed = isinstance(dispatch_result, dict) and dispatch_result.get("status") == "error"
+
+    audit_details = {
+        "draft_id": record.id,
+        "kind": record.kind.value,
+        "channel": record.channel,
+        "target": record.target,
+        "comment": decision.comment,
+        "dispatch_failed": dispatch_failed,
+    }
+    await _audit_control_action(
+        request,
+        action="drafts.commit",
+        scope=scope,
+        level="error" if dispatch_failed else "info",
+        message="dispatch_failed" if dispatch_failed else "accepted",
+        details=audit_details,
+    )
+
+    return _operator_response(
+        action="drafts.commit",
+        message=(
+            f"Draft {record.id} committed but dispatch failed."
+            if dispatch_failed
+            else f"Draft {record.id} committed and dispatched."
+        ),
+        scope=scope,
+        details={**audit_details, "dispatch_result": dispatch_result},
+    )
+
+
+@mcp_app.post("/control/drafts/{draft_id}/discard")
+async def discard_outbound_draft_via_control(
+    draft_id: str,
+    request: Request,
+    payload: OutboundDraftDecision | None = None,
+) -> dict[str, Any]:
+    scope = await _authorize_control(request.headers.get("authorization"))
+    decision = payload or OutboundDraftDecision()
+    try:
+        record = await outbound_draft_store.discard(
+            draft_id,
+            decided_by=scope.value,
+            comment=decision.comment,
+        )
+    except LookupError as exc:
+        await _audit_control_action(
+            request,
+            action="drafts.discard",
+            scope=scope,
+            level="warning",
+            message="rejected",
+            details={"draft_id": draft_id, "reason": "not_found"},
+        )
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        await _audit_control_action(
+            request,
+            action="drafts.discard",
+            scope=scope,
+            level="warning",
+            message="rejected",
+            details={"draft_id": draft_id, "reason": "wrong_state"},
+        )
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    details = {
+        "draft_id": record.id,
+        "kind": record.kind.value,
+        "channel": record.channel,
+        "comment": decision.comment,
+    }
+    await _audit_control_action(
+        request,
+        action="drafts.discard",
+        scope=scope,
+        message="accepted",
+        details=details,
+    )
+    return _operator_response(
+        action="drafts.discard",
+        message=f"Draft {record.id} discarded.",
         scope=scope,
         details=details,
     )

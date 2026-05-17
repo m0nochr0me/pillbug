@@ -28,8 +28,10 @@ Pillbug is probably **not** the right fit if you need multi-agent routing inside
 - Native audio recognition and vision support via multi-modal Gemini API
 - Gemini developer and Vertex AI backends, plus OpenAI-compatible upstreams (llama.cpp, vLLM, Ollama, LiteLLM) through the bundled translation proxy
 - Local MCP server for workspace file, search, command, outbound channel, and URL-fetching tools
+- Approval-gated by default: allowlist + draft/commit for `execute_command`, draft/commit for outbound sends, per-channel rate budgets, runtime planning mode, and a `trust: untrusted` banner on fetched content (see [doc/CONFIGURATION.md](doc/CONFIGURATION.md#safety-and-approvals))
+- Structured tool-error envelopes and per-call audit telemetry (`tool.call.started` / `tool.call.completed`) with redacted args summaries
 - Built-in session commands, summarization, and session-scoped planning
-- Embedded scheduler for background agent tasks
+- Embedded scheduler for background agent tasks, with optional per-task goal contract (done condition, step cap, forbidden actions, progress log)
 - Workspace skill discovery from `skills/*/SKILL.md`
 - Optional channel and integration packages: A2A, Telegram, Slack, Matrix, WebSocket (Socket.IO), HTTP trigger, dashboard, bundled memory, and the OpenAI-compatibility proxy
 - Per-workspace `AGENTS.md` instructions seeded on first run

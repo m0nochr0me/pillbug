@@ -33,6 +33,13 @@ class RuntimeMetadata(BaseModel):
         default_factory=tuple,
         description="Enabled inbound channels for this runtime instance.",
     )
+    approvals_bypassed: bool = Field(
+        default=False,
+        description=(
+            "Whether PB_DANGEROUSLY_APPROVE_EVERYTHING is enabled, in which case "
+            "command and outbound-send approval gates are short-circuited."
+        ),
+    )
 
 
 class TelemetryEvent(BaseModel):
@@ -115,6 +122,40 @@ class ChannelsTelemetrySnapshot(BaseModel):
     )
 
 
+class CacheSummary(BaseModel):
+    """Running cache-token telemetry for a session (plan P1 #6)."""
+
+    turn_count: int = Field(ge=0, description="Number of model turns counted into this summary.")
+    prompt_tokens: int = Field(ge=0, description="Sum of prompt tokens across counted turns.")
+    cached_content_tokens: int = Field(
+        ge=0,
+        description="Sum of cached-content tokens reported across counted turns.",
+    )
+    output_tokens: int = Field(ge=0, description="Sum of candidate (output) tokens across counted turns.")
+    cache_hit_ratio: float = Field(
+        ge=0.0,
+        description="cached_content_tokens / max(prompt_tokens, 1) for the running totals.",
+    )
+    last_turn_cache_hit_ratio: float | None = Field(
+        default=None,
+        ge=0.0,
+        description="cached_content / prompt ratio for the most recent counted turn, when present.",
+    )
+    last_turn_latency_ms: float | None = Field(
+        default=None,
+        ge=0.0,
+        description="Wall-clock latency of the most recent model turn, in milliseconds.",
+    )
+    window_hit_ratio: float | None = Field(
+        default=None,
+        ge=0.0,
+        description=(
+            "Running hit ratio over the last CACHE_HIT_RATIO_WARN_WINDOW turns; "
+            "compared against CACHE_HIT_RATIO_WARN_THRESHOLD."
+        ),
+    )
+
+
 class SessionTelemetryEntry(BaseModel):
     session_key: str = Field(min_length=1, description="Composite channel session key for the conversation.")
     channel_name: str = Field(min_length=1, description="Inbound channel name for the session.")
@@ -132,6 +173,22 @@ class SessionTelemetryEntry(BaseModel):
     last_activity_at: datetime = Field(description="UTC timestamp of the latest activity for the session.")
     last_command: str | None = Field(
         default=None, description="Most recent recognized runtime command, when applicable."
+    )
+    cache_summary: CacheSummary | None = Field(
+        default=None,
+        description="Running cache-token telemetry; None until the first model turn completes.",
+    )
+    mode: Literal["normal", "planning"] = Field(
+        default="normal",
+        description="Current session mode; planning blocks mutating tools (plan P2 #11).",
+    )
+    planning_objective: str | None = Field(
+        default=None,
+        description="Active planning-mode objective, when the session is in planning mode.",
+    )
+    loaded_skill_names: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description="Names of workspace skills the model has read this session (plan P2 #18).",
     )
 
 
