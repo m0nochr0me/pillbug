@@ -58,18 +58,6 @@ async def managed_mcp_server() -> AsyncIterator[None]:
             await server_task
 
 
-_DANGEROUS_MODE_REMINDER_INTERVAL_SECONDS = 300.0
-_DANGEROUS_MODE_BANNER = (
-    "DANGEROUSLY_APPROVE_EVERYTHING is on — approval gates bypassed; runtime is trust-the-model mode"
-)
-
-
-async def _dangerous_mode_watchdog() -> None:
-    while True:
-        await asyncio.sleep(_DANGEROUS_MODE_REMINDER_INTERVAL_SECONDS)
-        logger.error(_DANGEROUS_MODE_BANNER)
-
-
 async def main(*args) -> None:
     async with managed_mcp_server(), managed_scheduler():
         print(__banner__)
@@ -77,14 +65,8 @@ async def main(*args) -> None:
             print("CLI channel ready. Type /exit to quit.")
         logger.info(f"Runtime identity: {settings.runtime_id}")
         logger.info(f"Active channels: {', '.join(settings.enabled_channels())}")
-
-        dangerous_mode_task: asyncio.Task[None] | None = None
         if settings.DANGEROUSLY_APPROVE_EVERYTHING:
-            logger.error(_DANGEROUS_MODE_BANNER)
-            dangerous_mode_task = asyncio.create_task(
-                _dangerous_mode_watchdog(),
-                name="dangerous-mode-watchdog",
-            )
+            logger.error("DANGEROUSLY_APPROVE_EVERYTHING is on; runtime is trust-the-model mode")
 
         application_loop = ApplicationLoop(chat_service=chat_service)
         mcp_module = import_module("app.mcp")
@@ -97,10 +79,6 @@ async def main(*args) -> None:
                 await application_loop.wait_for_shutdown()
         finally:
             mcp_module.bind_application_loop(None)
-            if dangerous_mode_task is not None:
-                dangerous_mode_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await dangerous_mode_task
 
 
 def entrypoint() -> None:
