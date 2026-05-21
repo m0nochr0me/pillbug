@@ -32,6 +32,6 @@ bash skills/text-to-speech/scripts/synthesize.sh "The quick brown fox jumps over
 ```
 
 ## Notes
-- Requires `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID` environment variables.
+- `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID` (both required) resolve from `/run/secrets/<name>` first (Docker/Kubernetes secrets, name lowercased), then the environment or a skill-local `.env` file.
 - Requires `jq` and `curl` on the system.
 - Output files are timestamped to avoid collisions.

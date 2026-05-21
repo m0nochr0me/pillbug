@@ -39,9 +39,15 @@ def load_dotenv() -> None:
 
 
 def require_env(name: str) -> str:
+    """Resolve a credential from /run/secrets/<name> (Docker/Kubernetes) or the environment/.env."""
+    secret_file = Path("/run/secrets") / name.lower()
+    if secret_file.is_file():
+        secret_value = secret_file.read_text(encoding="utf-8").strip()
+        if secret_value:
+            return secret_value
     value = os.environ.get(name)
     if not value:
-        sys.exit(f"error: {name} is not set (put it in .env or the environment)")
+        sys.exit(f"error: {name} is not set (provide /run/secrets/{name.lower()}, the environment, or .env)")
     return value
 
 

@@ -1,6 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Credentials resolve from /run/secrets/<name> (Docker/Kubernetes secrets) first;
+# for dev, fall back to the environment or a skill-local .env file.
+SKILL_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -f "$SKILL_DIR/.env" ]; then
+  set -a
+  . "$SKILL_DIR/.env"
+  set +a
+fi
+
+read_secret() {
+  local file="/run/secrets/${1,,}"
+  [ -s "$file" ] && { cat "$file"; return; }
+  printf '%s' "${!1-}"
+}
+
 TEXT="$1"
 
 if [ -n "${2:-}" ]; then
@@ -12,8 +27,10 @@ else
   OUTPUT_FILE="${OUTPUT_DIR}/$(date +%Y%m%d_%H%M%S).ogg"
 fi
 
-: "${ELEVENLABS_API_KEY:?ELEVENLABS_API_KEY is not set}"
-: "${ELEVENLABS_VOICE_ID:?ELEVENLABS_VOICE_ID is not set}"
+ELEVENLABS_API_KEY="$(read_secret ELEVENLABS_API_KEY)"
+ELEVENLABS_VOICE_ID="$(read_secret ELEVENLABS_VOICE_ID)"
+: "${ELEVENLABS_API_KEY:?ELEVENLABS_API_KEY is not set (provide /run/secrets/elevenlabs_api_key, the environment, or skill .env)}"
+: "${ELEVENLABS_VOICE_ID:?ELEVENLABS_VOICE_ID is not set (provide /run/secrets/elevenlabs_voice_id, the environment, or skill .env)}"
 
 MODEL="${ELEVENLABS_MODEL:-eleven_v3}"
 STABILITY="${ELEVENLABS_STABILITY:-1.0}"

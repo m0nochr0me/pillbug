@@ -12,10 +12,12 @@ Script: `scripts/threads.py`
 
 ## Environment
 
-Set the app-level credentials in the environment (or a `.env` file in the
-skill directory or current working directory). User-level OAuth tokens are
-obtained via `setup` and stored separately on disk — never put a user
-access token in the environment.
+Each credential resolves from `/run/secrets/<name>` first — the name lowercased,
+e.g. `THREADS_APP_SECRET` → `/run/secrets/threads_app_secret` — as provided by
+Docker or Kubernetes secrets. When no secret file is present it falls back to the
+environment or a `.env` file in the skill directory or current working directory.
+User-level OAuth tokens are obtained via `setup` and stored separately on disk —
+never put a user access token in the environment.
 
 | Variable                | Required | Purpose                                                                |
 | ----------------------- | -------- | ---------------------------------------------------------------------- |

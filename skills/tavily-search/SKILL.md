@@ -19,6 +19,10 @@ The script posts to Tavily's `/search` endpoint and prints JSON with `null` fiel
 
 ## Environment
 
+`TAVILY_API_KEY` resolves from `/run/secrets/tavily_api_key` first, as provided by
+Docker or Kubernetes secrets; when no secret file is present it falls back to the
+environment or a `.env` file in the skill directory.
+
 - `TAVILY_API_KEY` is required.
 - `TAVILY_DEPTH` controls `search_depth`. Defaults to `basic` when unset.
 - `TAVILY_TOP_K` controls `max_results`. Defaults to `5` when unset.

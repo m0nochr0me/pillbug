@@ -1,13 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Credentials resolve from /run/secrets/<name> (Docker/Kubernetes secrets) first;
+# for dev, fall back to the environment or a skill-local .env file.
+SKILL_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -f "$SKILL_DIR/.env" ]; then
+  set -a
+  . "$SKILL_DIR/.env"
+  set +a
+fi
+
+read_secret() {
+  local file="/run/secrets/${1,,}"
+  [ -s "$file" ] && { cat "$file"; return; }
+  printf '%s' "${!1-}"
+}
+
 if [ $# -ne 1 ] || [ -z "$1" ]; then
   echo "Usage: bash search.sh <query>" >&2
   exit 1
 fi
 
 QUERY="$1"
-API_KEY="${TAVILY_API_KEY:?TAVILY_API_KEY is not set}"
+API_KEY="$(read_secret TAVILY_API_KEY)"
+: "${API_KEY:?TAVILY_API_KEY is not set (provide /run/secrets/tavily_api_key, the environment, or skill .env)}"
 DEPTH="${TAVILY_DEPTH:-basic}"
 TOP_K="${TAVILY_TOP_K:-5}"
 
