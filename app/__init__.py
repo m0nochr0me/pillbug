@@ -8,7 +8,7 @@ import os
 # application logging pipeline so CLI mode is not polluted with tool output.
 os.environ.setdefault("FASTMCP_LOG_ENABLED", "false")
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 __project__ = "pillbug"
 
 __banner__ = f"""
