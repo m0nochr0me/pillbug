@@ -162,8 +162,8 @@ class Settings(BaseSettings):
     A2A_PEER_CARD_FETCH_TIMEOUT_SECONDS: float = 5.0
 
     GEMINI_MODEL: str = "gemini-3.1-pro-preview"
-    GEMINI_TEMPERATURE: float = 1.0
-    GEMINI_TOP_P: float = 0.6
+    GEMINI_TEMPERATURE: float | None = None
+    GEMINI_TOP_P: float | None = None
     GEMINI_MAX_OUTPUT_TOKENS: int = 16536
     GEMINI_THINKING_LEVEL: str = "high"
     GEMINI_BACKEND: str = "developer"
