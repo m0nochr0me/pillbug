@@ -65,7 +65,7 @@ Then follow this workflow:
 4. Run the bootstrap launch once.
 5. Wait for the runtime to exit after printing that the workspace was initialized.
 6. Verify that the runtime directory now contains at least `runtime_id.txt`, `security_patterns.json`, and `workspace/AGENTS.md`.
-7. If the runtime should expose bundled workspace skills, copy the repository `skills/` directory into `<runtime-base>/workspace/skills/` after the bootstrap run.
+7. If the runtime should expose bundled workspace skills, copy the repository `skills/` directory into `<runtime-base>/workspace/skills/` after the bootstrap run. If any of those skills call third-party APIs, set up their credentials per [Skill Secrets](#skill-secrets).
 8. Populate the remaining editable config files. Copy `doc/common/example_mcp.json` to `<runtime-base>/mcp.json`. If the trigger channel is enabled, copy `doc/common/example_trigger_sources.json` to `<runtime-base>/trigger_sources.json`. If trigger is disabled, create `<runtime-base>/trigger_sources.json` with `[]`.
 9. Edit `AGENTS.md`, `mcp.json`, and `trigger_sources.json` for the target runtime.
 10. Start the runtime again and confirm that the HTTP and channel endpoints stay up.
@@ -395,3 +395,42 @@ curl http://127.0.0.1:8000/health
 ```
 
 For multi-agent installs, repeat the same checks for each runtime directory such as `~/.pillbug/runtime-a` and `~/.pillbug/runtime-b`.
+
+## Skill Secrets
+
+Workspace skills that call third-party APIs (for example `text-to-speech` and `tavily-search`) need credentials. Skill helper scripts run inside the `execute_command` sandbox, which strips secret-looking variables from the environment, so a skill's secrets must be supplied as files — not through the runtime env file. See [Skill Secrets in the Configuration Reference](./CONFIGURATION.md#skill-secrets) for the full resolution order.
+
+Each secret is a file at `/run/secrets/<name>`, where `<name>` is the lowercased variable name — for example `TAVILY_API_KEY` → `/run/secrets/tavily_api_key` and `ELEVENLABS_API_KEY` → `/run/secrets/elevenlabs_api_key`.
+
+### Simple local setup
+
+Bind-mount each secret file when starting the container:
+
+```bash
+docker run --rm -it \
+  --name pillbug-local \
+  --env-file ./.runtime.env \
+  -e PB_BASE_DIR=/home/pillbug \
+  -p 8000:8000 \
+  -v "$HOME/.pillbug/local:/home/pillbug" \
+  -v "$HOME/.pillbug/secrets/tavily_api_key:/run/secrets/tavily_api_key:ro" \
+  -v "$HOME/.pillbug/secrets/elevenlabs_api_key:/run/secrets/elevenlabs_api_key:ro" \
+  pillbug-local:latest
+```
+
+For development you can instead drop a `.env` file into the skill directory itself (for example `workspace/skills/tavily-search/.env`); it is gitignored and read only when no `/run/secrets` file is present.
+
+### Multi-agent setup
+
+Use Docker Compose secrets. Create the secret files:
+
+```bash
+mkdir -p ./.deploy-multi/secrets
+printf '%s' 'REAL_TAVILY_API_KEY'     > ./.deploy-multi/secrets/tavily_api_key
+printf '%s' 'REAL_ELEVENLABS_API_KEY' > ./.deploy-multi/secrets/elevenlabs_api_key
+chmod 0440 ./.deploy-multi/secrets/*
+```
+
+`doc/multi/example.compose.yaml` carries a commented `secrets:` block — uncomment the top-level definitions and the per-service `secrets:` list on each runtime that runs those skills. The container runs as uid 1000 (`pillbug`), and each secret file must be readable by that uid: non-Swarm Compose ignores a secret's `uid`/`gid`/`mode`, so set host-side ownership or permissions accordingly.
+
+Non-secret skill settings (voice ids, search depth, and similar) stay in the runtime env file, and their names must be listed in `PB_EXECUTE_COMMAND_ENV_PASSTHROUGH`; the example env files show this.

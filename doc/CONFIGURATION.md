@@ -138,6 +138,24 @@ These verbs inherit the channel's existing trust model — no separate auth laye
 
 Persistent state introduced by approvals lives under `{PB_BASE_DIR}/approvals/<id>.json` for command drafts and `{PB_BASE_DIR}/drafts/<id>.json` for outbound drafts.
 
+## Skill Secrets
+
+Workspace skills run their helper scripts through `execute_command`, so those subprocesses receive the scrubbed environment described under `PB_EXECUTE_COMMAND_ENV_PASSTHROUGH` above. A skill cannot rely on a secret being inherited from the runtime environment — any variable whose name matches `(?i)(token|secret|key|password|credential)` is dropped before the subprocess starts.
+
+Skill scripts resolve each credential in this order:
+
+1. `/run/secrets/<name>` — a file whose name is the lowercased variable name (e.g. `TAVILY_API_KEY` → `/run/secrets/tavily_api_key`). This is the production path; Docker and Kubernetes mount secrets here.
+2. The process environment — covers non-secret values forwarded through `PB_EXECUTE_COMMAND_ENV_PASSTHROUGH`, and local development.
+3. A skill-local `.env` file in the skill directory — a development convenience; gitignored.
+
+Guidance:
+
+- **Secrets** (API keys, app secrets, app passwords): provide a `/run/secrets/<name>` file. Do not place them in the runtime env file — the keyword filter blocks them from reaching the skill regardless.
+- **Non-secret skill config** (voice ids, handles, hostnames, tuning values): keep these in the runtime env file and list their names in `PB_EXECUTE_COMMAND_ENV_PASSTHROUGH` so they reach the skill subprocess.
+- **Persisted user tokens** (OAuth tokens a skill obtains through its own `setup` flow): the skill writes these to a skill-local file such as `.credentials.json` (mode `0600`, gitignored) — never the environment.
+
+The bundled `threads`, `bluesky`, `tavily-search`, and `text-to-speech` skills follow this pattern. For wiring `/run/secrets` into a deployment, see [Installation Instructions](./INSTALL.md#skill-secrets).
+
 ## Cache And Telemetry
 
 - `PB_CACHE_HIT_RATIO_WARN_THRESHOLD`: Float in `[0, 1]`. When a session's running cache-hit ratio drops below this threshold over the last `PB_CACHE_HIT_RATIO_WARN_WINDOW` turns, the runtime emits a warning-level telemetry event. Default `0.3`. The `session.response.completed` event always carries `prompt_tokens`, `cached_content_tokens`, `cache_hit_ratio`, `output_tokens`, and `latency_ms`, and `/telemetry/sessions` surfaces a `cache_summary` per session.

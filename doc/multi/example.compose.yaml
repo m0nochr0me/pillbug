@@ -26,6 +26,10 @@ services:
       - type: bind
         source: ~/.pillbug/runtime-a
         target: /home/pillbug
+    # Skill secrets — uncomment alongside the top-level `secrets:` block below.
+    # secrets:
+    #   - tavily_api_key
+    #   - elevenlabs_api_key
 
   pillbug-b:
     build:
@@ -119,3 +123,11 @@ services:
 
 volumes:
   pillbug-alerts-state:
+
+# Skill secrets — uncomment and create the files (see doc/INSTALL.md -> Skill Secrets),
+# then add a matching `secrets:` list to each service that runs those skills.
+# secrets:
+#   tavily_api_key:
+#     file: ./secrets/tavily_api_key
+#   elevenlabs_api_key:
+#     file: ./secrets/elevenlabs_api_key
