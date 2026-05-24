@@ -195,6 +195,32 @@ async def clear_runtime_session(runtime_id: str, session_id: str, request: Reque
     return await _proxy_control_action(request, runtime_id, path=f"/control/sessions/{session_id}/clear")
 
 
+@router.get("/runtimes/{runtime_id}/sessions/{session_key}/history")
+async def get_runtime_session_history(
+    runtime_id: str,
+    session_key: str,
+    request: Request,
+    limit: int | None = None,
+) -> dict[str, object]:
+    registration = _get_registration_or_404(request, runtime_id)
+    token = registration.dashboard_bearer_token_value()
+    if token is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Runtime {registration.runtime_id} does not include a dashboard bearer token.",
+        )
+
+    try:
+        return await _runtime_client(request).get_session_history_preview(
+            registration.base_url,
+            session_key,
+            bearer_token=token,
+            limit=limit,
+        )
+    except RuntimeClientError as exc:
+        raise HTTPException(status_code=exc.status_code or 502, detail=str(exc)) from exc
+
+
 @router.post("/runtimes/{runtime_id}/control/tasks")
 async def create_runtime_task(
     runtime_id: str,

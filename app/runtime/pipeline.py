@@ -185,6 +185,23 @@ def _security_pattern_inputs(*, raw_text: str, cleaned_text: str, normalized_tex
     return tuple(dict.fromkeys(text for text in (raw_text, cleaned_text, normalized_text) if text))
 
 
+_REDACTION_PLACEHOLDER = "[REDACTED]"
+
+
+def redact_text_with_security_patterns(text: str) -> str:
+    """Mask substrings matching configured security patterns for safe surfacing in previews."""
+    if not text:
+        return text
+
+    warning_patterns, block_patterns = _get_security_patterns()
+    redacted = text
+    for _name, pattern in warning_patterns:
+        redacted = pattern.sub(_REDACTION_PLACEHOLDER, redacted)
+    for _name, _reason, pattern in block_patterns:
+        redacted = pattern.sub(_REDACTION_PLACEHOLDER, redacted)
+    return redacted
+
+
 def _has_disallowed_control_characters(text: str) -> bool:
     allowed_controls = {"\n", "\r", "\t"}
     return any(unicodedata.category(char) == "Cc" and char not in allowed_controls for char in text)

@@ -39,8 +39,14 @@ from app.schema.messages import (
     ProcessedInboundMessage,
     extract_a2a_origin_channel_metadata,
 )
-from app.schema.telemetry import CacheSummary, SessionsTelemetrySnapshot, SessionTelemetryEntry
+from app.schema.telemetry import (
+    CacheSummary,
+    SessionHistoryPreview,
+    SessionsTelemetrySnapshot,
+    SessionTelemetryEntry,
+)
 from app.util.rehydration import RehydrationBundle
+from app.util.session_history import serialize_history_tail
 
 _SUMMARIZE_PROMPT_NAME = "summarize.prompt.md"
 _COMPRESS_PROMPT_NAME = "compress.prompt.md"
@@ -1446,6 +1452,38 @@ class ApplicationLoop:
         )
         state.last_activity_at = now
         self._sync_pending_count(session_key)
+
+    async def build_session_history_preview(
+        self,
+        session_key: str,
+        *,
+        limit: int,
+    ) -> SessionHistoryPreview:
+        if limit <= 0:
+            raise ValueError("limit must be greater than 0")
+
+        if session_key not in self._session_state_by_key:
+            raise KeyError(session_key)
+
+        live_session = self._sessions.get(session_key)
+        if live_session is not None:
+            history = live_session.get_curated_history_snapshot()
+            source = "live" if history else "empty"
+        else:
+            history = await self._chat_service.load_history_snapshot(session_key)
+            source = "snapshot" if history else "empty"
+
+        total_turns, turns = serialize_history_tail(history, limit=limit)
+
+        return SessionHistoryPreview(
+            runtime_id=settings.runtime_id,
+            session_key=session_key,
+            source=source,
+            limit=limit,
+            total_turns=total_turns,
+            returned_turns=len(turns),
+            turns=turns,
+        )
 
     async def describe_sessions_telemetry(self) -> SessionsTelemetrySnapshot:
         entries: list[SessionTelemetryEntry] = []

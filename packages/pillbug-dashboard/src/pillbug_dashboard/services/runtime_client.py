@@ -39,6 +39,21 @@ class RuntimeClient:
     async def get_drafts_telemetry(self, base_url: str, bearer_token: str | None = None) -> dict[str, Any]:
         return await self._request_json("GET", base_url=base_url, path="/telemetry/drafts", bearer_token=bearer_token)
 
+    async def get_session_history_preview(
+        self,
+        base_url: str,
+        session_key: str,
+        *,
+        bearer_token: str | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        from urllib.parse import quote, urlencode
+
+        path = f"/telemetry/sessions/{quote(session_key, safe='')}/history"
+        if limit is not None:
+            path = f"{path}?{urlencode({'limit': limit})}"
+        return await self._request_json("GET", base_url=base_url, path=path, bearer_token=bearer_token)
+
     async def get_public_agent_card(self, base_url: str) -> dict[str, Any] | None:
         try:
             return await self._request_json(

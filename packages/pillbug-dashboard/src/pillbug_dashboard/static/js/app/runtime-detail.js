@@ -59,6 +59,11 @@
           taskFormBusy: false,
           taskFormError: "",
           taskForm: emptyTaskForm(),
+          historyDrawerOpen: false,
+          historyDrawerSession: null,
+          historyPreview: null,
+          historyLoading: false,
+          historyError: "",
         };
       },
       computed: {
@@ -388,6 +393,52 @@
             this.errorMessage = error instanceof Error ? error.message : "Unknown error";
           } finally {
             this.pendingActionKey = "";
+          }
+        },
+        openHistoryDrawer(session) {
+          this.historyDrawerSession = session;
+          this.historyDrawerOpen = true;
+          this.historyPreview = null;
+          this.historyError = "";
+          this.fetchSessionHistory(session.session_key);
+        },
+        closeHistoryDrawer() {
+          this.historyDrawerOpen = false;
+          this.historyDrawerSession = null;
+          this.historyPreview = null;
+          this.historyError = "";
+          this.historyLoading = false;
+        },
+        async refreshHistory() {
+          if (!this.historyDrawerSession) {
+            return;
+          }
+          await this.fetchSessionHistory(this.historyDrawerSession.session_key);
+        },
+        async fetchSessionHistory(sessionKey) {
+          if (!sessionKey) {
+            return;
+          }
+          this.historyLoading = true;
+          this.historyError = "";
+
+          try {
+            const response = await fetch(
+              `/api/runtimes/${encodeURIComponent(this.runtimeId)}/sessions/${encodeURIComponent(sessionKey)}/history`,
+              { headers: { Accept: "application/json" } },
+            );
+            const payload = await response.json();
+            if (!response.ok) {
+              throw new Error(payload.detail || `HTTP ${response.status}`);
+            }
+            if (!this.historyDrawerOpen || !this.historyDrawerSession || this.historyDrawerSession.session_key !== sessionKey) {
+              return;
+            }
+            this.historyPreview = payload;
+          } catch (error) {
+            this.historyError = error instanceof Error ? error.message : "Unknown error";
+          } finally {
+            this.historyLoading = false;
           }
         },
         async toggleTask(task, enable) {
@@ -814,12 +865,25 @@
         this.refreshTimer = window.setInterval(() => {
           this.refreshDetail(false);
         }, 15000);
+        this._handleKeydown = (event) => {
+          if (event.key !== "Escape") {
+            return;
+          }
+          if (this.historyDrawerOpen) {
+            this.closeHistoryDrawer();
+          }
+        };
+        window.addEventListener("keydown", this._handleKeydown);
       },
       beforeUnmount() {
         if (this.refreshTimer) {
           window.clearInterval(this.refreshTimer);
         }
         this.stopEventStream();
+        if (this._handleKeydown) {
+          window.removeEventListener("keydown", this._handleKeydown);
+          this._handleKeydown = null;
+        }
       },
     })
     .mount(mountTarget);

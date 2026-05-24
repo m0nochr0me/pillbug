@@ -15,6 +15,7 @@ from app.schema.telemetry import (
     HealthStatus,
     RuntimeMetadata,
     RuntimeTelemetrySnapshot,
+    SessionHistoryPreview,
     SessionsTelemetrySnapshot,
     TasksTelemetrySnapshot,
     TelemetryEvent,
@@ -29,6 +30,7 @@ def _utcnow() -> datetime:
 
 class _ApplicationLoopTelemetryProvider(Protocol):
     async def describe_sessions_telemetry(self) -> SessionsTelemetrySnapshot: ...
+    async def build_session_history_preview(self, session_key: str, *, limit: int) -> SessionHistoryPreview: ...
 
 
 class _SchedulerTelemetryProvider(Protocol):
@@ -168,6 +170,16 @@ class RuntimeTelemetry:
 
     async def build_sessions_snapshot(self) -> SessionsTelemetrySnapshot:
         return await self._describe_sessions()
+
+    async def build_session_history_preview(
+        self,
+        session_key: str,
+        *,
+        limit: int,
+    ) -> SessionHistoryPreview:
+        if self._application_loop is None:
+            raise KeyError(session_key)
+        return await self._application_loop.build_session_history_preview(session_key, limit=limit)
 
     async def build_tasks_snapshot(self) -> TasksTelemetrySnapshot:
         return await self._describe_tasks()

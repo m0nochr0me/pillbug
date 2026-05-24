@@ -36,6 +36,9 @@ html {
   color-scheme: dark;
 }
 
+#runtime-detail-app > div.grid-sidebar > div:nth-child(2) > div.modal-shell > div > div.stack.gap-2.history-list > div:nth-child(2) > div > div > span:nth-child(2)
+
+
 body {
   font-family: "Departure Mono", monospace;
   font-size: 11px;
@@ -88,6 +91,15 @@ strong,
 label,
 th {
   font-weight: 400;
+}
+
+pre,
+code,
+kbd,
+samp {
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
 }
 
 a {
@@ -793,6 +805,51 @@ dialog::backdrop {
   width: min(720px, 100%);
   max-height: calc(100vh - 44px);
   overflow-y: auto;
+}
+
+/* ── Conversation history drawer ────────────────────────────── */
+
+.history-list {
+  max-height: calc(100vh - 220px);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.history-turn {
+  border: 1px solid var(--border-dim);
+  background: var(--surface-dim);
+  padding: 8px 10px;
+}
+
+.history-turn.history-role-user {
+  border-left: 2px solid var(--tertiary);
+}
+
+.history-turn.history-role-model {
+  border-left: 2px solid var(--primary);
+}
+
+.history-turn.history-role-tool {
+  border-left: 2px solid var(--text-muted);
+  background: var(--surface-mid);
+}
+
+.history-turn.history-role-unknown,
+.history-turn.history-role-system {
+  border-left: 2px solid var(--secondary);
+}
+
+.history-role-label {
+  letter-spacing: 0.08em;
+}
+
+.history-text {
+  margin-top: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: transparent;
+  border: none;
+  padding: 0;
 }
 
 /* ── Responsive ─────────────────────────────────────────────── */

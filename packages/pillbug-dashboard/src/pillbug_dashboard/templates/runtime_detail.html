@@ -277,9 +277,12 @@
                   <td>[[ s.message_count ]]</td>
                   <td>[[ formatTimestamp(s.last_activity_at) ]]</td>
                   <td style="text-align:right;">
-                    <button type="button" :disabled="pendingActionKey === ('clear-' + s.session_key)" @click="clearSession(s)">
-                      [[ pendingActionKey === ('clear-' + s.session_key) ? '..' : 'CLR' ]]
-                    </button>
+                    <div class="row right gap-1">
+                      <button type="button" @click="openHistoryDrawer(s)">VIEW</button>
+                      <button type="button" :disabled="pendingActionKey === ('clear-' + s.session_key)" @click="clearSession(s)">
+                        [[ pendingActionKey === ('clear-' + s.session_key) ? '..' : 'CLR' ]]
+                      </button>
+                    </div>
                   </td>
                 </tr>
               </tbody>
@@ -344,6 +347,55 @@
             </table>
           </div>
           <p v-else class="muted">NO TASKS</p>
+        </div>
+
+        <div v-if="historyDrawerOpen" class="overlay active" @click.self="closeHistoryDrawer"></div>
+        <div v-if="historyDrawerOpen" class="modal-shell">
+          <div class="panel stack gap-3 modal-card">
+            <div class="row spread">
+              <div class="stack gap-1">
+                <p class="eyebrow">CONVERSATION</p>
+                <h5>[[ historyDrawerSession ? historyDrawerSession.session_key : '' ]]</h5>
+                <div class="row wrap gap-1 muted">
+                  <span v-if="historyDrawerSession">CH [[ historyDrawerSession.channel_name ]]</span>
+                  <span v-if="historyDrawerSession">MSG [[ historyDrawerSession.message_count ]]</span>
+                  <span v-if="historyPreview">TURNS [[ historyPreview.returned_turns ]] / [[ historyPreview.total_turns ]]</span>
+                  <span v-if="historyPreview">SRC [[ historyPreview.source ]]</span>
+                </div>
+              </div>
+              <div class="row gap-1">
+                <button type="button" :disabled="historyLoading" @click="refreshHistory">
+                  [[ historyLoading ? '...' : 'REFRESH' ]]
+                </button>
+                <button type="button" class="ghost" @click="closeHistoryDrawer">CLOSE</button>
+              </div>
+            </div>
+
+            <p v-if="historyError" class="notice error">
+              <span>[[ historyError ]]</span>
+            </p>
+
+            <div v-if="historyLoading && !historyPreview" class="empty">LOADING HISTORY…</div>
+
+            <div v-else-if="historyPreview && historyPreview.turns.length" class="stack gap-2 history-list">
+              <div v-for="(turn, idx) in historyPreview.turns" :key="idx" class="history-turn" :class="'history-role-' + (turn.role || 'unknown')">
+                <div class="row spread">
+                  <strong class="history-role-label">
+                    [[ (turn.role || 'unknown').toUpperCase() ]]<span v-if="turn.grouped_turn_count > 1"> · [[ turn.grouped_turn_count ]]</span>
+                  </strong>
+                  <div class="row gap-1 muted">
+                    <span v-if="turn.has_thought">THOUGHT</span>
+                    <span v-if="turn.tool_call_names && turn.tool_call_names.length">TOOLS: [[ turn.tool_call_names.join(', ') ]]</span>
+                    <span v-if="turn.tool_response_names && turn.tool_response_names.length">RESP: [[ turn.tool_response_names.join(', ') ]]</span>
+                  </div>
+                </div>
+                <pre v-if="turn.text" class="history-text codeish">[[ turn.text ]]</pre>
+                <p v-else-if="!(turn.tool_call_names && turn.tool_call_names.length) && !(turn.tool_response_names && turn.tool_response_names.length)" class="history-text muted">(no text)</p>
+              </div>
+            </div>
+
+            <p v-else-if="historyPreview" class="muted">NO TURNS RECORDED</p>
+          </div>
         </div>
 
         <div v-if="taskFormOpen" class="overlay active" @click.self="closeTaskForm"></div>

@@ -2516,6 +2516,31 @@ async def get_session_telemetry(request: Request) -> dict[str, Any]:
     return (await runtime_telemetry.build_sessions_snapshot()).model_dump(mode="json")
 
 
+@mcp_app.get("/telemetry/sessions/{session_key}/history")
+async def get_session_history_telemetry(
+    request: Request,
+    session_key: str,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    await _authorize_telemetry(request.headers.get("authorization"))
+
+    effective_limit = limit if limit is not None else settings.SESSION_HISTORY_PREVIEW_LIMIT
+    if effective_limit <= 0:
+        raise HTTPException(status_code=400, detail="limit must be greater than 0")
+    if effective_limit > settings.SESSION_HISTORY_PREVIEW_LIMIT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"limit must not exceed PB_SESSION_HISTORY_PREVIEW_LIMIT ({settings.SESSION_HISTORY_PREVIEW_LIMIT})",
+        )
+
+    try:
+        preview = await runtime_telemetry.build_session_history_preview(session_key, limit=effective_limit)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Session not tracked: {session_key}") from exc
+
+    return preview.model_dump(mode="json")
+
+
 @mcp_app.get("/telemetry/tasks")
 async def get_task_telemetry(request: Request) -> dict[str, Any]:
     await _authorize_telemetry(request.headers.get("authorization"))

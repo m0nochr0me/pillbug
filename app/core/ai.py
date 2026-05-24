@@ -359,6 +359,12 @@ class GeminiChatService:
         async with aiofile.AIOFile(session_path, "w", encoding="utf-8") as session_file:
             await session_file.write(snapshot.model_dump_json(indent=2))
 
+    async def load_history_snapshot(self, session_id: str) -> list[types.Content]:
+        snapshot = await self._load_session_snapshot(session_id)
+        if snapshot is None or not snapshot.history:
+            return []
+        return list(snapshot.history)
+
     async def _load_session_snapshot(self, session_id: str) -> ChatSessionSnapshot | None:
         session_path = self._get_session_path(session_id)
         if not session_path.is_file():
@@ -961,6 +967,10 @@ class GeminiChatSession:
     def _get_curated_history(self) -> list[types.Content]:
         history = self._chat.get_history(curated=True)
         return [types.Content.model_validate(content) for content in history]
+
+    def get_curated_history_snapshot(self) -> list[types.Content]:
+        """Return a deep-copied curated history list safe for read-only consumers."""
+        return [content.model_copy(deep=True) for content in self._get_curated_history()]
 
     def _get_latest_model_response_text(
         self,

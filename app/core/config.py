@@ -178,6 +178,7 @@ class Settings(BaseSettings):
     SESSION_SUMMARIZATION: str | None = "memory"  # or "compress"
     SESSION_SUMMARIZATION_THRESHOLD: int = 1024 * 128  # total tokens
     SESSION_CONTINUITY: bool = True
+    SESSION_HISTORY_PREVIEW_LIMIT: int = 200
 
     GEMINI_EMPTY_RESPONSE_MAX_NUDGES: int = 2
 
@@ -262,6 +263,14 @@ class Settings(BaseSettings):
     def validate_session_summarization_threshold(cls, value: int) -> int:
         if value <= 0:
             raise ValueError("PB_SESSION_SUMMARIZATION_THRESHOLD must be greater than 0")
+
+        return value
+
+    @field_validator("SESSION_HISTORY_PREVIEW_LIMIT")
+    @classmethod
+    def validate_session_history_preview_limit(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("PB_SESSION_HISTORY_PREVIEW_LIMIT must be greater than 0")
 
         return value
 

@@ -205,6 +205,49 @@ class SessionsTelemetrySnapshot(BaseModel):
     )
 
 
+class SessionHistoryTurn(BaseModel):
+    """A single redacted turn from a session's chat history, suitable for operator preview."""
+
+    role: str = Field(min_length=1, description="Turn role as reported by the model client (e.g. user, model).")
+    text: str = Field(default="", description="Redacted text content concatenated from the turn's text parts.")
+    tool_call_names: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description="Names of tools invoked in this turn via function-call parts, if any.",
+    )
+    tool_response_names: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description="Names of tools whose responses landed in this turn, if any.",
+    )
+    has_thought: bool = Field(
+        default=False,
+        description="True when the turn included model thinking parts (text content is omitted for those parts).",
+    )
+    grouped_turn_count: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "Number of underlying turns folded into this preview entry. "
+            "Values greater than 1 indicate a collapsed run of adjacent text-less tool turns."
+        ),
+    )
+
+
+class SessionHistoryPreview(BaseModel):
+    runtime_id: str = Field(min_length=1, description="Stable runtime identifier for this isolated Pillbug instance.")
+    session_key: str = Field(min_length=1, description="Composite channel session key for the conversation.")
+    source: Literal["live", "snapshot", "empty"] = Field(
+        description="Where the preview was sourced from: live in-memory session, persisted snapshot, or empty.",
+    )
+    limit: int = Field(gt=0, description="Maximum number of most-recent turns the endpoint was asked to return.")
+    total_turns: int = Field(ge=0, description="Total number of turns observed in the underlying history.")
+    returned_turns: int = Field(ge=0, description="Number of turns returned in the truncated tail.")
+    turns: list[SessionHistoryTurn] = Field(
+        default_factory=list,
+        description="Tail of the conversation history (oldest first within the returned window).",
+    )
+    generated_at: datetime = Field(default_factory=_utcnow, description="UTC timestamp when the preview was generated.")
+
+
 class TaskExecutionTelemetry(BaseModel):
     key: str = Field(min_length=1, description="Execution key for the scheduled task instance.")
     state: str = Field(min_length=1, description="Current Docket execution state.")
