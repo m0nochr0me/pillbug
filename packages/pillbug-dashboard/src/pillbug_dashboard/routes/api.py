@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from pillbug_dashboard.schema import (
+    DraftDecisionRequest,
     OutboundMessageRequest,
     RegistryMutationResponse,
     RuntimeDetailSnapshot,
@@ -205,6 +206,70 @@ async def disable_runtime_task(runtime_id: str, task_id: str, request: Request) 
 @router.post("/runtimes/{runtime_id}/control/tasks/{task_id}/run-now")
 async def run_runtime_task_now(runtime_id: str, task_id: str, request: Request) -> dict[str, object]:
     return await _proxy_control_action(request, runtime_id, path=f"/control/tasks/{task_id}/run-now")
+
+
+@router.post("/runtimes/{runtime_id}/control/drafts/{draft_id}/commit")
+async def commit_outbound_draft(
+    runtime_id: str,
+    draft_id: str,
+    request: Request,
+    payload: DraftDecisionRequest | None = None,
+) -> dict[str, object]:
+    decision = payload or DraftDecisionRequest()
+    return await _proxy_control_action(
+        request,
+        runtime_id,
+        path=f"/control/drafts/{draft_id}/commit",
+        payload=decision.model_dump(mode="json", exclude_none=True),
+    )
+
+
+@router.post("/runtimes/{runtime_id}/control/drafts/{draft_id}/discard")
+async def discard_outbound_draft(
+    runtime_id: str,
+    draft_id: str,
+    request: Request,
+    payload: DraftDecisionRequest | None = None,
+) -> dict[str, object]:
+    decision = payload or DraftDecisionRequest()
+    return await _proxy_control_action(
+        request,
+        runtime_id,
+        path=f"/control/drafts/{draft_id}/discard",
+        payload=decision.model_dump(mode="json", exclude_none=True),
+    )
+
+
+@router.post("/runtimes/{runtime_id}/control/approvals/{draft_id}/approve")
+async def approve_command_draft(
+    runtime_id: str,
+    draft_id: str,
+    request: Request,
+    payload: DraftDecisionRequest | None = None,
+) -> dict[str, object]:
+    decision = payload or DraftDecisionRequest()
+    return await _proxy_control_action(
+        request,
+        runtime_id,
+        path=f"/control/approvals/{draft_id}/approve",
+        payload=decision.model_dump(mode="json", exclude_none=True),
+    )
+
+
+@router.post("/runtimes/{runtime_id}/control/approvals/{draft_id}/deny")
+async def deny_command_draft(
+    runtime_id: str,
+    draft_id: str,
+    request: Request,
+    payload: DraftDecisionRequest | None = None,
+) -> dict[str, object]:
+    decision = payload or DraftDecisionRequest()
+    return await _proxy_control_action(
+        request,
+        runtime_id,
+        path=f"/control/approvals/{draft_id}/deny",
+        payload=decision.model_dump(mode="json", exclude_none=True),
+    )
 
 
 @router.post("/runtimes/{runtime_id}/control/runtime/drain")

@@ -128,6 +128,128 @@
         <div class="panel stack gap-3">
           <div class="row spread">
             <div>
+              <p class="eyebrow">DRAFTS</p>
+              <h4>PENDING REVIEW</h4>
+            </div>
+            <span class="tag secondary">
+              [[ outboundDrafts.length ]] OUT / [[ commandDrafts.length ]] CMD
+            </span>
+          </div>
+
+          <div v-if="outboundDrafts.length" class="stack gap-2">
+            <p class="eyebrow">OUTBOUND</p>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>KIND</th>
+                    <th>TARGET</th>
+                    <th>MSG</th>
+                    <th>REQ</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="d in outboundDrafts" :key="d.id">
+                    <td>
+                      <code class="codeish">[[ truncate(d.id, 12) ]]</code>
+                      <div class="muted">[[ d.source ]]</div>
+                    </td>
+                    <td>[[ d.kind ]]</td>
+                    <td>
+                      <strong>[[ d.channel ]]</strong>
+                      <div class="muted">[[ d.target || '—' ]]</div>
+                    </td>
+                    <td>
+                      <details v-if="d.message">
+                        <summary>[[ truncate(d.message, 80) ]]</summary>
+                        <pre class="codeish" style="white-space:pre-wrap;">[[ d.message ]]</pre>
+                        <div v-if="d.attachment" class="muted">
+                          ATTACH: [[ d.attachment.path ]]
+                        </div>
+                      </details>
+                      <span v-else class="muted">—</span>
+                    </td>
+                    <td>[[ formatTimestamp(d.requested_at) ]]</td>
+                    <td style="text-align:right;">
+                      <div class="row right gap-1">
+                        <button type="button"
+                                :disabled="pendingActionKey === ('commit-' + d.id)"
+                                @click="commitDraft(d)">
+                          [[ pendingActionKey === ('commit-' + d.id) ? '..' : 'COMMIT' ]]
+                        </button>
+                        <button type="button"
+                                class="danger"
+                                :disabled="pendingActionKey === ('discard-' + d.id)"
+                                @click="discardDraft(d)">
+                          [[ pendingActionKey === ('discard-' + d.id) ? '..' : 'DISCARD' ]]
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div v-if="commandDrafts.length" class="stack gap-2">
+            <p class="eyebrow">COMMANDS</p>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>COMMAND</th>
+                    <th>CWD</th>
+                    <th>REQ</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="d in commandDrafts" :key="d.id">
+                    <td>
+                      <code class="codeish">[[ truncate(d.id, 12) ]]</code>
+                      <div class="muted">[[ d.source ]]</div>
+                    </td>
+                    <td>
+                      <details>
+                        <summary><code class="codeish">[[ truncate(d.command, 80) ]]</code></summary>
+                        <pre class="codeish" style="white-space:pre-wrap;">[[ d.command ]]</pre>
+                        <div v-if="d.justification" class="muted">
+                          WHY: [[ d.justification ]]
+                        </div>
+                      </details>
+                    </td>
+                    <td>[[ d.directory || '.' ]]</td>
+                    <td>[[ formatTimestamp(d.requested_at) ]]</td>
+                    <td style="text-align:right;">
+                      <div class="row right gap-1">
+                        <button type="button"
+                                :disabled="pendingActionKey === ('approve-' + d.id)"
+                                @click="approveCommand(d)">
+                          [[ pendingActionKey === ('approve-' + d.id) ? '..' : 'APPROVE' ]]
+                        </button>
+                        <button type="button"
+                                class="danger"
+                                :disabled="pendingActionKey === ('deny-' + d.id)"
+                                @click="denyCommand(d)">
+                          [[ pendingActionKey === ('deny-' + d.id) ? '..' : 'DENY' ]]
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <p v-if="!hasDrafts" class="muted">NO PENDING DRAFTS</p>
+        </div>
+
+        <div class="panel stack gap-3">
+          <div class="row spread">
+            <div>
               <p class="eyebrow">SESSIONS</p>
               <h4>TRACKED CONVERSATIONS</h4>
             </div>

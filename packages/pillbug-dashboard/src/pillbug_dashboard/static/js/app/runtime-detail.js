@@ -65,6 +65,19 @@
             : [];
           return Array.from(new Set([...fromChannels, ...fromRuntime])).filter(Boolean);
         },
+        outboundDrafts() {
+          return this.detail.drafts && Array.isArray(this.detail.drafts.outbound)
+            ? this.detail.drafts.outbound
+            : [];
+        },
+        commandDrafts() {
+          return this.detail.drafts && Array.isArray(this.detail.drafts.command)
+            ? this.detail.drafts.command
+            : [];
+        },
+        hasDrafts() {
+          return this.outboundDrafts.length > 0 || this.commandDrafts.length > 0;
+        },
       },
       methods: {
         async confirmAction(options) {
@@ -73,6 +86,126 @@
           }
 
           return window.PillbugDashboardConfirm.open(options);
+        },
+        truncate(value, max) {
+          if (typeof value !== "string") {
+            return "";
+          }
+          const limit = max || 80;
+          if (value.length <= limit) {
+            return value;
+          }
+          return `${value.slice(0, limit)}…`;
+        },
+        async runDraftDecision(actionKey, path, comment, successFallback) {
+          this.pendingActionKey = actionKey;
+          this.actionMessage = "";
+          this.errorMessage = "";
+
+          try {
+            const response = await fetch(`/api/runtimes/${encodeURIComponent(this.runtimeId)}${path}`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Accept: "application/json",
+              },
+              body: JSON.stringify(comment ? { comment } : {}),
+            });
+
+            const payload = await response.json();
+            if (!response.ok) {
+              throw new Error(payload.detail || `HTTP ${response.status}`);
+            }
+
+            this.actionMessage = payload.message || successFallback;
+            await this.refreshDetail(false);
+          } catch (error) {
+            this.errorMessage = error instanceof Error ? error.message : "Unknown error";
+          } finally {
+            this.pendingActionKey = "";
+          }
+        },
+        async commitDraft(draft) {
+          const decision = await this.confirmAction({
+            title: `Commit ${draft.kind} draft?`,
+            message: `Dispatch this outbound to ${draft.channel}${draft.target ? `:${draft.target}` : ""}.`,
+            confirmLabel: "Commit & send",
+            cancelLabel: "Cancel",
+            withComment: true,
+            commentLabel: "Operator note (optional)",
+          });
+          if (!decision) {
+            return;
+          }
+
+          await this.runDraftDecision(
+            `commit-${draft.id}`,
+            `/control/drafts/${encodeURIComponent(draft.id)}/commit`,
+            decision.comment,
+            `Draft ${draft.id} committed.`,
+          );
+        },
+        async discardDraft(draft) {
+          const decision = await this.confirmAction({
+            title: `Discard ${draft.kind} draft?`,
+            message: `The outbound to ${draft.channel}${draft.target ? `:${draft.target}` : ""} will be dropped.`,
+            confirmLabel: "Discard",
+            cancelLabel: "Cancel",
+            tone: "danger",
+            withComment: true,
+            commentLabel: "Reason (optional)",
+          });
+          if (!decision) {
+            return;
+          }
+
+          await this.runDraftDecision(
+            `discard-${draft.id}`,
+            `/control/drafts/${encodeURIComponent(draft.id)}/discard`,
+            decision.comment,
+            `Draft ${draft.id} discarded.`,
+          );
+        },
+        async approveCommand(draft) {
+          const decision = await this.confirmAction({
+            title: "Approve command?",
+            message: draft.command,
+            confirmLabel: "Approve",
+            cancelLabel: "Cancel",
+            withComment: true,
+            commentLabel: "Operator note (optional)",
+          });
+          if (!decision) {
+            return;
+          }
+
+          await this.runDraftDecision(
+            `approve-${draft.id}`,
+            `/control/approvals/${encodeURIComponent(draft.id)}/approve`,
+            decision.comment,
+            `Command draft ${draft.id} approved.`,
+          );
+        },
+        async denyCommand(draft) {
+          const decision = await this.confirmAction({
+            title: "Deny command?",
+            message: draft.command,
+            confirmLabel: "Deny",
+            cancelLabel: "Cancel",
+            tone: "danger",
+            withComment: true,
+            commentLabel: "Reason (optional)",
+          });
+          if (!decision) {
+            return;
+          }
+
+          await this.runDraftDecision(
+            `deny-${draft.id}`,
+            `/control/approvals/${encodeURIComponent(draft.id)}/deny`,
+            decision.comment,
+            `Command draft ${draft.id} denied.`,
+          );
         },
         statusLabel(status) {
           if (status && status.healthy) {

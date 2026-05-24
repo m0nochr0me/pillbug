@@ -36,6 +36,9 @@ class RuntimeClient:
     async def get_tasks_telemetry(self, base_url: str, bearer_token: str | None = None) -> dict[str, Any]:
         return await self._request_json("GET", base_url=base_url, path="/telemetry/tasks", bearer_token=bearer_token)
 
+    async def get_drafts_telemetry(self, base_url: str, bearer_token: str | None = None) -> dict[str, Any]:
+        return await self._request_json("GET", base_url=base_url, path="/telemetry/drafts", bearer_token=bearer_token)
+
     async def get_public_agent_card(self, base_url: str) -> dict[str, Any] | None:
         try:
             return await self._request_json(

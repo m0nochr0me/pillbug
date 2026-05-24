@@ -140,6 +140,7 @@ class RuntimeDetailSnapshot(BaseModel):
     channels: dict[str, Any] | None = None
     sessions: dict[str, Any] | None = None
     tasks: dict[str, Any] | None = None
+    drafts: dict[str, Any] | None = None
     agent_card: dict[str, Any] | None = None
     a2a_peers: tuple[str, ...] = Field(default_factory=tuple)
     generated_at: datetime = Field(default_factory=_utcnow)
@@ -175,4 +176,15 @@ class OutboundMessageRequest(BaseModel):
         if not self.message:
             raise ValueError("message must not be blank")
 
+        return self
+
+
+class DraftDecisionRequest(BaseModel):
+    comment: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def normalize(self) -> DraftDecisionRequest:
+        if self.comment is not None:
+            stripped = self.comment.strip()
+            self.comment = stripped or None
         return self

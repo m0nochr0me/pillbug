@@ -2520,6 +2520,25 @@ async def get_task_telemetry(request: Request) -> dict[str, Any]:
     return (await runtime_telemetry.build_tasks_snapshot()).model_dump(mode="json")
 
 
+@mcp_app.get("/telemetry/drafts")
+async def get_drafts_telemetry(request: Request, status: str = "pending") -> dict[str, Any]:
+    await _authorize_telemetry(request.headers.get("authorization"))
+    if status not in ("pending", "all"):
+        raise HTTPException(status_code=400, detail="status must be 'pending' or 'all'")
+
+    status_filter = "pending" if status == "pending" else None
+    outbound_records, command_records = await asyncio.gather(
+        outbound_draft_store.list(status=status_filter),
+        approval_store.list(status=status_filter),
+    )
+    return {
+        "runtime_id": settings.runtime_id,
+        "status_filter": status,
+        "outbound": [record.model_dump(mode="json") for record in outbound_records],
+        "command": [record.model_dump(mode="json") for record in command_records],
+    }
+
+
 @mcp_app.get("/telemetry/events")
 async def stream_telemetry_events(
     request: Request,

@@ -121,11 +121,12 @@ class RuntimeHub:
             self._runtime_client.get_channels_telemetry(registration.base_url, token),
             self._runtime_client.get_sessions_telemetry(registration.base_url, token),
             self._runtime_client.get_tasks_telemetry(registration.base_url, token),
+            self._runtime_client.get_drafts_telemetry(registration.base_url, token),
             self._runtime_client.get_public_agent_card(registration.base_url),
             return_exceptions=True,
         )
 
-        health, runtime, channels, sessions, tasks, agent_card = self._coerce_results(results)
+        health, runtime, channels, sessions, tasks, drafts, agent_card = self._coerce_results(results)
         status = self._build_status(results, health)
 
         return RuntimeDetailSnapshot(
@@ -136,6 +137,7 @@ class RuntimeHub:
             channels=channels,
             sessions=sessions,
             tasks=tasks,
+            drafts=drafts,
             agent_card=agent_card,
             a2a_peers=_extract_a2a_peers(channels),
         )
