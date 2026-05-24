@@ -36,9 +36,6 @@ html {
   color-scheme: dark;
 }
 
-#runtime-detail-app > div.grid-sidebar > div:nth-child(2) > div.modal-shell > div > div.stack.gap-2.history-list > div:nth-child(2) > div > div > span:nth-child(2)
-
-
 body {
   font-family: "Departure Mono", monospace;
   font-size: 11px;
