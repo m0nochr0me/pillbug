@@ -3,6 +3,28 @@
     ? window.__PILLBUG_DASHBOARD_RUNTIME__
     : null;
 
+  function emptyTaskForm() {
+    return {
+      task_id: null,
+      name: "",
+      prompt: "",
+      schedule_type: "cron",
+      cron_expression: "",
+      delay_seconds: null,
+      timezone_name: "",
+      enabled: true,
+      repeat: false,
+      clean_session: true,
+      goal_enabled: false,
+      goal: {
+        done_condition: "",
+        validation_prompt: "",
+        max_steps_per_run: null,
+        max_cost_per_run_usd: null,
+      },
+    };
+  }
+
   const mountTarget = document.getElementById("runtime-detail-app");
   const vueApi = window.Vue;
 
@@ -32,6 +54,11 @@
             conversation_id: "",
             message: "",
           },
+          taskFormOpen: false,
+          taskFormMode: "create",
+          taskFormBusy: false,
+          taskFormError: "",
+          taskForm: emptyTaskForm(),
         };
       },
       computed: {
@@ -384,6 +411,197 @@
             }
 
             this.actionMessage = payload.message || `Task ${action}d.`;
+            await this.refreshDetail(false);
+          } catch (error) {
+            this.errorMessage = error instanceof Error ? error.message : "Unknown error";
+          } finally {
+            this.pendingActionKey = "";
+          }
+        },
+        openCreateTask() {
+          this.taskForm = emptyTaskForm();
+          this.taskFormMode = "create";
+          this.taskFormError = "";
+          this.taskFormOpen = true;
+        },
+        openEditTask(task) {
+          const form = emptyTaskForm();
+          form.task_id = task.task_id;
+          form.name = task.name || "";
+          form.prompt = task.prompt || "";
+          form.enabled = Boolean(task.enabled);
+          form.clean_session = task.clean_session !== false;
+
+          const schedule = task.schedule || {};
+          if (schedule.kind === "cron") {
+            form.schedule_type = "cron";
+            form.cron_expression = schedule.expression || "";
+            form.timezone_name = schedule.timezone || "";
+          } else {
+            form.schedule_type = "delayed";
+            form.delay_seconds = typeof schedule.delay_seconds === "number" ? schedule.delay_seconds : null;
+            form.repeat = Boolean(schedule.repeat);
+          }
+
+          if (task.goal) {
+            form.goal_enabled = true;
+            form.goal.done_condition = task.goal.done_condition || "";
+            form.goal.validation_prompt = task.goal.validation_prompt || "";
+            form.goal.max_steps_per_run = typeof task.goal.max_steps_per_run === "number"
+              ? task.goal.max_steps_per_run
+              : null;
+            form.goal.max_cost_per_run_usd = typeof task.goal.max_cost_per_run_usd === "number"
+              ? task.goal.max_cost_per_run_usd
+              : null;
+          }
+
+          this.taskForm = form;
+          this.taskFormMode = "edit";
+          this.taskFormError = "";
+          this.taskFormOpen = true;
+        },
+        closeTaskForm() {
+          if (this.taskFormBusy) {
+            return;
+          }
+          this.taskFormOpen = false;
+          this.taskFormError = "";
+        },
+        buildTaskPayload() {
+          const f = this.taskForm;
+          const payload = {
+            name: f.name.trim(),
+            prompt: f.prompt.trim(),
+            schedule_type: f.schedule_type,
+            enabled: f.enabled,
+            clean_session: f.clean_session,
+          };
+
+          if (f.schedule_type === "cron") {
+            payload.cron_expression = (f.cron_expression || "").trim();
+            const tz = (f.timezone_name || "").trim();
+            if (tz) {
+              payload.timezone_name = tz;
+            }
+          } else {
+            payload.delay_seconds = Number(f.delay_seconds);
+            payload.repeat = Boolean(f.repeat);
+          }
+
+          if (f.goal_enabled) {
+            const goal = {};
+            const dc = (f.goal.done_condition || "").trim();
+            const vp = (f.goal.validation_prompt || "").trim();
+            if (dc) goal.done_condition = dc;
+            if (vp) goal.validation_prompt = vp;
+            if (f.goal.max_steps_per_run !== null && f.goal.max_steps_per_run !== "") {
+              goal.max_steps_per_run = Number(f.goal.max_steps_per_run);
+            }
+            if (f.goal.max_cost_per_run_usd !== null && f.goal.max_cost_per_run_usd !== "") {
+              goal.max_cost_per_run_usd = Number(f.goal.max_cost_per_run_usd);
+            }
+            if (Object.keys(goal).length) {
+              payload.goal = goal;
+            }
+          } else if (this.taskFormMode === "edit") {
+            payload.clear_goal = true;
+          }
+
+          return payload;
+        },
+        validateTaskForm(payload) {
+          if (!payload.name) {
+            return "Name is required.";
+          }
+          if (!payload.prompt) {
+            return "Prompt is required.";
+          }
+          if (payload.schedule_type === "cron" && !payload.cron_expression) {
+            return "Cron expression is required.";
+          }
+          if (payload.schedule_type === "delayed") {
+            if (!Number.isFinite(payload.delay_seconds) || payload.delay_seconds < 1) {
+              return "Delay (seconds) must be a positive integer.";
+            }
+          }
+          return "";
+        },
+        async submitTaskForm() {
+          if (this.taskFormBusy) {
+            return;
+          }
+          const payload = this.buildTaskPayload();
+          const validationError = this.validateTaskForm(payload);
+          if (validationError) {
+            this.taskFormError = validationError;
+            return;
+          }
+
+          this.taskFormBusy = true;
+          this.taskFormError = "";
+          this.actionMessage = "";
+          this.errorMessage = "";
+
+          const isEdit = this.taskFormMode === "edit";
+          const url = isEdit
+            ? `/api/runtimes/${encodeURIComponent(this.runtimeId)}/control/tasks/${encodeURIComponent(this.taskForm.task_id)}`
+            : `/api/runtimes/${encodeURIComponent(this.runtimeId)}/control/tasks`;
+          const method = isEdit ? "PATCH" : "POST";
+
+          try {
+            const response = await fetch(url, {
+              method,
+              headers: {
+                "Content-Type": "application/json",
+                Accept: "application/json",
+              },
+              body: JSON.stringify(payload),
+            });
+
+            const responsePayload = await response.json();
+            if (!response.ok) {
+              throw new Error(responsePayload.detail || `HTTP ${response.status}`);
+            }
+
+            this.actionMessage = responsePayload.message || (isEdit ? "Task updated." : "Task created.");
+            this.taskFormOpen = false;
+            await this.refreshDetail(false);
+          } catch (error) {
+            this.taskFormError = error instanceof Error ? error.message : "Unknown error";
+          } finally {
+            this.taskFormBusy = false;
+          }
+        },
+        async deleteTask(task) {
+          const decision = await this.confirmAction({
+            title: `Delete task ${task.name}?`,
+            message: `Permanently removes scheduled task ${task.task_id}. This cannot be undone.`,
+            confirmLabel: "Delete",
+            cancelLabel: "Cancel",
+            tone: "danger",
+          });
+          if (!decision) {
+            return;
+          }
+
+          const actionKey = `delete-${task.task_id}`;
+          this.pendingActionKey = actionKey;
+          this.actionMessage = "";
+          this.errorMessage = "";
+
+          try {
+            const response = await fetch(
+              `/api/runtimes/${encodeURIComponent(this.runtimeId)}/control/tasks/${encodeURIComponent(task.task_id)}`,
+              {
+                method: "DELETE",
+                headers: { Accept: "application/json" },
+              },
+            );
+            const payload = await response.json();
+            if (!response.ok) {
+              throw new Error(payload.detail || `HTTP ${response.status}`);
+            }
+            this.actionMessage = payload.message || `Deleted ${task.task_id}.`;
             await this.refreshDetail(false);
           } catch (error) {
             this.errorMessage = error instanceof Error ? error.message : "Unknown error";

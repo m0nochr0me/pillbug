@@ -68,6 +68,23 @@ class RuntimeClient:
             payload=payload,
         )
 
+    async def request_control_action(
+        self,
+        *,
+        method: str,
+        base_url: str,
+        path: str,
+        bearer_token: str | None,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await self._request_json(
+            method,
+            base_url=base_url,
+            path=path,
+            bearer_token=bearer_token,
+            payload=payload,
+        )
+
     async def _request_json(
         self,
         method: str,

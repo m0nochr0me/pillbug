@@ -73,6 +73,8 @@ from app.schema.control import (
     OutboundDraftKind,
     PlanningModeRequest,
     RuntimeAuthConfiguration,
+    TaskCreateRequest,
+    TaskUpdateRequest,
 )
 from app.schema.messages import (
     A2AEnvelope,
@@ -2884,6 +2886,154 @@ async def disable_control_task(task_id: str, request: Request) -> dict[str, Any]
     return _operator_response(
         action="task.disable",
         message=response_message,
+        scope=scope,
+        details=details,
+    )
+
+
+def _task_not_found(message: str) -> bool:
+    return message.startswith("Task not found")
+
+
+@mcp_app.post("/control/tasks")
+async def create_control_task(
+    request: Request,
+    payload: TaskCreateRequest,
+) -> dict[str, Any]:
+    scope = await _authorize_control(request.headers.get("authorization"))
+    try:
+        result = await task_scheduler.create_task(
+            name=payload.name,
+            prompt=payload.prompt,
+            schedule_type=payload.schedule_type,
+            cron_expression=payload.cron_expression,
+            delay_seconds=payload.delay_seconds,
+            timezone_name=payload.timezone_name or settings.TIMEZONE,
+            enabled=payload.enabled,
+            repeat=payload.repeat,
+            clean_session=payload.clean_session,
+            goal=payload.goal,
+        )
+    except ValueError as exc:
+        await _audit_control_action(
+            request,
+            action="task.create",
+            scope=scope,
+            level="warning",
+            message="rejected",
+            details={"error": str(exc)},
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    task = result["task"]
+    details = {
+        "task_id": task["task_id"],
+        "name": task["name"],
+        "schedule_kind": task["schedule"]["kind"],
+        "enabled": task["enabled"],
+    }
+    await _audit_control_action(
+        request,
+        action="task.create",
+        scope=scope,
+        message="accepted",
+        details=details,
+    )
+    return _operator_response(
+        action="task.create",
+        message=f"Created task {task['task_id']}.",
+        scope=scope,
+        details={**details, "task": task},
+    )
+
+
+@mcp_app.patch("/control/tasks/{task_id}")
+async def update_control_task(
+    task_id: str,
+    request: Request,
+    payload: TaskUpdateRequest,
+) -> dict[str, Any]:
+    scope = await _authorize_control(request.headers.get("authorization"))
+    try:
+        result = await task_scheduler.update_task(
+            task_id,
+            name=payload.name,
+            prompt=payload.prompt,
+            schedule_type=payload.schedule_type,
+            cron_expression=payload.cron_expression,
+            delay_seconds=payload.delay_seconds,
+            timezone_name=payload.timezone_name,
+            enabled=payload.enabled,
+            repeat=payload.repeat,
+            clean_session=payload.clean_session,
+            goal=payload.goal,
+            clear_goal=payload.clear_goal,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 404 if _task_not_found(message) else 400
+        await _audit_control_action(
+            request,
+            action="task.update",
+            scope=scope,
+            level="warning",
+            message="rejected",
+            details={"task_id": task_id, "error": message},
+        )
+        raise HTTPException(status_code=status_code, detail=message) from exc
+
+    task = result["task"]
+    details = {
+        "task_id": task["task_id"],
+        "name": task["name"],
+        "revision": task["revision"],
+        "enabled": task["enabled"],
+        "schedule_kind": task["schedule"]["kind"],
+    }
+    await _audit_control_action(
+        request,
+        action="task.update",
+        scope=scope,
+        message="accepted",
+        details=details,
+    )
+    return _operator_response(
+        action="task.update",
+        message=f"Updated task {task['task_id']}.",
+        scope=scope,
+        details={**details, "task": task},
+    )
+
+
+@mcp_app.delete("/control/tasks/{task_id}")
+async def delete_control_task(task_id: str, request: Request) -> dict[str, Any]:
+    scope = await _authorize_control(request.headers.get("authorization"))
+    try:
+        result = await task_scheduler.delete_task(task_id)
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 404 if _task_not_found(message) else 400
+        await _audit_control_action(
+            request,
+            action="task.delete",
+            scope=scope,
+            level="warning",
+            message="rejected",
+            details={"task_id": task_id, "error": message},
+        )
+        raise HTTPException(status_code=status_code, detail=message) from exc
+
+    details = {"task_id": task_id, "deleted": bool(result.get("deleted"))}
+    await _audit_control_action(
+        request,
+        action="task.delete",
+        scope=scope,
+        message="accepted",
+        details=details,
+    )
+    return _operator_response(
+        action="task.delete",
+        message=f"Deleted task {task_id}.",
         scope=scope,
         details=details,
     )

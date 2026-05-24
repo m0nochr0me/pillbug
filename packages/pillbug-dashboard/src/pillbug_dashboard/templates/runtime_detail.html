@@ -294,7 +294,10 @@
               <p class="eyebrow">TASKS</p>
               <h4>SCHEDULED WORK</h4>
             </div>
-            <span class="tag">[[ scheduler.total_tasks || 0 ]] TOTAL</span>
+            <div class="row gap-1">
+              <span class="tag">[[ scheduler.total_tasks || 0 ]] TOTAL</span>
+              <button type="button" class="primary" @click="openCreateTask">NEW TASK</button>
+            </div>
           </div>
 
           <div v-if="tasks.length" class="table-wrap">
@@ -328,6 +331,12 @@
                       <button v-else type="button" :disabled="pendingActionKey === ('enable-' + t.task_id)" @click="toggleTask(t, true)">
                         [[ pendingActionKey === ('enable-' + t.task_id) ? '..' : 'ENA' ]]
                       </button>
+                      <button type="button" @click="openEditTask(t)">EDIT</button>
+                      <button type="button" class="danger"
+                              :disabled="pendingActionKey === ('delete-' + t.task_id)"
+                              @click="deleteTask(t)">
+                        [[ pendingActionKey === ('delete-' + t.task_id) ? '..' : 'DEL' ]]
+                      </button>
                     </div>
                   </td>
                 </tr>
@@ -335,6 +344,106 @@
             </table>
           </div>
           <p v-else class="muted">NO TASKS</p>
+        </div>
+
+        <div v-if="taskFormOpen" class="overlay active" @click.self="closeTaskForm"></div>
+        <div v-if="taskFormOpen" class="modal-shell">
+          <div class="panel stack gap-3 modal-card">
+            <div class="row spread">
+              <div>
+                <p class="eyebrow">TASK</p>
+                <h5>[[ taskFormMode === 'edit' ? 'EDIT TASK' : 'NEW TASK' ]]</h5>
+              </div>
+              <button type="button" class="ghost" @click="closeTaskForm">CLOSE</button>
+            </div>
+
+            <form class="stack gap-3" @submit.prevent="submitTaskForm">
+              <div class="field">
+                <label>NAME</label>
+                <input v-model.trim="taskForm.name" type="text" autocomplete="off" required>
+              </div>
+              <div class="field">
+                <label>PROMPT</label>
+                <textarea v-model="taskForm.prompt" rows="4" required style="min-height: 256px;"></textarea>
+              </div>
+              <div class="field">
+                <label>SCHEDULE TYPE</label>
+                <select v-model="taskForm.schedule_type">
+                  <option value="cron">cron</option>
+                  <option value="delayed">delayed</option>
+                </select>
+              </div>
+              <div v-if="taskForm.schedule_type === 'cron'" class="stack gap-3">
+                <div class="field">
+                  <label>CRON EXPRESSION</label>
+                  <input v-model.trim="taskForm.cron_expression" type="text" autocomplete="off" placeholder="0 * * * *">
+                </div>
+                <div class="field">
+                  <label>TIMEZONE (optional)</label>
+                  <input v-model.trim="taskForm.timezone_name" type="text" autocomplete="off" placeholder="UTC">
+                </div>
+              </div>
+              <div v-else class="stack gap-3">
+                <div class="field">
+                  <label>DELAY (seconds)</label>
+                  <input v-model.number="taskForm.delay_seconds" type="number" min="1" step="1">
+                </div>
+                <label class="row gap-1">
+                  <input v-model="taskForm.repeat" type="checkbox">
+                  <span>REPEAT after each run</span>
+                </label>
+              </div>
+
+              <div class="row wrap gap-2">
+                <label class="row gap-1">
+                  <input v-model="taskForm.enabled" type="checkbox">
+                  <span>ENABLED</span>
+                </label>
+                <label class="row gap-1">
+                  <input v-model="taskForm.clean_session" type="checkbox">
+                  <span>CLEAN SESSION per run</span>
+                </label>
+              </div>
+
+              <div class="stack gap-2">
+                <label class="row gap-1">
+                  <input v-model="taskForm.goal_enabled" type="checkbox">
+                  <span>GOAL CONSTRAINTS (optional)</span>
+                </label>
+                <div v-if="taskForm.goal_enabled" class="stack gap-3">
+                  <div class="field">
+                    <label>DONE CONDITION</label>
+                    <input v-model.trim="taskForm.goal.done_condition" type="text" autocomplete="off">
+                  </div>
+                  <div class="field">
+                    <label>VALIDATION PROMPT</label>
+                    <textarea v-model="taskForm.goal.validation_prompt" rows="2"></textarea>
+                  </div>
+                  <div class="row wrap gap-2">
+                    <div class="field" style="flex:1;">
+                      <label>MAX STEPS / RUN</label>
+                      <input v-model.number="taskForm.goal.max_steps_per_run" type="number" min="1" step="1">
+                    </div>
+                    <div class="field" style="flex:1;">
+                      <label>MAX COST / RUN (USD)</label>
+                      <input v-model.number="taskForm.goal.max_cost_per_run_usd" type="number" min="0" step="0.01">
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <p v-if="taskFormError" class="notice error">
+                <span>[[ taskFormError ]]</span>
+              </p>
+
+              <div class="row right gap-2">
+                <button type="button" class="ghost" :disabled="taskFormBusy" @click="closeTaskForm">CANCEL</button>
+                <button type="submit" class="primary" :disabled="taskFormBusy">
+                  [[ taskFormBusy ? '...' : (taskFormMode === 'edit' ? 'SAVE' : 'CREATE') ]]
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
 
         <div class="panel stack gap-3">

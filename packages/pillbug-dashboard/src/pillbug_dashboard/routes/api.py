@@ -1,7 +1,7 @@
 """JSON API routes for the dashboard browser client."""
 
 import json
-from typing import cast
+from typing import Any, cast
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
@@ -65,11 +65,13 @@ async def _proxy_control_action(
     *,
     path: str,
     payload: dict[str, object] | None = None,
+    method: str = "POST",
 ) -> dict[str, object]:
     registration = _get_registration_or_404(request, runtime_id)
     token = _require_control_token(registration)
     try:
-        return await _runtime_client(request).post_control_action(
+        return await _runtime_client(request).request_control_action(
+            method=method,
             base_url=registration.base_url,
             path=path,
             bearer_token=token,
@@ -191,6 +193,46 @@ async def send_control_message(runtime_id: str, payload: OutboundMessageRequest,
 @router.post("/runtimes/{runtime_id}/control/sessions/{session_id}/clear")
 async def clear_runtime_session(runtime_id: str, session_id: str, request: Request) -> dict[str, object]:
     return await _proxy_control_action(request, runtime_id, path=f"/control/sessions/{session_id}/clear")
+
+
+@router.post("/runtimes/{runtime_id}/control/tasks")
+async def create_runtime_task(
+    runtime_id: str,
+    payload: dict[str, Any],
+    request: Request,
+) -> dict[str, object]:
+    return await _proxy_control_action(
+        request,
+        runtime_id,
+        path="/control/tasks",
+        payload=payload,
+    )
+
+
+@router.patch("/runtimes/{runtime_id}/control/tasks/{task_id}")
+async def update_runtime_task(
+    runtime_id: str,
+    task_id: str,
+    payload: dict[str, Any],
+    request: Request,
+) -> dict[str, object]:
+    return await _proxy_control_action(
+        request,
+        runtime_id,
+        method="PATCH",
+        path=f"/control/tasks/{task_id}",
+        payload=payload,
+    )
+
+
+@router.delete("/runtimes/{runtime_id}/control/tasks/{task_id}")
+async def delete_runtime_task(runtime_id: str, task_id: str, request: Request) -> dict[str, object]:
+    return await _proxy_control_action(
+        request,
+        runtime_id,
+        method="DELETE",
+        path=f"/control/tasks/{task_id}",
+    )
 
 
 @router.post("/runtimes/{runtime_id}/control/tasks/{task_id}/enable")

@@ -8,6 +8,8 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.schema.tasks import AgentTaskGoal
+
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
@@ -200,6 +202,83 @@ class OutboundDraftDecision(BaseModel):
         if self.comment is not None:
             stripped = self.comment.strip()
             self.comment = stripped or None
+        return self
+
+
+class TaskCreateRequest(BaseModel):
+    """Operator-supplied payload for POST /control/tasks (plan §3)."""
+
+    name: str = Field(min_length=1)
+    prompt: str = Field(min_length=1)
+    schedule_type: Literal["cron", "delayed"]
+    cron_expression: str | None = None
+    delay_seconds: int | None = Field(default=None, ge=1)
+    timezone_name: str | None = None
+    enabled: bool = True
+    repeat: bool = False
+    clean_session: bool = True
+    goal: AgentTaskGoal | None = None
+
+    @model_validator(mode="after")
+    def validate_schedule_fields(self) -> Self:
+        self.name = self.name.strip()
+        self.prompt = self.prompt.strip()
+        if not self.name:
+            raise ValueError("name must not be blank")
+        if not self.prompt:
+            raise ValueError("prompt must not be blank")
+
+        if self.schedule_type == "cron":
+            expression = (self.cron_expression or "").strip()
+            if not expression:
+                raise ValueError("cron_expression is required when schedule_type='cron'")
+            self.cron_expression = expression
+            self.delay_seconds = None
+        else:
+            if self.delay_seconds is None:
+                raise ValueError("delay_seconds is required when schedule_type='delayed'")
+            self.cron_expression = None
+
+        if self.timezone_name is not None:
+            normalized = self.timezone_name.strip()
+            self.timezone_name = normalized or None
+
+        return self
+
+
+class TaskUpdateRequest(BaseModel):
+    """Operator-supplied payload for PATCH /control/tasks/{task_id} (plan §3)."""
+
+    name: str | None = None
+    prompt: str | None = None
+    schedule_type: Literal["cron", "delayed"] | None = None
+    cron_expression: str | None = None
+    delay_seconds: int | None = Field(default=None, ge=1)
+    timezone_name: str | None = None
+    enabled: bool | None = None
+    repeat: bool | None = None
+    clean_session: bool | None = None
+    goal: AgentTaskGoal | None = None
+    clear_goal: bool = False
+
+    @model_validator(mode="after")
+    def normalize(self) -> Self:
+        if self.name is not None:
+            stripped = self.name.strip()
+            if not stripped:
+                raise ValueError("name must not be blank when supplied")
+            self.name = stripped
+        if self.prompt is not None:
+            stripped = self.prompt.strip()
+            if not stripped:
+                raise ValueError("prompt must not be blank when supplied")
+            self.prompt = stripped
+        if self.cron_expression is not None:
+            self.cron_expression = self.cron_expression.strip() or None
+        if self.timezone_name is not None:
+            self.timezone_name = self.timezone_name.strip() or None
+        if self.clear_goal and self.goal is not None:
+            raise ValueError("goal and clear_goal=true cannot be used together")
         return self
 
 

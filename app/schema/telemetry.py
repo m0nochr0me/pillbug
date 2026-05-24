@@ -8,6 +8,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from app.schema.control import RuntimeAuthConfiguration
+from app.schema.tasks import AgentTaskGoal, TaskSchedule
 
 
 def _utcnow() -> datetime:
@@ -229,12 +230,22 @@ class TaskRunTelemetry(BaseModel):
 class AgentTaskTelemetryEntry(BaseModel):
     task_id: str = Field(min_length=1, description="Stable task identifier.")
     name: str = Field(min_length=1, description="Operator-visible task name.")
+    prompt: str = Field(default="", description="Model prompt the task runs each tick.")
     schedule_kind: Literal["cron", "delayed", "perpetual"] = Field(description="Normalized schedule kind for the task.")
     schedule_detail: str = Field(
         default="",
         description="Human-readable schedule detail such as the cron expression or delay interval.",
     )
+    schedule: TaskSchedule | None = Field(
+        default=None,
+        description="Full discriminated schedule object; populated for operator-editable surfaces.",
+    )
     enabled: bool = Field(default=True, description="Whether the task is currently enabled.")
+    clean_session: bool = Field(default=True, description="Whether the task starts each run with a fresh session.")
+    goal: AgentTaskGoal | None = Field(
+        default=None,
+        description="Optional per-task goal contract.",
+    )
     revision: int = Field(ge=1, description="Current task definition revision.")
     created_at: datetime = Field(description="UTC timestamp when the task was created.")
     updated_at: datetime = Field(description="UTC timestamp when the task definition last changed.")

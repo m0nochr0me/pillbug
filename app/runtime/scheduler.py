@@ -1305,9 +1305,13 @@ class AgentTaskScheduler:
                 AgentTaskTelemetryEntry(
                     task_id=definition.task_id,
                     name=definition.name,
+                    prompt=definition.prompt,
                     schedule_kind=definition.schedule.kind,
                     schedule_detail=self._schedule_description(definition.schedule),
+                    schedule=definition.schedule,
                     enabled=definition.enabled,
+                    clean_session=definition.clean_session,
+                    goal=definition.goal,
                     revision=definition.revision,
                     created_at=definition.created_at,
                     updated_at=definition.updated_at,
