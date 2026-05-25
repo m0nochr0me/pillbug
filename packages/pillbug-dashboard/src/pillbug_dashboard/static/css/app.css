@@ -805,11 +805,12 @@ dialog::backdrop {
   border: 1px solid var(--border-dim);
   background: var(--surface-dim);
   padding: 11px;
+  height: 360px;
   max-height: 420px;
   min-height: 180px;
   overflow-y: auto;
   display: flex;
-  flex-direction: column;
+  flex-direction: column-reverse;
   gap: 8px;
   scrollbar-color: rgba(105, 240, 209, 0.4) rgba(9, 13, 16, 0.8);
 }

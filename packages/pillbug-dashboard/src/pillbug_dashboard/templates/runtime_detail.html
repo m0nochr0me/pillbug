@@ -177,7 +177,7 @@
               [[ chatStatus === 'live' ? 'No messages yet — say hello.' : 'Connect to start chatting.' ]]
             </p>
             <p v-if="chatHistoryLoading" class="muted">LOADING TRANSCRIPT…</p>
-            <div v-for="(msg, idx) in chatMessages" :key="idx" class="chat-bubble" :class="'chat-role-' + msg.role">
+            <div v-for="(msg, idx) in reversedChatMessages" :key="idx" class="chat-bubble" :class="'chat-role-' + msg.role">
               <div class="row spread">
                 <strong>[[ msg.role.toUpperCase() ]]</strong>
                 <span class="muted">[[ formatTimestamp(msg.at) ]]</span>

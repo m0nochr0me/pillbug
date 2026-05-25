@@ -231,6 +231,9 @@
           };
           return labels[this.chatStatus] || this.chatStatus.toUpperCase();
         },
+        reversedChatMessages() {
+          return this.chatMessages.slice().reverse();
+        },
         chatStatusTagClass() {
           if (this.chatStatus === "live") {
             return "primary";
