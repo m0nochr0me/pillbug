@@ -56,14 +56,33 @@
       <span>[[ errorMessage ]]</span>
     </div>
 
-    <div class="grid-sidebar">
-      <div class="stack gap-4">
-        <div class="panel stack gap-4">
-          <div class="stack gap-1">
+    <div class="stack gap-4">
+      <div class="panel stack gap-3">
+        <div class="row spread">
+          <div>
             <p class="eyebrow">OPERATOR</p>
-            <h4>SEND MESSAGE</h4>
+            <h4>RUNTIME ACTIONS</h4>
           </div>
+          <button type="button" class="ghost" @click="quickSendOpen = !quickSendOpen">
+            [[ quickSendOpen ? 'HIDE QUICK SEND' : 'QUICK SEND' ]]
+          </button>
+        </div>
 
+        <div class="row wrap gap-1">
+          <button type="button" :disabled="pendingActionKey === 'drain'" @click="requestRuntimeAction('drain')">
+            [[ pendingActionKey === 'drain' ? '...' : 'DRAIN' ]]
+          </button>
+          <button type="button" class="danger" :disabled="pendingActionKey === 'shutdown'" @click="requestRuntimeAction('shutdown')">
+            [[ pendingActionKey === 'shutdown' ? '...' : 'SHUTDOWN' ]]
+          </button>
+          <button type="button" :disabled="refreshLoading" @click="refreshDetail(true)">
+            [[ refreshLoading ? '...' : 'REFRESH' ]]
+          </button>
+        </div>
+
+        <div v-if="quickSendOpen" class="stack gap-3">
+          <hr>
+          <p class="eyebrow">QUICK SEND</p>
           <form class="stack gap-3" @submit.prevent="sendMessage">
             <div class="field">
               <label>CH</label>
@@ -80,265 +99,170 @@
               <label>MSG</label>
               <textarea v-model.trim="messageForm.message" rows="4"></textarea>
             </div>
-            <button type="submit" class="primary" :disabled="pendingActionKey === 'send-message'">
-              [[ pendingActionKey === 'send-message' ? '...' : 'SEND' ]]
-            </button>
-          </form>
-
-          <hr>
-
-          <div class="stack gap-3">
-            <p class="eyebrow">RUNTIME ACTIONS</p>
-            <div class="row wrap gap-1">
-              <button type="button" :disabled="pendingActionKey === 'drain'" @click="requestRuntimeAction('drain')">
-                [[ pendingActionKey === 'drain' ? '...' : 'DRAIN' ]]
-              </button>
-              <button type="button" class="danger" :disabled="pendingActionKey === 'shutdown'" @click="requestRuntimeAction('shutdown')">
-                [[ pendingActionKey === 'shutdown' ? '...' : 'SHUTDOWN' ]]
-              </button>
-              <button type="button" :disabled="refreshLoading" @click="refreshDetail(true)">
-                [[ refreshLoading ? '...' : 'REFRESH' ]]
+            <div class="row right gap-2">
+              <button type="submit" class="primary" :disabled="pendingActionKey === 'send-message'">
+                [[ pendingActionKey === 'send-message' ? '...' : 'SEND' ]]
               </button>
             </div>
-          </div>
-
-        </div>
-
-        <div class="panel stack gap-3">
-          <p class="eyebrow">A2A PEERS</p>
-          <div v-if="detail.a2a_peers.length" class="stack gap-1">
-            <span v-for="peer in detail.a2a_peers" :key="peer" class="edge">
-              [[ detail.registration.runtime_id ]] <span class="edge-arrow">&rarr;</span> [[ peer ]]
-            </span>
-          </div>
-          <p v-else class="muted">NO PEERS</p>
-
-          <hr>
-
-          <p class="eyebrow">AGENT CARD</p>
-          <p v-if="detail.agent_card" class="muted">A2A DISCOVERY AVAILABLE</p>
-          <p v-else class="muted">NO PUBLIC CARD</p>
-          <a v-if="detail.agent_card" class="btn" :href="agentCardHref" target="_blank" rel="noreferrer">
-            VIEW CARD
-          </a>
+          </form>
         </div>
       </div>
 
-      <div class="stack gap-4">
-        <div class="panel stack gap-3">
-          <div class="row spread">
-            <div>
-              <p class="eyebrow">DRAFTS</p>
-              <h4>PENDING REVIEW</h4>
-            </div>
-            <span class="tag secondary">
-              [[ outboundDrafts.length ]] OUT / [[ commandDrafts.length ]] CMD
-            </span>
+      <div v-if="chatAvailable" class="panel stack gap-3">
+        <div class="row spread">
+          <div>
+            <p class="eyebrow">CHAT</p>
+            <h4>WEBSOCKET SESSION</h4>
           </div>
-
-          <div v-if="outboundDrafts.length" class="stack gap-2">
-            <p class="eyebrow">OUTBOUND</p>
-            <div class="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>ID</th>
-                    <th>KIND</th>
-                    <th>TARGET</th>
-                    <th>MSG</th>
-                    <th>REQ</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="d in outboundDrafts" :key="d.id">
-                    <td>
-                      <code class="codeish">[[ truncate(d.id, 12) ]]</code>
-                      <div class="muted">[[ d.source ]]</div>
-                    </td>
-                    <td>[[ d.kind ]]</td>
-                    <td>
-                      <strong>[[ d.channel ]]</strong>
-                      <div class="muted">[[ d.target || '—' ]]</div>
-                    </td>
-                    <td>
-                      <details v-if="d.message">
-                        <summary>[[ truncate(d.message, 80) ]]</summary>
-                        <pre class="codeish" style="white-space:pre-wrap;">[[ d.message ]]</pre>
-                        <div v-if="d.attachment" class="muted">
-                          ATTACH: [[ d.attachment.path ]]
-                        </div>
-                      </details>
-                      <span v-else class="muted">—</span>
-                    </td>
-                    <td>[[ formatTimestamp(d.requested_at) ]]</td>
-                    <td style="text-align:right;">
-                      <div class="row right gap-1">
-                        <button type="button"
-                                :disabled="pendingActionKey === ('commit-' + d.id)"
-                                @click="commitDraft(d)">
-                          [[ pendingActionKey === ('commit-' + d.id) ? '..' : 'COMMIT' ]]
-                        </button>
-                        <button type="button"
-                                class="danger"
-                                :disabled="pendingActionKey === ('discard-' + d.id)"
-                                @click="discardDraft(d)">
-                          [[ pendingActionKey === ('discard-' + d.id) ? '..' : 'DISCARD' ]]
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          <div v-if="commandDrafts.length" class="stack gap-2">
-            <p class="eyebrow">COMMANDS</p>
-            <div class="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>ID</th>
-                    <th>COMMAND</th>
-                    <th>CWD</th>
-                    <th>REQ</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="d in commandDrafts" :key="d.id">
-                    <td>
-                      <code class="codeish">[[ truncate(d.id, 12) ]]</code>
-                      <div class="muted">[[ d.source ]]</div>
-                    </td>
-                    <td>
-                      <details>
-                        <summary><code class="codeish">[[ truncate(d.command, 80) ]]</code></summary>
-                        <pre class="codeish" style="white-space:pre-wrap;">[[ d.command ]]</pre>
-                        <div v-if="d.justification" class="muted">
-                          WHY: [[ d.justification ]]
-                        </div>
-                      </details>
-                    </td>
-                    <td>[[ d.directory || '.' ]]</td>
-                    <td>[[ formatTimestamp(d.requested_at) ]]</td>
-                    <td style="text-align:right;">
-                      <div class="row right gap-1">
-                        <button type="button"
-                                :disabled="pendingActionKey === ('approve-' + d.id)"
-                                @click="approveCommand(d)">
-                          [[ pendingActionKey === ('approve-' + d.id) ? '..' : 'APPROVE' ]]
-                        </button>
-                        <button type="button"
-                                class="danger"
-                                :disabled="pendingActionKey === ('deny-' + d.id)"
-                                @click="denyCommand(d)">
-                          [[ pendingActionKey === ('deny-' + d.id) ? '..' : 'DENY' ]]
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          <p v-if="!hasDrafts" class="muted">NO PENDING DRAFTS</p>
+          <span class="tag" :class="chatStatusTagClass">[[ chatStatusLabel ]]</span>
         </div>
 
-        <div class="panel stack gap-3">
-          <div class="row spread">
-            <div>
-              <p class="eyebrow">SESSIONS</p>
-              <h4>TRACKED CONVERSATIONS</h4>
-            </div>
-            <span class="tag primary">[[ sessions.length ]] SESS</span>
+        <div v-if="!hasWsCredentials" class="stack gap-3">
+          <p class="muted">
+            Paste the runtime's PB_WEBSOCKET_BEARER_TOKEN to enable interactive chat.
+            The token stays in this browser only (localStorage, scoped to this runtime).
+          </p>
+          <div class="field">
+            <label>WS URL</label>
+            <input v-model.trim="wsUrlInput" type="text" autocomplete="off" :placeholder="defaultWsUrl">
           </div>
-
-          <div v-if="sessions.length" class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>SESSION</th>
-                  <th>CH</th>
-                  <th>MSG</th>
-                  <th>LAST</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="s in sessions" :key="s.session_key">
-                  <td>
-                    <strong>[[ s.session_key ]]</strong>
-                    <div class="muted">[[ s.conversation_id ]]</div>
-                  </td>
-                  <td>[[ s.channel_name ]]</td>
-                  <td>[[ s.message_count ]]</td>
-                  <td>[[ formatTimestamp(s.last_activity_at) ]]</td>
-                  <td style="text-align:right;">
-                    <div class="row right gap-1">
-                      <button type="button" @click="openHistoryDrawer(s)">VIEW</button>
-                      <button type="button" :disabled="pendingActionKey === ('clear-' + s.session_key)" @click="clearSession(s)">
-                        [[ pendingActionKey === ('clear-' + s.session_key) ? '..' : 'CLR' ]]
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+          <div class="field">
+            <label>WS TOKEN</label>
+            <input v-model="wsTokenInput" type="password" autocomplete="off">
           </div>
-          <p v-else class="muted">NO SESSIONS</p>
+          <div class="row right gap-2">
+            <button type="button" class="primary" :disabled="!wsTokenInput.trim()" @click="saveWsCredentials">
+              SAVE &amp; CONNECT
+            </button>
+          </div>
         </div>
 
-        <div class="panel stack gap-3">
-          <div class="row spread">
-            <div>
-              <p class="eyebrow">TASKS</p>
-              <h4>SCHEDULED WORK</h4>
+        <div v-else class="stack gap-3">
+          <div class="row spread wrap gap-2">
+            <div class="row wrap gap-1">
+              <label class="muted">CONV</label>
+              <select v-model="chatConversationId" @change="onChatConversationChange">
+                <option v-if="!chatConversationId" value="">— select —</option>
+                <option v-for="opt in chatConversationOptions" :key="opt.value" :value="opt.value">
+                  [[ opt.label ]]
+                </option>
+              </select>
+              <button type="button" @click="startNewChatConversation">+ NEW</button>
             </div>
             <div class="row gap-1">
-              <span class="tag">[[ scheduler.total_tasks || 0 ]] TOTAL</span>
-              <button type="button" class="primary" @click="openCreateTask">NEW TASK</button>
+              <button v-if="chatStatus === 'live' || chatStatus === 'connecting'"
+                      type="button" @click="disconnectChatSocket">
+                DISCONNECT
+              </button>
+              <button v-else type="button"
+                      :disabled="!chatConversationId || chatStatus === 'connecting'"
+                      @click="connectChatSocket">
+                CONNECT
+              </button>
+              <button type="button" class="ghost" @click="clearWsCredentials">CLEAR TOKEN</button>
             </div>
           </div>
 
-          <div v-if="tasks.length" class="table-wrap">
+          <div class="row wrap gap-1 muted">
+            <span v-if="chatConversationId">SID [[ chatConversationId ]]</span>
+            <span v-if="wsConnectUrl">URL [[ wsConnectUrl ]]</span>
+          </div>
+
+          <p v-if="chatError" class="notice error">
+            <span>[[ chatError ]]</span>
+          </p>
+
+          <div class="chat-transcript">
+            <p v-if="!chatMessages.length && !chatHistoryLoading" class="muted">
+              [[ chatStatus === 'live' ? 'No messages yet — say hello.' : 'Connect to start chatting.' ]]
+            </p>
+            <p v-if="chatHistoryLoading" class="muted">LOADING TRANSCRIPT…</p>
+            <div v-for="(msg, idx) in chatMessages" :key="idx" class="chat-bubble" :class="'chat-role-' + msg.role">
+              <div class="row spread">
+                <strong>[[ msg.role.toUpperCase() ]]</strong>
+                <span class="muted">[[ formatTimestamp(msg.at) ]]</span>
+              </div>
+              <pre class="chat-text">[[ msg.text ]]</pre>
+            </div>
+          </div>
+
+          <form class="stack gap-2" @submit.prevent="sendChatMessage">
+            <div class="field">
+              <label>MSG</label>
+              <textarea v-model="chatComposer" rows="3"
+                        :disabled="chatStatus !== 'live'"
+                        @keydown.enter.exact.prevent="sendChatMessage"></textarea>
+            </div>
+            <div class="row spread wrap gap-2">
+              <span class="muted">Enter = send, Shift+Enter = newline.</span>
+              <button type="submit" class="primary"
+                      :disabled="chatStatus !== 'live' || !chatComposer.trim()">
+                SEND
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+
+      <div class="panel stack gap-3">
+        <div class="row spread">
+          <div>
+            <p class="eyebrow">DRAFTS</p>
+            <h4>PENDING REVIEW</h4>
+          </div>
+          <span class="tag secondary">
+            [[ outboundDrafts.length ]] OUT / [[ commandDrafts.length ]] CMD
+          </span>
+        </div>
+
+        <div v-if="outboundDrafts.length" class="stack gap-2">
+          <p class="eyebrow">OUTBOUND</p>
+          <div class="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>TASK</th>
-                  <th>SCHED</th>
-                  <th>ST</th>
-                  <th>LAST RUN</th>
+                  <th>ID</th>
+                  <th>KIND</th>
+                  <th>TARGET</th>
+                  <th>MSG</th>
+                  <th>REQ</th>
                   <th></th>
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="t in tasks" :key="t.task_id">
+                <tr v-for="d in outboundDrafts" :key="d.id">
                   <td>
-                    <strong>[[ t.name ]]</strong>
-                    <div class="muted">[[ t.task_id ]]</div>
+                    <code class="codeish">[[ truncate(d.id, 12) ]]</code>
+                    <div class="muted">[[ d.source ]]</div>
                   </td>
-                  <td>[[ t.schedule_detail || t.schedule_kind ]]</td>
-                  <td>[[ t.enabled ? 'E' : 'D' ]]</td>
-                  <td>[[ formatTimestamp(t.last_run && t.last_run.finished_at) ]]</td>
+                  <td>[[ d.kind ]]</td>
+                  <td>
+                    <strong>[[ d.channel ]]</strong>
+                    <div class="muted">[[ d.target || '—' ]]</div>
+                  </td>
+                  <td>
+                    <details v-if="d.message">
+                      <summary>[[ truncate(d.message, 80) ]]</summary>
+                      <pre class="codeish" style="white-space:pre-wrap;">[[ d.message ]]</pre>
+                      <div v-if="d.attachment" class="muted">
+                        ATTACH: [[ d.attachment.path ]]
+                      </div>
+                    </details>
+                    <span v-else class="muted">—</span>
+                  </td>
+                  <td>[[ formatTimestamp(d.requested_at) ]]</td>
                   <td style="text-align:right;">
                     <div class="row right gap-1">
-                      <button type="button" :disabled="pendingActionKey === ('run-' + t.task_id)" @click="runTask(t)">
-                        [[ pendingActionKey === ('run-' + t.task_id) ? '..' : 'RUN' ]]
+                      <button type="button"
+                              :disabled="pendingActionKey === ('commit-' + d.id)"
+                              @click="commitDraft(d)">
+                        [[ pendingActionKey === ('commit-' + d.id) ? '..' : 'COMMIT' ]]
                       </button>
-                      <button v-if="t.enabled" type="button" :disabled="pendingActionKey === ('disable-' + t.task_id)" @click="toggleTask(t, false)">
-                        [[ pendingActionKey === ('disable-' + t.task_id) ? '..' : 'DIS' ]]
-                      </button>
-                      <button v-else type="button" :disabled="pendingActionKey === ('enable-' + t.task_id)" @click="toggleTask(t, true)">
-                        [[ pendingActionKey === ('enable-' + t.task_id) ? '..' : 'ENA' ]]
-                      </button>
-                      <button type="button" @click="openEditTask(t)">EDIT</button>
-                      <button type="button" class="danger"
-                              :disabled="pendingActionKey === ('delete-' + t.task_id)"
-                              @click="deleteTask(t)">
-                        [[ pendingActionKey === ('delete-' + t.task_id) ? '..' : 'DEL' ]]
+                      <button type="button"
+                              class="danger"
+                              :disabled="pendingActionKey === ('discard-' + d.id)"
+                              @click="discardDraft(d)">
+                        [[ pendingActionKey === ('discard-' + d.id) ? '..' : 'DISCARD' ]]
                       </button>
                     </div>
                   </td>
@@ -346,179 +270,364 @@
               </tbody>
             </table>
           </div>
-          <p v-else class="muted">NO TASKS</p>
         </div>
 
-        <div v-if="historyDrawerOpen" class="overlay active" @click.self="closeHistoryDrawer"></div>
-        <div v-if="historyDrawerOpen" class="modal-shell">
-          <div class="panel stack gap-3 modal-card">
-            <div class="row spread">
-              <div class="stack gap-1">
-                <p class="eyebrow">CONVERSATION</p>
-                <h5>[[ historyDrawerSession ? historyDrawerSession.session_key : '' ]]</h5>
-                <div class="row wrap gap-1 muted">
-                  <span v-if="historyDrawerSession">CH [[ historyDrawerSession.channel_name ]]</span>
-                  <span v-if="historyDrawerSession">MSG [[ historyDrawerSession.message_count ]]</span>
-                  <span v-if="historyPreview">TURNS [[ historyPreview.returned_turns ]] / [[ historyPreview.total_turns ]]</span>
-                  <span v-if="historyPreview">SRC [[ historyPreview.source ]]</span>
-                </div>
-              </div>
-              <div class="row gap-1">
-                <button type="button" :disabled="historyLoading" @click="refreshHistory">
-                  [[ historyLoading ? '...' : 'REFRESH' ]]
-                </button>
-                <button type="button" class="ghost" @click="closeHistoryDrawer">CLOSE</button>
-              </div>
-            </div>
-
-            <p v-if="historyError" class="notice error">
-              <span>[[ historyError ]]</span>
-            </p>
-
-            <div v-if="historyLoading && !historyPreview" class="empty">LOADING HISTORY…</div>
-
-            <div v-else-if="historyPreview && historyPreview.turns.length" class="stack gap-2 history-list">
-              <div v-for="(turn, idx) in historyPreview.turns" :key="idx" class="history-turn" :class="'history-role-' + (turn.role || 'unknown')">
-                <div class="row spread">
-                  <strong class="history-role-label">
-                    [[ (turn.role || 'unknown').toUpperCase() ]]<span v-if="turn.grouped_turn_count > 1"> · [[ turn.grouped_turn_count ]]</span>
-                  </strong>
-                  <div class="row gap-1 muted">
-                    <span v-if="turn.has_thought">THOUGHT</span>
-                    <span v-if="turn.tool_call_names && turn.tool_call_names.length">TOOLS: [[ turn.tool_call_names.join(', ') ]]</span>
-                    <span v-if="turn.tool_response_names && turn.tool_response_names.length">RESP: [[ turn.tool_response_names.join(', ') ]]</span>
-                  </div>
-                </div>
-                <pre v-if="turn.text" class="history-text codeish">[[ turn.text ]]</pre>
-                <p v-else-if="!(turn.tool_call_names && turn.tool_call_names.length) && !(turn.tool_response_names && turn.tool_response_names.length)" class="history-text muted">(no text)</p>
-              </div>
-            </div>
-
-            <p v-else-if="historyPreview" class="muted">NO TURNS RECORDED</p>
+        <div v-if="commandDrafts.length" class="stack gap-2">
+          <p class="eyebrow">COMMANDS</p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>COMMAND</th>
+                  <th>CWD</th>
+                  <th>REQ</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="d in commandDrafts" :key="d.id">
+                  <td>
+                    <code class="codeish">[[ truncate(d.id, 12) ]]</code>
+                    <div class="muted">[[ d.source ]]</div>
+                  </td>
+                  <td>
+                    <details>
+                      <summary><code class="codeish">[[ truncate(d.command, 80) ]]</code></summary>
+                      <pre class="codeish" style="white-space:pre-wrap;">[[ d.command ]]</pre>
+                      <div v-if="d.justification" class="muted">
+                        WHY: [[ d.justification ]]
+                      </div>
+                    </details>
+                  </td>
+                  <td>[[ d.directory || '.' ]]</td>
+                  <td>[[ formatTimestamp(d.requested_at) ]]</td>
+                  <td style="text-align:right;">
+                    <div class="row right gap-1">
+                      <button type="button"
+                              :disabled="pendingActionKey === ('approve-' + d.id)"
+                              @click="approveCommand(d)">
+                        [[ pendingActionKey === ('approve-' + d.id) ? '..' : 'APPROVE' ]]
+                      </button>
+                      <button type="button"
+                              class="danger"
+                              :disabled="pendingActionKey === ('deny-' + d.id)"
+                              @click="denyCommand(d)">
+                        [[ pendingActionKey === ('deny-' + d.id) ? '..' : 'DENY' ]]
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
 
-        <div v-if="taskFormOpen" class="overlay active" @click.self="closeTaskForm"></div>
-        <div v-if="taskFormOpen" class="modal-shell">
-          <div class="panel stack gap-3 modal-card">
-            <div class="row spread">
-              <div>
-                <p class="eyebrow">TASK</p>
-                <h5>[[ taskFormMode === 'edit' ? 'EDIT TASK' : 'NEW TASK' ]]</h5>
-              </div>
-              <button type="button" class="ghost" @click="closeTaskForm">CLOSE</button>
+        <p v-if="!hasDrafts" class="muted">NO PENDING DRAFTS</p>
+      </div>
+
+      <div class="panel stack gap-3">
+        <div class="row spread">
+          <div>
+            <p class="eyebrow">SESSIONS</p>
+            <h4>TRACKED CONVERSATIONS</h4>
+          </div>
+          <span class="tag primary">[[ sessions.length ]] SESS</span>
+        </div>
+
+        <div v-if="sessions.length" class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>SESSION</th>
+                <th>CH</th>
+                <th>MSG</th>
+                <th>LAST</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="s in sessions" :key="s.session_key">
+                <td>
+                  <strong>[[ s.session_key ]]</strong>
+                  <div class="muted">[[ s.conversation_id ]]</div>
+                </td>
+                <td>[[ s.channel_name ]]</td>
+                <td>[[ s.message_count ]]</td>
+                <td>[[ formatTimestamp(s.last_activity_at) ]]</td>
+                <td style="text-align:right;">
+                  <div class="row right gap-1">
+                    <button type="button" @click="openHistoryDrawer(s)">VIEW</button>
+                    <button type="button" :disabled="pendingActionKey === ('clear-' + s.session_key)" @click="clearSession(s)">
+                      [[ pendingActionKey === ('clear-' + s.session_key) ? '..' : 'CLR' ]]
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p v-else class="muted">NO SESSIONS</p>
+      </div>
+
+      <div class="panel stack gap-3">
+        <div class="row spread">
+          <div>
+            <p class="eyebrow">TASKS</p>
+            <h4>SCHEDULED WORK</h4>
+          </div>
+          <div class="row gap-1">
+            <span class="tag">[[ scheduler.total_tasks || 0 ]] TOTAL</span>
+            <button type="button" class="primary" @click="openCreateTask">NEW TASK</button>
+          </div>
+        </div>
+
+        <div v-if="tasks.length" class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>TASK</th>
+                <th>SCHED</th>
+                <th>ST</th>
+                <th>LAST RUN</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="t in tasks" :key="t.task_id">
+                <td>
+                  <strong>[[ t.name ]]</strong>
+                  <div class="muted">[[ t.task_id ]]</div>
+                </td>
+                <td>[[ t.schedule_detail || t.schedule_kind ]]</td>
+                <td>[[ t.enabled ? 'E' : 'D' ]]</td>
+                <td>[[ formatTimestamp(t.last_run && t.last_run.finished_at) ]]</td>
+                <td style="text-align:right;">
+                  <div class="row right gap-1">
+                    <button type="button" :disabled="pendingActionKey === ('run-' + t.task_id)" @click="runTask(t)">
+                      [[ pendingActionKey === ('run-' + t.task_id) ? '..' : 'RUN' ]]
+                    </button>
+                    <button v-if="t.enabled" type="button" :disabled="pendingActionKey === ('disable-' + t.task_id)" @click="toggleTask(t, false)">
+                      [[ pendingActionKey === ('disable-' + t.task_id) ? '..' : 'DIS' ]]
+                    </button>
+                    <button v-else type="button" :disabled="pendingActionKey === ('enable-' + t.task_id)" @click="toggleTask(t, true)">
+                      [[ pendingActionKey === ('enable-' + t.task_id) ? '..' : 'ENA' ]]
+                    </button>
+                    <button type="button" @click="openEditTask(t)">EDIT</button>
+                    <button type="button" class="danger"
+                            :disabled="pendingActionKey === ('delete-' + t.task_id)"
+                            @click="deleteTask(t)">
+                      [[ pendingActionKey === ('delete-' + t.task_id) ? '..' : 'DEL' ]]
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p v-else class="muted">NO TASKS</p>
+      </div>
+
+      <div class="panel stack gap-3">
+        <div class="row spread">
+          <div>
+            <p class="eyebrow">PEERS</p>
+            <h4>A2A &amp; DISCOVERY</h4>
+          </div>
+          <span class="tag secondary">[[ detail.a2a_peers.length ]] PEERS</span>
+        </div>
+
+        <div class="grid-2 gap-3">
+          <div class="stack gap-2">
+            <p class="eyebrow">A2A PEERS</p>
+            <div v-if="detail.a2a_peers.length" class="stack gap-1">
+              <span v-for="peer in detail.a2a_peers" :key="peer" class="edge">
+                [[ detail.registration.runtime_id ]] <span class="edge-arrow">&rarr;</span> [[ peer ]]
+              </span>
             </div>
+            <p v-else class="muted">NO PEERS</p>
+          </div>
 
-            <form class="stack gap-3" @submit.prevent="submitTaskForm">
-              <div class="field">
-                <label>NAME</label>
-                <input v-model.trim="taskForm.name" type="text" autocomplete="off" required>
-              </div>
-              <div class="field">
-                <label>PROMPT</label>
-                <textarea v-model="taskForm.prompt" rows="4" required style="min-height: 256px;"></textarea>
-              </div>
-              <div class="field">
-                <label>SCHEDULE TYPE</label>
-                <select v-model="taskForm.schedule_type">
-                  <option value="cron">cron</option>
-                  <option value="delayed">delayed</option>
-                </select>
-              </div>
-              <div v-if="taskForm.schedule_type === 'cron'" class="stack gap-3">
-                <div class="field">
-                  <label>CRON EXPRESSION</label>
-                  <input v-model.trim="taskForm.cron_expression" type="text" autocomplete="off" placeholder="0 * * * *">
-                </div>
-                <div class="field">
-                  <label>TIMEZONE (optional)</label>
-                  <input v-model.trim="taskForm.timezone_name" type="text" autocomplete="off" placeholder="UTC">
-                </div>
-              </div>
-              <div v-else class="stack gap-3">
-                <div class="field">
-                  <label>DELAY (seconds)</label>
-                  <input v-model.number="taskForm.delay_seconds" type="number" min="1" step="1">
-                </div>
-                <label class="row gap-1">
-                  <input v-model="taskForm.repeat" type="checkbox">
-                  <span>REPEAT after each run</span>
-                </label>
-              </div>
+          <div class="stack gap-2">
+            <p class="eyebrow">AGENT CARD</p>
+            <p v-if="detail.agent_card" class="muted">A2A DISCOVERY AVAILABLE</p>
+            <p v-else class="muted">NO PUBLIC CARD</p>
+            <a v-if="detail.agent_card" class="btn" :href="agentCardHref" target="_blank" rel="noreferrer">
+              VIEW CARD
+            </a>
+          </div>
+        </div>
+      </div>
 
+      <div class="panel stack gap-3">
+        <div class="row spread">
+          <div>
+            <p class="eyebrow">EVENTS</p>
+            <h4>RUNTIME ACTIVITY</h4>
+          </div>
+          <span class="tag secondary">[[ events.length ]] BUF</span>
+        </div>
+
+        <div v-if="events.length" class="timeline">
+          <div v-for="ev in events.slice(0, 25)" :key="ev.event_id" class="timeline-entry" :class="ev.level || 'info'">
+            <div class="timeline-meta">
+              <strong>[[ ev.event_type ]]</strong>
+              <span>[[ formatTimestamp(ev.occurred_at) ]]</span>
+            </div>
+            <p>[[ ev.message ]]</p>
+            <small class="muted">[[ ev.source ]]</small>
+          </div>
+        </div>
+        <p v-else class="muted">NO EVENTS</p>
+      </div>
+    </div>
+
+    <div v-if="historyDrawerOpen" class="overlay active" @click.self="closeHistoryDrawer"></div>
+    <div v-if="historyDrawerOpen" class="modal-shell">
+      <div class="panel stack gap-3 modal-card">
+        <div class="row spread">
+          <div class="stack gap-1">
+            <p class="eyebrow">CONVERSATION</p>
+            <h5>[[ historyDrawerSession ? historyDrawerSession.session_key : '' ]]</h5>
+            <div class="row wrap gap-1 muted">
+              <span v-if="historyDrawerSession">CH [[ historyDrawerSession.channel_name ]]</span>
+              <span v-if="historyDrawerSession">MSG [[ historyDrawerSession.message_count ]]</span>
+              <span v-if="historyPreview">TURNS [[ historyPreview.returned_turns ]] / [[ historyPreview.total_turns ]]</span>
+              <span v-if="historyPreview">SRC [[ historyPreview.source ]]</span>
+            </div>
+          </div>
+          <div class="row gap-1">
+            <button type="button" :disabled="historyLoading" @click="refreshHistory">
+              [[ historyLoading ? '...' : 'REFRESH' ]]
+            </button>
+            <button type="button" class="ghost" @click="closeHistoryDrawer">CLOSE</button>
+          </div>
+        </div>
+
+        <p v-if="historyError" class="notice error">
+          <span>[[ historyError ]]</span>
+        </p>
+
+        <div v-if="historyLoading && !historyPreview" class="empty">LOADING HISTORY…</div>
+
+        <div v-else-if="historyPreview && historyPreview.turns.length" class="stack gap-2 history-list">
+          <div v-for="(turn, idx) in historyPreview.turns" :key="idx" class="history-turn" :class="'history-role-' + (turn.role || 'unknown')">
+            <div class="row spread">
+              <strong class="history-role-label">
+                [[ (turn.role || 'unknown').toUpperCase() ]]<span v-if="turn.grouped_turn_count > 1"> · [[ turn.grouped_turn_count ]]</span>
+              </strong>
+              <div class="row gap-1 muted">
+                <span v-if="turn.has_thought">THOUGHT</span>
+                <span v-if="turn.tool_call_names && turn.tool_call_names.length">TOOLS: [[ turn.tool_call_names.join(', ') ]]</span>
+                <span v-if="turn.tool_response_names && turn.tool_response_names.length">RESP: [[ turn.tool_response_names.join(', ') ]]</span>
+              </div>
+            </div>
+            <pre v-if="turn.text" class="history-text codeish">[[ turn.text ]]</pre>
+            <p v-else-if="!(turn.tool_call_names && turn.tool_call_names.length) && !(turn.tool_response_names && turn.tool_response_names.length)" class="history-text muted">(no text)</p>
+          </div>
+        </div>
+
+        <p v-else-if="historyPreview" class="muted">NO TURNS RECORDED</p>
+      </div>
+    </div>
+
+    <div v-if="taskFormOpen" class="overlay active" @click.self="closeTaskForm"></div>
+    <div v-if="taskFormOpen" class="modal-shell">
+      <div class="panel stack gap-3 modal-card">
+        <div class="row spread">
+          <div>
+            <p class="eyebrow">TASK</p>
+            <h5>[[ taskFormMode === 'edit' ? 'EDIT TASK' : 'NEW TASK' ]]</h5>
+          </div>
+          <button type="button" class="ghost" @click="closeTaskForm">CLOSE</button>
+        </div>
+
+        <form class="stack gap-3" @submit.prevent="submitTaskForm">
+          <div class="field">
+            <label>NAME</label>
+            <input v-model.trim="taskForm.name" type="text" autocomplete="off" required>
+          </div>
+          <div class="field">
+            <label>PROMPT</label>
+            <textarea v-model="taskForm.prompt" rows="4" required style="min-height: 256px;"></textarea>
+          </div>
+          <div class="field">
+            <label>SCHEDULE TYPE</label>
+            <select v-model="taskForm.schedule_type">
+              <option value="cron">cron</option>
+              <option value="delayed">delayed</option>
+            </select>
+          </div>
+          <div v-if="taskForm.schedule_type === 'cron'" class="stack gap-3">
+            <div class="field">
+              <label>CRON EXPRESSION</label>
+              <input v-model.trim="taskForm.cron_expression" type="text" autocomplete="off" placeholder="0 * * * *">
+            </div>
+            <div class="field">
+              <label>TIMEZONE (optional)</label>
+              <input v-model.trim="taskForm.timezone_name" type="text" autocomplete="off" placeholder="UTC">
+            </div>
+          </div>
+          <div v-else class="stack gap-3">
+            <div class="field">
+              <label>DELAY (seconds)</label>
+              <input v-model.number="taskForm.delay_seconds" type="number" min="1" step="1">
+            </div>
+            <label class="row gap-1">
+              <input v-model="taskForm.repeat" type="checkbox">
+              <span>REPEAT after each run</span>
+            </label>
+          </div>
+
+          <div class="row wrap gap-2">
+            <label class="row gap-1">
+              <input v-model="taskForm.enabled" type="checkbox">
+              <span>ENABLED</span>
+            </label>
+            <label class="row gap-1">
+              <input v-model="taskForm.clean_session" type="checkbox">
+              <span>CLEAN SESSION per run</span>
+            </label>
+          </div>
+
+          <div class="stack gap-2">
+            <label class="row gap-1">
+              <input v-model="taskForm.goal_enabled" type="checkbox">
+              <span>GOAL CONSTRAINTS (optional)</span>
+            </label>
+            <div v-if="taskForm.goal_enabled" class="stack gap-3">
+              <div class="field">
+                <label>DONE CONDITION</label>
+                <input v-model.trim="taskForm.goal.done_condition" type="text" autocomplete="off">
+              </div>
+              <div class="field">
+                <label>VALIDATION PROMPT</label>
+                <textarea v-model="taskForm.goal.validation_prompt" rows="2"></textarea>
+              </div>
               <div class="row wrap gap-2">
-                <label class="row gap-1">
-                  <input v-model="taskForm.enabled" type="checkbox">
-                  <span>ENABLED</span>
-                </label>
-                <label class="row gap-1">
-                  <input v-model="taskForm.clean_session" type="checkbox">
-                  <span>CLEAN SESSION per run</span>
-                </label>
-              </div>
-
-              <div class="stack gap-2">
-                <label class="row gap-1">
-                  <input v-model="taskForm.goal_enabled" type="checkbox">
-                  <span>GOAL CONSTRAINTS (optional)</span>
-                </label>
-                <div v-if="taskForm.goal_enabled" class="stack gap-3">
-                  <div class="field">
-                    <label>DONE CONDITION</label>
-                    <input v-model.trim="taskForm.goal.done_condition" type="text" autocomplete="off">
-                  </div>
-                  <div class="field">
-                    <label>VALIDATION PROMPT</label>
-                    <textarea v-model="taskForm.goal.validation_prompt" rows="2"></textarea>
-                  </div>
-                  <div class="row wrap gap-2">
-                    <div class="field" style="flex:1;">
-                      <label>MAX STEPS / RUN</label>
-                      <input v-model.number="taskForm.goal.max_steps_per_run" type="number" min="1" step="1">
-                    </div>
-                    <div class="field" style="flex:1;">
-                      <label>MAX COST / RUN (USD)</label>
-                      <input v-model.number="taskForm.goal.max_cost_per_run_usd" type="number" min="0" step="0.01">
-                    </div>
-                  </div>
+                <div class="field" style="flex:1;">
+                  <label>MAX STEPS / RUN</label>
+                  <input v-model.number="taskForm.goal.max_steps_per_run" type="number" min="1" step="1">
+                </div>
+                <div class="field" style="flex:1;">
+                  <label>MAX COST / RUN (USD)</label>
+                  <input v-model.number="taskForm.goal.max_cost_per_run_usd" type="number" min="0" step="0.01">
                 </div>
               </div>
-
-              <p v-if="taskFormError" class="notice error">
-                <span>[[ taskFormError ]]</span>
-              </p>
-
-              <div class="row right gap-2">
-                <button type="button" class="ghost" :disabled="taskFormBusy" @click="closeTaskForm">CANCEL</button>
-                <button type="submit" class="primary" :disabled="taskFormBusy">
-                  [[ taskFormBusy ? '...' : (taskFormMode === 'edit' ? 'SAVE' : 'CREATE') ]]
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-
-        <div class="panel stack gap-3">
-          <div class="row spread">
-            <div>
-              <p class="eyebrow">EVENTS</p>
-              <h4>RUNTIME ACTIVITY</h4>
-            </div>
-            <span class="tag secondary">[[ events.length ]] BUF</span>
-          </div>
-
-          <div v-if="events.length" class="timeline">
-            <div v-for="ev in events.slice(0, 25)" :key="ev.event_id" class="timeline-entry" :class="ev.level || 'info'">
-              <div class="timeline-meta">
-                <strong>[[ ev.event_type ]]</strong>
-                <span>[[ formatTimestamp(ev.occurred_at) ]]</span>
-              </div>
-              <p>[[ ev.message ]]</p>
-              <small class="muted">[[ ev.source ]]</small>
             </div>
           </div>
-          <p v-else class="muted">NO EVENTS</p>
-        </div>
+
+          <p v-if="taskFormError" class="notice error">
+            <span>[[ taskFormError ]]</span>
+          </p>
+
+          <div class="row right gap-2">
+            <button type="button" class="ghost" :disabled="taskFormBusy" @click="closeTaskForm">CANCEL</button>
+            <button type="submit" class="primary" :disabled="taskFormBusy">
+              [[ taskFormBusy ? '...' : (taskFormMode === 'edit' ? 'SAVE' : 'CREATE') ]]
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   </section>
@@ -528,5 +637,6 @@
   <script>
     window.__PILLBUG_DASHBOARD_RUNTIME__ = {{ initial_runtime_json | safe }};
   </script>
+  <script defer src="{{ url_for('static', path='/js/vendor/socket.io.min.js') }}"></script>
   <script defer src="{{ url_for('static', path='/js/app/runtime-detail.js') }}"></script>
 {% endblock %}

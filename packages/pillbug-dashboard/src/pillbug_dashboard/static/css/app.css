@@ -244,13 +244,6 @@ hr {
   gap: 11px;
 }
 
-.grid-sidebar {
-  display: grid;
-  grid-template-columns: 1fr 2fr;
-  gap: 22px;
-  align-items: start;
-}
-
 /* ── Text ───────────────────────────────────────────────────── */
 
 .muted {
@@ -577,7 +570,8 @@ button.ghost:hover {
 
 .field input,
 .field textarea,
-.field select {
+.field select,
+select {
   font-family: inherit;
   font-size: 11px;
   line-height: 17px;
@@ -595,7 +589,8 @@ button.ghost:hover {
 
 .field input:focus,
 .field textarea:focus,
-.field select:focus {
+.field select:focus,
+select:focus {
   outline: none;
   border-color: rgba(105, 240, 209, 0.5);
 }
@@ -804,6 +799,49 @@ dialog::backdrop {
   overflow-y: auto;
 }
 
+/* ── Chat panel ─────────────────────────────────────────────── */
+
+.chat-transcript {
+  border: 1px solid var(--border-dim);
+  background: var(--surface-dim);
+  padding: 11px;
+  max-height: 420px;
+  min-height: 180px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  scrollbar-color: rgba(105, 240, 209, 0.4) rgba(9, 13, 16, 0.8);
+}
+
+.chat-bubble {
+  border: 1px solid var(--border-dim);
+  background: var(--surface);
+  padding: 8px 10px;
+}
+
+.chat-bubble.chat-role-operator {
+  border-left: 2px solid var(--tertiary);
+}
+
+.chat-bubble.chat-role-runtime {
+  border-left: 2px solid var(--primary);
+}
+
+.chat-bubble.chat-role-system {
+  border-left: 2px solid var(--secondary);
+  background: var(--surface-mid);
+}
+
+.chat-text {
+  margin-top: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
 /* ── Conversation history drawer ────────────────────────────── */
 
 .history-list {
@@ -852,10 +890,6 @@ dialog::backdrop {
 /* ── Responsive ─────────────────────────────────────────────── */
 
 @media (max-width: 900px) {
-  .grid-sidebar {
-    grid-template-columns: 1fr;
-  }
-
   .grid-2 {
     grid-template-columns: 1fr;
   }

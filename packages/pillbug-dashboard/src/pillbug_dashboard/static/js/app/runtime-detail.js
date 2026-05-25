@@ -3,6 +3,45 @@
     ? window.__PILLBUG_DASHBOARD_RUNTIME__
     : null;
 
+  const ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+  const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
+
+  function generateUlid() {
+    let now = Date.now();
+    let time = "";
+    for (let i = 9; i >= 0; i--) {
+      time = ULID_ALPHABET[now % 32] + time;
+      now = Math.floor(now / 32);
+    }
+    const rnd = new Uint8Array(16);
+    (window.crypto || window.msCrypto).getRandomValues(rnd);
+    let random = "";
+    for (let i = 0; i < 16; i++) {
+      random += ULID_ALPHABET[rnd[i] & 0x1f];
+    }
+    return time + random;
+  }
+
+  function safeLocalGet(key) {
+    try {
+      return window.localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  }
+
+  function safeLocalSet(key, value) {
+    try {
+      if (value === null || value === undefined || value === "") {
+        window.localStorage.removeItem(key);
+      } else {
+        window.localStorage.setItem(key, value);
+      }
+    } catch {
+      /* localStorage unavailable — token only lives for this tab */
+    }
+  }
+
   function emptyTaskForm() {
     return {
       task_id: null,
@@ -32,10 +71,16 @@
     return;
   }
 
+  const runtimeId = initialRuntime.registration.runtime_id;
+  const tokenStorageKey = `pillbug:ws-token:${runtimeId}`;
+  const urlStorageKey = `pillbug:ws-url:${runtimeId}`;
+
   vueApi
     .createApp({
       delimiters: ["[[", "]]"],
       data() {
+        const storedToken = safeLocalGet(tokenStorageKey) || "";
+        const storedUrl = safeLocalGet(urlStorageKey) || "";
         return {
           detail: initialRuntime,
           events: [],
@@ -49,6 +94,7 @@
           refreshQueued: false,
           streamController: null,
           reconnectTimer: null,
+          quickSendOpen: false,
           messageForm: {
             channel: "",
             conversation_id: "",
@@ -64,6 +110,16 @@
           historyPreview: null,
           historyLoading: false,
           historyError: "",
+          wsToken: storedToken,
+          wsConnectUrl: storedUrl,
+          wsTokenInput: "",
+          wsUrlInput: storedUrl,
+          chatStatus: "idle",
+          chatError: "",
+          chatConversationId: "",
+          chatMessages: [],
+          chatComposer: "",
+          chatHistoryLoading: false,
         };
       },
       computed: {
@@ -109,6 +165,80 @@
         },
         hasDrafts() {
           return this.outboundDrafts.length > 0 || this.commandDrafts.length > 0;
+        },
+        chatAvailable() {
+          return this.availableChannels.includes("websocket");
+        },
+        websocketChannelDetails() {
+          const channels = this.detail.channels && Array.isArray(this.detail.channels.channels)
+            ? this.detail.channels.channels
+            : [];
+          const entry = channels.find((c) => c && c.name === "websocket");
+          return entry && entry.details ? entry.details : null;
+        },
+        defaultWsUrl() {
+          const details = this.websocketChannelDetails;
+          if (!details) {
+            return "";
+          }
+          const port = details.port;
+          if (!port) {
+            return "";
+          }
+          try {
+            const base = new URL(this.detail.registration.base_url);
+            return `${base.protocol}//${base.hostname}:${port}`;
+          } catch {
+            return `http://${details.host || "127.0.0.1"}:${port}`;
+          }
+        },
+        wsSocketioPath() {
+          const details = this.websocketChannelDetails;
+          if (details && typeof details.socketio_path === "string" && details.socketio_path) {
+            return details.socketio_path;
+          }
+          return "/socket.io";
+        },
+        hasWsCredentials() {
+          return Boolean(this.wsToken && this.wsConnectUrl);
+        },
+        chatConversationOptions() {
+          const sessionOptions = this.sessions
+            .filter((s) => s.channel_name === "websocket" && s.conversation_id)
+            .map((s) => ({
+              value: s.conversation_id,
+              label: `${this.truncate(s.conversation_id, 12)} · msg ${s.message_count}`,
+            }));
+          if (
+            this.chatConversationId
+            && !sessionOptions.some((opt) => opt.value === this.chatConversationId)
+          ) {
+            sessionOptions.unshift({
+              value: this.chatConversationId,
+              label: `${this.truncate(this.chatConversationId, 12)} · NEW`,
+            });
+          }
+          return sessionOptions;
+        },
+        chatStatusLabel() {
+          const labels = {
+            idle: "IDLE",
+            connecting: "CONNECTING",
+            live: "LIVE",
+            disconnected: "DISCONNECTED",
+            "auth-failed": "AUTH FAILED",
+            error: "ERROR",
+          };
+          return labels[this.chatStatus] || this.chatStatus.toUpperCase();
+        },
+        chatStatusTagClass() {
+          if (this.chatStatus === "live") {
+            return "primary";
+          }
+          if (this.chatStatus === "auth-failed" || this.chatStatus === "error") {
+            return "secondary";
+          }
+          return "";
         },
       },
       methods: {
@@ -269,12 +399,6 @@
 
           return date.toLocaleString();
         },
-        seedDefaultChannel() {
-          if (!this.messageForm.channel && this.availableChannels.length) {
-            const preferredChannel = this.availableChannels.find((channel) => channel !== "a2a") || this.availableChannels[0];
-            this.messageForm.channel = preferredChannel || "";
-          }
-        },
         scheduleDetailRefresh(delayMs) {
           if (this.detailRefreshTimer) {
             window.clearTimeout(this.detailRefreshTimer);
@@ -313,7 +437,6 @@
             }
 
             this.detail = payload;
-            this.seedDefaultChannel();
           } catch (error) {
             this.errorMessage = error instanceof Error ? error.message : "Unknown error";
           } finally {
@@ -440,6 +563,226 @@
           } finally {
             this.historyLoading = false;
           }
+        },
+        saveWsCredentials() {
+          const token = this.wsTokenInput.trim();
+          if (!token) {
+            return;
+          }
+          const url = (this.wsUrlInput || "").trim() || this.defaultWsUrl;
+          if (!url) {
+            this.chatError = "Set the websocket URL or wait for channel telemetry to load.";
+            return;
+          }
+          this.wsToken = token;
+          this.wsConnectUrl = url;
+          safeLocalSet(tokenStorageKey, token);
+          safeLocalSet(urlStorageKey, url);
+          this.wsTokenInput = "";
+          this.wsUrlInput = url;
+          this.chatError = "";
+          this.bootstrapChatConversation();
+          this.connectChatSocket();
+        },
+        clearWsCredentials() {
+          this.disconnectChatSocket();
+          this.wsToken = "";
+          this.wsConnectUrl = "";
+          this.wsTokenInput = "";
+          this.wsUrlInput = "";
+          this.chatConversationId = "";
+          this.chatMessages = [];
+          this.chatError = "";
+          this.chatStatus = "idle";
+          safeLocalSet(tokenStorageKey, null);
+          safeLocalSet(urlStorageKey, null);
+        },
+        bootstrapChatConversation() {
+          if (this.chatConversationId) {
+            return;
+          }
+          const existing = this.sessions.find((s) => s.channel_name === "websocket" && s.conversation_id);
+          this.chatConversationId = existing ? existing.conversation_id : generateUlid();
+        },
+        startNewChatConversation() {
+          this.disconnectChatSocket();
+          this.chatConversationId = generateUlid();
+          this.chatMessages = [];
+          this.chatError = "";
+          if (this.hasWsCredentials) {
+            this.connectChatSocket();
+          }
+        },
+        async onChatConversationChange() {
+          this.disconnectChatSocket();
+          this.chatMessages = [];
+          this.chatError = "";
+          if (!this.chatConversationId) {
+            return;
+          }
+          await this.rehydrateChatTranscript();
+          if (this.hasWsCredentials) {
+            this.connectChatSocket();
+          }
+        },
+        async rehydrateChatTranscript() {
+          if (!this.chatConversationId) {
+            return;
+          }
+          const sessionKey = `websocket:${this.chatConversationId}`;
+          const tracked = this.sessions.find((s) => s.session_key === sessionKey);
+          if (!tracked) {
+            return;
+          }
+          this.chatHistoryLoading = true;
+          try {
+            const response = await fetch(
+              `/api/runtimes/${encodeURIComponent(this.runtimeId)}/sessions/${encodeURIComponent(sessionKey)}/history`,
+              { headers: { Accept: "application/json" } },
+            );
+            const payload = await response.json();
+            if (!response.ok) {
+              throw new Error(payload.detail || `HTTP ${response.status}`);
+            }
+            const turns = Array.isArray(payload.turns) ? payload.turns : [];
+            this.chatMessages = turns
+              .map((turn) => this.historyTurnToChatMessage(turn))
+              .filter(Boolean);
+          } catch (error) {
+            this.chatError = `History fetch failed: ${error instanceof Error ? error.message : error}`;
+          } finally {
+            this.chatHistoryLoading = false;
+          }
+        },
+        historyTurnToChatMessage(turn) {
+          if (!turn || typeof turn.text !== "string" || !turn.text.trim()) {
+            return null;
+          }
+          const role = turn.role === "user" ? "operator" : turn.role === "model" ? "runtime" : null;
+          if (!role) {
+            return null;
+          }
+          return { role, text: turn.text, at: turn.occurred_at || new Date().toISOString() };
+        },
+        connectChatSocket() {
+          if (!this.chatAvailable || !this.hasWsCredentials) {
+            return;
+          }
+          if (!this.chatConversationId || !ULID_RE.test(this.chatConversationId)) {
+            this.chatError = "Conversation ID must be a 26-character ULID.";
+            return;
+          }
+          if (typeof window.io !== "function") {
+            this.chatError = "Socket.IO client failed to load.";
+            return;
+          }
+          this.disconnectChatSocket();
+          this.chatError = "";
+          this.chatStatus = "connecting";
+
+          let socket;
+          try {
+            socket = window.io(this.wsConnectUrl, {
+              path: this.wsSocketioPath,
+              transports: ["polling"],
+              upgrade: false,
+              reconnection: false,
+              forceNew: true,
+              autoConnect: false,
+              extraHeaders: {
+                Authorization: `Bearer ${this.wsToken}`,
+                "X-SessionID": this.chatConversationId,
+              },
+            });
+          } catch (error) {
+            this.chatStatus = "error";
+            this.chatError = `Socket setup failed: ${error instanceof Error ? error.message : error}`;
+            return;
+          }
+
+          // Socket.IO's Socket carries internal state that does not survive a Vue
+          // reactive Proxy wrap — keep it on a non-reactive instance property.
+          this._chatSocket = socket;
+          const sessionId = this.chatConversationId;
+
+          socket.on("connect", () => {
+            if (this._chatSocket !== socket || this.chatConversationId !== sessionId) {
+              return;
+            }
+            this.chatStatus = "live";
+            this.chatError = "";
+          });
+
+          socket.on("connect_error", (err) => {
+            if (this._chatSocket !== socket) {
+              return;
+            }
+            const message = err && err.message ? err.message : String(err);
+            const looksAuth = /token|auth|forbidden|400/i.test(message);
+            this.chatStatus = looksAuth ? "auth-failed" : "error";
+            this.chatError = `Connection refused: ${message}`;
+            this._chatSocket = null;
+            try {
+              socket.close();
+            } catch {
+              /* ignore */
+            }
+          });
+
+          socket.on("disconnect", (reason) => {
+            if (this._chatSocket !== socket) {
+              return;
+            }
+            this._chatSocket = null;
+            if (this.chatStatus === "live") {
+              this.chatStatus = "disconnected";
+              this.chatError = `Disconnected: ${reason}`;
+            }
+          });
+
+          socket.on("message", (payload) => {
+            if (this._chatSocket !== socket || this.chatConversationId !== sessionId) {
+              return;
+            }
+            const text = payload && typeof payload.text === "string" ? payload.text : "";
+            if (!text) {
+              return;
+            }
+            this.chatMessages.push({ role: "runtime", text, at: new Date().toISOString() });
+          });
+
+          socket.connect();
+        },
+        disconnectChatSocket() {
+          if (this._chatSocket) {
+            try {
+              this._chatSocket.close();
+            } catch {
+              /* ignore */
+            }
+            this._chatSocket = null;
+          }
+          if (this.chatStatus === "live" || this.chatStatus === "connecting") {
+            this.chatStatus = "idle";
+          }
+        },
+        sendChatMessage() {
+          const text = (this.chatComposer || "").trim();
+          if (!text) {
+            return;
+          }
+          if (!this._chatSocket || this.chatStatus !== "live") {
+            this.chatError = "Not connected.";
+            return;
+          }
+          try {
+            this._chatSocket.emit("message", { text });
+          } catch (error) {
+            this.chatError = `Send failed: ${error instanceof Error ? error.message : error}`;
+            return;
+          }
+          this.chatMessages.push({ role: "operator", text, at: new Date().toISOString() });
+          this.chatComposer = "";
         },
         async toggleTask(task, enable) {
           const action = enable ? "enable" : "disable";
@@ -860,7 +1203,6 @@
         },
       },
       mounted() {
-        this.seedDefaultChannel();
         this.subscribeToEvents();
         this.refreshTimer = window.setInterval(() => {
           this.refreshDetail(false);
@@ -874,12 +1216,20 @@
           }
         };
         window.addEventListener("keydown", this._handleKeydown);
+
+        if (this.chatAvailable && this.hasWsCredentials) {
+          this.bootstrapChatConversation();
+          if (this.chatConversationId) {
+            this.rehydrateChatTranscript().finally(() => this.connectChatSocket());
+          }
+        }
       },
       beforeUnmount() {
         if (this.refreshTimer) {
           window.clearInterval(this.refreshTimer);
         }
         this.stopEventStream();
+        this.disconnectChatSocket();
         if (this._handleKeydown) {
           window.removeEventListener("keydown", this._handleKeydown);
           this._handleKeydown = null;

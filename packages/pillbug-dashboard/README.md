@@ -10,9 +10,9 @@ local registry persistence, and browser-side polling or event subscription witho
 - FastAPI application factory and CLI entrypoint
 - Runtime registry CRUD backed by a local JSON file
 - Runtime overview page with health, task, and A2A topology summaries
-- Runtime detail page with session, task, and recent event views
+- Runtime detail page (single-column) with operator actions, optional websocket chat, drafts/approvals queue, tracked sessions with history preview, scheduled-task CRUD, A2A peers, and recent events
 - Dashboard-side proxy routes for telemetry, public agent-card fetches, narrow control actions, and runtime SSE streams
-- Static asset directories wired for local CSS and Vue files
+- Static asset directories wired for local CSS, Vue, and the vendored Socket.IO client
 
 ## Registry format
 
@@ -49,9 +49,31 @@ The bearer token is optional for public telemetry, but it is required if you wan
 The dashboard now expects local frontend assets here:
 
 - `src/pillbug_dashboard/static/js/vendor/vue.global.js`
+- `src/pillbug_dashboard/static/js/vendor/socket.io.min.js` (loaded only on the runtime detail page for the chat panel)
 - `src/pillbug_dashboard/static/js/app/`
 
 The base template references the local CSS and Vue vendor files directly, and page-specific scripts can be added through the template `scripts` block later.
+
+## Websocket chat panel
+
+When a runtime exposes the `websocket` channel (via the `pillbug-websocket` plugin),
+the runtime detail page shows a `CHAT` panel that talks directly to the runtime's
+Socket.IO endpoint:
+
+- The operator pastes the runtime's `PB_WEBSOCKET_BEARER_TOKEN` and (optionally) overrides
+  the connect URL. Both values are stored in the browser only, under
+  `pillbug:ws-token:<runtime_id>` and `pillbug:ws-url:<runtime_id>` in `localStorage`.
+- The token is never sent to the dashboard backend. This is a deliberate departure
+  from the "dashboard tokens stay server-side" convention; it applies only to the
+  websocket channel bearer.
+- Browser Socket.IO clients cannot set custom headers on a native websocket upgrade,
+  so the connection runs `transports: ["polling"]` (see
+  [pillbug-websocket/CLIENT_INTEGRATION.md](../pillbug-websocket/CLIENT_INTEGRATION.md)
+  §3 browser caveat).
+- Existing tracked websocket sessions are listed in the conversation selector;
+  switching to one rehydrates its transcript via
+  `GET /api/runtimes/{rid}/sessions/{session_key}/history`. The `+ NEW` button
+  generates a fresh ULID for a new conversation.
 
 ## Run
 
