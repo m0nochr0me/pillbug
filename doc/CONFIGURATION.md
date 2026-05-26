@@ -6,8 +6,10 @@ For installation and deployment steps, see [Installation Instructions](./INSTALL
 For working examples, start from the files under `doc/simple/` and `doc/multi/`:
 
 - `doc/simple/example_runtime.env`
-- `doc/multi/example_runtime-a.env`
-- `doc/multi/example_runtime-b.env`
+- `doc/multi/example_generalist.env`
+- `doc/multi/example_cron-worker.env`
+- `doc/multi/example_assistant.env`
+- `doc/multi/example_genai-proxy.env`
 - `doc/multi/example_dashboard.env`
 - `doc/multi/example_arca.env`
 

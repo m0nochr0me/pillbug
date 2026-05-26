@@ -2,86 +2,118 @@ x-build-common: &build-common
   context: .
   target: final
 
+# Example fleet of three Pillbug agents — different models, different jobs,
+# different channels — plus the operator dashboard, a Gemini→OpenAI proxy
+# fronting a local model for the cron-worker, and a Redis used by Docket for
+# scheduled tasks.
+#
+# Service names match the README "Example fleet" snippet:
+#   generalist   — Gemini Pro, Matrix + A2A
+#   cron-worker  — local model via genai-proxy, A2A + HTTP trigger + bundled memory
+#   assistant    — Gemini Flash, Telegram + A2A
+#
+# arca-memory and the alerts companion service are intentionally omitted from
+# the default stack. Uncomment the optional arca-memory block at the bottom if
+# you want a graph + semantic memory MCP shared across runtimes (see
+# doc/INSTALL.md → Memory).
+
 services:
-  pillbug-a:
+  generalist:
     build:
       <<: *build-common
       args:
-        PILLBUG_INSTALL_EXTRAS: a2a,telegram,trigger
+        PILLBUG_INSTALL_EXTRAS: a2a,matrix
         EXTRA_PACKAGES: ca-certificates curl jq
-    container_name: pillbug-a
-    hostname: pillbug-a
+    container_name: generalist
+    hostname: generalist
     env_file:
-      - ./example_runtime-a.env
-    dns: # Adguard DNS servers
-      - 94.140.14.140
-      - 94.140.15.15
+      - ./example_generalist.env
     ports:
       - "8001:8000"
-      - "9101:9100"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: on-failure:5
     volumes:
       - type: bind
-        source: ~/.pillbug/runtime-a
+        source: ~/.pillbug/generalist
         target: /home/pillbug
     # Skill secrets — uncomment alongside the top-level `secrets:` block below.
     # secrets:
     #   - tavily_api_key
     #   - elevenlabs_api_key
 
-  pillbug-b:
+  cron-worker:
     build:
       <<: *build-common
       args:
-        PILLBUG_INSTALL_EXTRAS: a2a
+        PILLBUG_INSTALL_EXTRAS: a2a,trigger,memory
         EXTRA_PACKAGES: ca-certificates curl jq
-    container_name: pillbug-b
-    hostname: pillbug-b
-    dns: # Adguard DNS servers
-      - 94.140.14.140
-      - 94.140.15.15
+    container_name: cron-worker
+    hostname: cron-worker
+    depends_on:
+      - genai-proxy
+      - redis
     env_file:
-      - ./example_runtime-b.env
+      - ./example_cron-worker.env
     ports:
       - "8002:8000"
+      - "9100:9100"   # trigger ingress
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: on-failure:5
     volumes:
       - type: bind
-        source: ~/.pillbug/runtime-b
+        source: ~/.pillbug/cron-worker
         target: /home/pillbug
 
-  pillbug-alerts:
+  genai-proxy:
     build:
-      context: ./app/scratch/alerts
-      dockerfile: Dockerfile.alerts
-    container_name: pillbug-alerts
-    hostname: pillbug-alerts
-    depends_on:
-      - pillbug-a
+      <<: *build-common
+      args:
+        PILLBUG_INSTALL_EXTRAS: genai_proxy
+    container_name: genai-proxy
+    hostname: genai-proxy
     env_file:
-      - ./example_alerts.env
+      - ./example_genai-proxy.env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: on-failure:5
+    command:
+      - uv
+      - run
+      - pillbug-genai-proxy
+
+  assistant:
+    build:
+      <<: *build-common
+      args:
+        PILLBUG_INSTALL_EXTRAS: a2a,telegram
+        EXTRA_PACKAGES: ca-certificates curl jq
+    container_name: assistant
+    hostname: assistant
+    env_file:
+      - ./example_assistant.env
+    ports:
+      - "8003:8000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: on-failure:5
     volumes:
-      - type: volume
-        source: pillbug-alerts-state
-        target: /home/pillbug/state
+      - type: bind
+        source: ~/.pillbug/assistant
+        target: /home/pillbug
 
-  pillbug-dashboard:
+  dashboard:
     build:
       <<: *build-common
       args:
         PILLBUG_INSTALL_EXTRAS: dashboard
-    container_name: pillbug-dashboard
-    hostname: pillbug-dashboard
+    container_name: dashboard
+    hostname: dashboard
     depends_on:
-      - pillbug-a
-      - pillbug-b
+      - generalist
+      - cron-worker
+      - assistant
     env_file:
       - ./example_dashboard.env
     ports:
@@ -98,20 +130,6 @@ services:
         source: ~/.pillbug/dashboard
         target: /home/pillbug
 
-  arca-memory:
-    image: arca-memory:latest
-    container_name: arca-memory
-    hostname: arca-memory
-    ports:
-      - "8201:8201"
-    env_file:
-      - ./example_arca.env
-    restart: on-failure:5
-    volumes:
-      - type: bind
-        source: ~/.arca-memory
-        target: /var/lib/arca-memory
-
   redis:
     image: redis:7
     container_name: redis
@@ -121,10 +139,24 @@ services:
     restart: on-failure:5
     command: ["redis-server", "--save", "", "--appendonly", "no"]
 
-volumes:
-  pillbug-alerts-state:
+  # Optional: shared memory MCP service. Requires building the arca-memory image
+  # locally first (see doc/INSTALL.md → Multi-runtime → Step 2). Uncomment, then
+  # point each runtime at it through workspace/mcp.json.
+  # arca-memory:
+  #   image: arca-memory:latest
+  #   container_name: arca-memory
+  #   hostname: arca-memory
+  #   ports:
+  #     - "8201:8201"
+  #   env_file:
+  #     - ./example_arca.env
+  #   restart: on-failure:5
+  #   volumes:
+  #     - type: bind
+  #       source: ~/.arca-memory
+  #       target: /var/lib/arca-memory
 
-# Skill secrets — uncomment and create the files (see doc/INSTALL.md -> Skill Secrets),
+# Skill secrets — uncomment and create the files (see doc/INSTALL.md → Skill Secrets),
 # then add a matching `secrets:` list to each service that runs those skills.
 # secrets:
 #   tavily_api_key:

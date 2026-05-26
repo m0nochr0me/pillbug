@@ -5,21 +5,46 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?logo=github&logoColor=white)](https://opensource.org/licenses/MIT)
 [![Standardized Agent Exams: 100%](https://img.shields.io/badge/SAE-100%25-teal.svg?logo=github&logoColor=white)](https://www.kaggle.com/experimental/sae/5dc91772-3e30-efa6-f325-22fd928212d6)
 
-Pillbug is an async AI agent runtime built for isolated deployment.
+Pillbug is an async Python runtime for running a fleet of small, focused AI agents — one container per agent, each with the model, tools, and channels that job actually needs.
 
 ## Why Pillbug?
 
-Pillbug is opinionated about one thing: **every agent runs alone, sandboxed in its own container.** Everything else — Gemini-first, MCP-native, plugin channels, bring-your-own-memory — follows from that.
+Pillbug is opinionated about one thing: **one agent, one job, one container.** Compose a Gemini Pro generalist that posts to Bluesky and Threads, a cheap local-Gemma worker that runs your cron-shaped tasks, and a Flash-powered personal assistant on Telegram — side by side, each with its own workspace, identity, and security boundary. They reach people through whichever channel fits (Telegram, Matrix, Slack, WebSocket, HTTP trigger), reach the world through MCP tools, and talk to each other over A2A when they need to.
 
 Pick Pillbug when you want:
 
-- **Strict per-tenant isolation.** Each runtime has its own workspace, identity, and security boundary. No multi-tenant routing inside the process.
-- **A workspace-sandboxed tool surface.** File reads, edits, search, command execution, scheduling, and URL fetches all live behind a local MCP server scoped to `WORKSPACE_ROOT`.
-- **A composable channel model.** CLI, Telegram, Matrix, WebSocket, A2A, HTTP trigger — each is a plugin package, registered through env config, not hardcoded into the loop.
-- **Production posture out of the box.** Non-root container PID 1, bearer-protected control plane, reloadable security patterns, structured JSON logs.
-- **Backend flexibility without core churn.** Gemini developer or Vertex natively; llama.cpp, vLLM, Ollama, LiteLLM via the bundled OpenAI-compatibility proxy.
+- **Fleet model** Each runtime is small, single-purpose, and disposable.
+- **Reach where your users already are.** Telegram, Matrix, Slack — every channel is a plugin package.
+- **A workspace-sandboxed tool surface.** File reads, edits, search, command execution, scheduling, and URL fetches all live behind a local MCP server.
+- **Production posture out of the box.** Non-root container, reloadable security patterns, approval-gated mutating tools, structured JSON logs.
+- **Backend flexibility per agent.** Gemini/Vertex natively; llama.cpp, vLLM, Ollama, LiteLLM via the bundled OpenAI-compatibility proxy. Mix tiers across the fleet — Pro where it earns its keep, Flash or local models where it doesn't.
 
-Pillbug is probably **not** the right fit if you need multi-agent routing inside a single process, bundled memory, voice or video output flows, or a one-file demo. It is deliberately a runtime, not a platform.
+Pillbug is probably **not** the right fit if you want a single mega-assistant with multi-tenant routing in one process, a bundled UI for end users, voice or video output flows, or a one-file demo.
+
+## Example fleet
+
+Three agents — different models, different jobs, different channels — on one host. Add a fourth by appending another service block.
+
+```yaml
+# compose.yaml
+services:
+  generalist:
+    build: { context: ., target: final, args: { PILLBUG_INSTALL_EXTRAS: a2a,matrix } }
+    env_file: ./generalist.env   # PB_GEMINI_MODEL=gemini-…-pro, Bluesky/Threads skills
+    ports: ["8001:8000"]
+
+  cron-worker:
+    build: { context: ., target: final, args: { PILLBUG_INSTALL_EXTRAS: a2a,trigger,memory } }
+    env_file: ./cron-worker.env  # PB_GEMINI_BASE_URL=…genai-proxy → local Gemma
+    ports: ["8002:8000"]
+
+  assistant:
+    build: { context: ., target: final, args: { PILLBUG_INSTALL_EXTRAS: a2a,telegram } }
+    env_file: ./assistant.env    # PB_GEMINI_MODEL=gemini-…-flash, personal Telegram bot
+    ports: ["8003:8000"]
+```
+
+See [doc/multi/](doc/multi/) for fuller fleet examples including the operator dashboard and the OpenAI-compatibility proxy.
 
 ## Highlights
 
@@ -28,13 +53,12 @@ Pillbug is probably **not** the right fit if you need multi-agent routing inside
 - Native audio recognition and vision support via multi-modal Gemini API
 - Gemini developer and Vertex AI backends, plus OpenAI-compatible upstreams (llama.cpp, vLLM, Ollama, LiteLLM) through the bundled translation proxy
 - Local MCP server for workspace file, search, command, outbound channel, and URL-fetching tools
-- Approval-gated by default: allowlist + draft/commit for `execute_command`, draft/commit for outbound sends, per-channel rate budgets, runtime planning mode, and a `trust: untrusted` banner on fetched content (see [doc/CONFIGURATION.md](doc/CONFIGURATION.md#safety-and-approvals))
-- Structured tool-error envelopes and per-call audit telemetry (`tool.call.started` / `tool.call.completed`) with redacted args summaries
+- Approval-gated by default
+- Structured tool-error envelopes and per-call audit telemetry with redacted args summaries
 - Built-in session commands, summarization, and session-scoped planning
 - Embedded scheduler for background agent tasks, with optional per-task goal contract (done condition, step cap, forbidden actions, progress log)
-- Workspace skill discovery from `skills/*/SKILL.md`
+- Workspace skill discovery
 - Optional channel and integration packages: A2A, Telegram, Slack, Matrix, WebSocket (Socket.IO), HTTP trigger, dashboard, bundled memory, and the OpenAI-compatibility proxy
-- Per-workspace `AGENTS.md` instructions seeded on first run
 
 ## Quickstart
 

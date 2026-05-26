@@ -253,20 +253,23 @@ curl http://127.0.0.1:8000/health
 
 ### Multi-Agent Setup
 
-Use this when you want multiple Pillbug runtimes that can talk to each other over A2A and optionally use Redis, Arca-Memory, and the dashboard.
+Use this when you want a fleet of Pillbug runtimes that can talk to each other over A2A. The example stack pairs three differently-shaped agents — a Gemini Pro generalist on Matrix, a cron-worker driven by a local model via the bundled `genai-proxy`, and a Flash assistant on Telegram — with a Redis used by the embedded Docket scheduler and an optional operator dashboard.
 
-1. Clone the required repositories.
+1. Clone Pillbug.
 
 ```bash
 git clone https://github.com/m0nochr0me/pillbug.git
-git clone https://github.com/m0nochr0me/arca-mcp.git
 cd pillbug
 ```
 
-1. Build the local Arca image.
+1. (Optional) Build the local Arca-Memory image.
+
+The default example stack does not include arca-memory. Skip this step unless you intend to uncomment the arca block at the bottom of the compose file and share a graph + semantic memory MCP across the fleet.
 
 ```bash
-cd ../arca-mcp
+cd ..
+git clone https://github.com/m0nochr0me/arca-mcp.git
+cd arca-mcp
 docker build -t arca-memory:latest .
 cd ../pillbug
 ```
@@ -276,59 +279,51 @@ cd ../pillbug
 ```bash
 mkdir -p ./.deploy-multi
 cp doc/multi/example.compose.yaml ./.deploy-multi/compose.yaml
-cp doc/multi/example_runtime-a.env ./.deploy-multi/example_runtime-a.env
-cp doc/multi/example_runtime-b.env ./.deploy-multi/example_runtime-b.env
-cp doc/multi/example_dashboard.env ./.deploy-multi/example_dashboard.env
-cp doc/multi/example_arca.env ./.deploy-multi/example_arca.env
-mkdir -p "$HOME/.pillbug/runtime-a" "$HOME/.pillbug/runtime-b" "$HOME/.pillbug/dashboard" "$HOME/.arca-memory"
+cp doc/multi/example_generalist.env  ./.deploy-multi/example_generalist.env
+cp doc/multi/example_cron-worker.env ./.deploy-multi/example_cron-worker.env
+cp doc/multi/example_assistant.env   ./.deploy-multi/example_assistant.env
+cp doc/multi/example_genai-proxy.env ./.deploy-multi/example_genai-proxy.env
+cp doc/multi/example_dashboard.env   ./.deploy-multi/example_dashboard.env
+# Only if you uncommented the arca-memory block in the compose file:
+# cp doc/multi/example_arca.env       ./.deploy-multi/example_arca.env
+mkdir -p "$HOME/.pillbug/generalist" "$HOME/.pillbug/cron-worker" "$HOME/.pillbug/assistant" "$HOME/.pillbug/dashboard"
 ```
 
 1. Edit the copied env files.
 
 Required changes:
 
-- set `PB_GEMINI_API_KEY` for every runtime
+- set `PB_GEMINI_API_KEY` on `generalist` and `assistant` (the cron-worker talks to the proxy and ignores its API key)
+- in `example_genai-proxy.env`, point `PB_GENAI_PROXY_UPSTREAM_URL` at your local model server (llama.cpp / vLLM / Ollama / LiteLLM). The default assumes a host-local OpenAI-compatible endpoint reachable via `http://host.docker.internal:8080/v1`. Adjust `PB_GEMINI_MODEL` in `example_cron-worker.env` to a model id your upstream actually serves.
 - replace dashboard, A2A, and trigger bearer tokens
-- set unique runtime ids and agent names
-- confirm `PB_A2A_SELF_BASE_URL` and `PB_A2A_PEERS_JSON` match the compose service names you will use
-- if you want to use the bundled Redis service from the example compose stack, set `PB_REDIS_HOST=redis` in both runtime env files
-- if you want Arca-Memory to use the bundled Redis service, set `ARCA_REDIS_HOST=redis` in `example_arca.env`
-- set the Arca authentication and API values in `example_arca.env`
+- fill in real Telegram/Matrix tokens and allowed chat/room IDs (or remove those channels from `PB_ENABLED_CHANNELS` if you don't use them)
+- (optional) for arca-memory: set `ARCA_REDIS_HOST=redis` and the auth/API values in `example_arca.env`
 
 1. Bootstrap the runtimes once.
 
 ```bash
-docker compose -f ./.deploy-multi/compose.yaml up --build pillbug-a pillbug-b
+docker compose -f ./.deploy-multi/compose.yaml up --build generalist cron-worker assistant
 ```
 
 Expected result:
 
-- `pillbug-a` and `pillbug-b` each exit once after seeding their workspace
-- Redis and other long-running services may continue if you started them separately
+- each Pillbug runtime exits once after seeding its workspace
+- `genai-proxy` and `redis` may continue running
 
 1. Populate the runtime-local editable files.
 
 ```bash
-mkdir -p "$HOME/.pillbug/runtime-a/workspace/skills" "$HOME/.pillbug/runtime-b/workspace/skills"
-cp doc/common/example_mcp.json "$HOME/.pillbug/runtime-a/mcp.json"
-cp doc/common/example_mcp.json "$HOME/.pillbug/runtime-b/mcp.json"
-cp doc/common/example_trigger_sources.json "$HOME/.pillbug/runtime-a/trigger_sources.json"
-printf '[]\n' > "$HOME/.pillbug/runtime-b/trigger_sources.json"
-cp -R skills/. "$HOME/.pillbug/runtime-a/workspace/skills/"
-cp -R skills/. "$HOME/.pillbug/runtime-b/workspace/skills/"
+for r in generalist cron-worker assistant; do
+  mkdir -p "$HOME/.pillbug/$r/workspace/skills"
+  cp doc/common/example_mcp.json "$HOME/.pillbug/$r/mcp.json"
+  cp -R skills/. "$HOME/.pillbug/$r/workspace/skills/"
+done
+cp doc/common/example_trigger_sources.json "$HOME/.pillbug/cron-worker/trigger_sources.json"
 ```
 
-Then edit these files:
+Then edit each runtime's `workspace/AGENTS.md`, `workspace/skills/`, `mcp.json`, and (for cron-worker) `trigger_sources.json` to suit the role.
 
-- `$HOME/.pillbug/runtime-a/workspace/AGENTS.md`
-- `$HOME/.pillbug/runtime-b/workspace/AGENTS.md`
-- `$HOME/.pillbug/runtime-a/workspace/skills/`
-- `$HOME/.pillbug/runtime-b/workspace/skills/`
-- `$HOME/.pillbug/runtime-a/mcp.json`
-- `$HOME/.pillbug/runtime-b/mcp.json`
-- `$HOME/.pillbug/runtime-a/trigger_sources.json`
-
-When Arca-Memory runs inside the same compose stack, point `mcp.json` at `http://arca-memory:8201/app/mcp`.
+When arca-memory runs inside the same compose stack, point `mcp.json` at `http://arca-memory:8201/app/mcp`.
 When Pillbug runs alone in Docker but Arca is published on the host, use `http://host.docker.internal:8201/app/mcp` instead.
 
 1. Start the full stack.
@@ -340,9 +335,10 @@ docker compose -f ./.deploy-multi/compose.yaml up -d --build
 1. Verify the services.
 
 ```bash
-curl http://127.0.0.1:8001/health
-curl http://127.0.0.1:8002/health
-curl http://127.0.0.1:8010/
+curl http://127.0.0.1:8001/health   # generalist
+curl http://127.0.0.1:8002/health   # cron-worker
+curl http://127.0.0.1:8003/health   # assistant
+curl http://127.0.0.1:8010/         # dashboard
 ```
 
 ## First-Time Setup
