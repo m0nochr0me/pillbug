@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Annotated
 
+from markdown_it import MarkdownIt
 from mutagen import File as MutagenFile
 from nio import (
     AsyncClient,
@@ -32,6 +33,7 @@ from app.schema.messages import InboundMessage, OutboundAttachment
 from app.util.workspace import async_write_bytes_file, display_path
 
 _MAX_MESSAGE_CHARS = 4000
+_MARKDOWN_RENDERER = MarkdownIt("commonmark", {"html": False, "breaks": True, "linkify": True}).enable("linkify")
 _MATRIX_DOWNLOADS_DIR = settings.WORKSPACE_ROOT / "downloads" / "matrix"
 _FILENAME_SANITIZER = re.compile(r"[^A-Za-z0-9._-]+")
 _TRANSIENT_LOG_COOLDOWN_SECONDS = 60.0
@@ -100,6 +102,10 @@ def _chunk_message(text: str, *, max_chars: int = _MAX_MESSAGE_CHARS) -> tuple[s
         chunks.append(remaining)
 
     return tuple(chunks)
+
+
+def _render_markdown_html(text: str) -> str:
+    return _MARKDOWN_RENDERER.render(text).strip()
 
 
 def _sanitize_filename(value: str) -> str:
@@ -399,6 +405,8 @@ class MatrixChannel(BaseChannel):
             content: dict[str, object] = {
                 "msgtype": "m.text",
                 "body": chunk,
+                "format": "org.matrix.custom.html",
+                "formatted_body": _render_markdown_html(chunk),
             }
 
             if index == 0 and reply_to_event_id and self._settings.reply_to_message:

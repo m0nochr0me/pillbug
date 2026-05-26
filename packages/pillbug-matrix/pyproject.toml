@@ -8,6 +8,7 @@ dependencies = [
     "pillbug",
     "matrix-nio>=0.24",
     "mutagen>=1.47",
+    "markdown-it-py[linkify]>=3.0",
 ]
 
 [project.scripts]

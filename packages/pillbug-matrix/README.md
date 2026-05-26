@@ -69,6 +69,7 @@ The channel currently behaves as follows:
 - Outbound `.ogg` files are always sent as `m.audio` with the MSC3245 voice-message markers (`org.matrix.msc3245.voice`, `org.matrix.msc1767.audio`, `org.matrix.msc1767.file`, `org.matrix.msc1767.text`) and the audio duration in milliseconds so clients like Element (web and mobile) render them as voice messages.
 - While Pillbug is generating a response, the plugin sends Matrix typing notifications.
 - Long outbound replies are chunked into 4000-character messages for readability.
+- Outbound text is sent as both a plaintext `body` (CommonMark source) and an HTML `formatted_body` rendered with `markdown-it-py` (`org.matrix.custom.html`), so Markdown features such as bold, italics, code blocks, lists, and links render in Matrix clients that support HTML. Chunking happens on the raw Markdown before rendering, so a single fenced block split across chunks may render with a partially closed code block in the affected chunks.
 
 ## Notes
 
