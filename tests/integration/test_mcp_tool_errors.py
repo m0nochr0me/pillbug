@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -106,6 +107,68 @@ async def test_manage_todo_list_unsupported_action_returns_invalid_arguments(wor
 
     result = await mcp_mod.manage_todo_list(action="frobnicate", ctx=_StubCtx())  # type: ignore[arg-type]
     _assert_envelope(result, expected_type="invalid_arguments")
+
+
+class _StubTodoCtx:
+    """Minimal FastMCP context stub with the get/set/delete_state surface manage_todo_list uses."""
+
+    def __init__(self) -> None:
+        self.session_id = "test-session"
+        self._state: dict[str, Any] = {}
+
+    async def get_state(self, key: str):
+        return self._state.get(key)
+
+    async def set_state(self, key: str, value: Any) -> None:
+        self._state[key] = value
+
+    async def delete_state(self, key: str) -> None:
+        self._state.pop(key, None)
+
+
+async def test_manage_todo_list_dialect_slip_returns_recoverable_envelope(workspace_settings):
+    """Bad field names (`task`) and statuses (`pending`) must surface as a recoverable envelope, not raise."""
+    result = await mcp_mod.manage_todo_list(
+        action="set",
+        todo_list=[
+            {"id": 1, "task": "do the thing", "status": "pending"},
+            {"id": 2, "task": "later", "status": "pending"},
+        ],
+        ctx=_StubTodoCtx(),  # type: ignore[arg-type]
+    )
+    _assert_envelope(result, expected_type="invalid_arguments")
+    assert "item_schema" in result["details"]
+    assert "errors" in result["details"]
+    error_locs = {tuple(err["loc"]) for err in result["details"]["errors"]}
+    # Pydantic should report missing `title` and invalid `status` literals.
+    assert any("title" in loc for loc in error_locs), error_locs
+    assert any("status" in loc for loc in error_locs), error_locs
+
+
+async def test_manage_todo_list_set_happy_path(workspace_settings):
+    """Canonical-shape items still round-trip through set."""
+    ctx = _StubTodoCtx()
+    result = await mcp_mod.manage_todo_list(
+        action="set",
+        todo_list=[
+            {"id": 1, "title": "first", "status": "in-progress"},
+            {"id": 2, "title": "second", "status": "not-started"},
+        ],
+        ctx=ctx,  # type: ignore[arg-type]
+    )
+    assert result["action"] == "set"
+    assert result["total"] == 2
+    assert result["counts"] == {"not-started": 1, "in-progress": 1, "completed": 0}
+
+
+async def test_manage_todo_list_set_missing_required_field_returns_invalid_arguments(workspace_settings):
+    result = await mcp_mod.manage_todo_list(
+        action="set",
+        todo_list=None,
+        ctx=_StubTodoCtx(),  # type: ignore[arg-type]
+    )
+    _assert_envelope(result, expected_type="invalid_arguments")
+    assert "item_schema" in result["details"]
 
 
 async def test_manage_agent_task_missing_task_id_returns_invalid_arguments(workspace_settings):

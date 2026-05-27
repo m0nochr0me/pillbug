@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Annotated, Any, Literal, cast
 
 import aiohttp
 import uvicorn
@@ -25,6 +25,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.server import create_proxy
 from fastmcp.server.middleware.logging import LoggingMiddleware
+from pydantic import Field, ValidationError
 
 from app import __project__, __version__
 from app.core.agent_card import build_extended_agent_card, build_public_agent_card
@@ -86,7 +87,7 @@ from app.schema.messages import (
 )
 from app.schema.tasks import AgentTaskGoal
 from app.schema.telemetry import ChannelsTelemetrySnapshot, RuntimeMetadata
-from app.schema.todo import TodoItem, TodoListSnapshot
+from app.schema.todo import TodoListSnapshot
 from app.util.skills import workspace_skill_name_for_path
 from app.util.text import classify_shell_stderr
 from app.util.tool_result import envelope_error, tool_error
@@ -1626,19 +1627,56 @@ async def list_a2a_peers(
     }
 
 
+_TODO_ITEM_SCHEMA_HINT: dict[str, str] = {
+    "id": "integer >= 1, unique within the list",
+    "title": "non-empty string (NOT 'task' or 'content')",
+    "status": "'not-started' | 'in-progress' | 'completed' (NOT 'pending')",
+    "invariant": "at most one item may have status='in-progress'",
+}
+
+
 @mcp.tool
 @envelope_error
 async def manage_todo_list(
-    action: Literal["get", "set", "clear"] = "get",
-    todo_list: list[TodoItem] | None = None,
-    explanation: str | None = None,
+    action: Annotated[
+        Literal["get", "set", "clear"],
+        Field(description="get returns the current plan; set replaces it with `todo_list`; clear removes it."),
+    ] = "get",
+    todo_list: Annotated[
+        list[dict[str, Any]] | None,
+        Field(
+            description=(
+                "Required for action='set'. Full replacement of the plan. "
+                "Each item MUST have these exact fields: "
+                "id (integer >= 1, unique), "
+                "title (non-empty string — do NOT use 'task' or 'content'), "
+                "status (one of: 'not-started', 'in-progress', 'completed' — do NOT use 'pending'). "
+                "At most one item may have status='in-progress'."
+            ),
+        ),
+    ] = None,
+    explanation: Annotated[
+        str | None,
+        Field(description="Optional human-readable note describing why the plan changed."),
+    ] = None,
     ctx: Context = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     """
     Stores and retrieves a session-scoped todo list for multi-step work.
 
-    Use get to inspect the current plan, set to replace the full plan, and clear to remove it.
-    Todo lists may contain at most one in-progress item at a time.
+    Actions:
+      - "get" (default): return the current plan.
+      - "set": replace the full plan with `todo_list`.
+      - "clear": remove the plan.
+
+    Item schema (exact field names — common slips like `task`, `content`, `pending` are rejected):
+      - id: integer >= 1, unique within the list
+      - title: non-empty string
+      - status: one of "not-started", "in-progress", "completed"
+
+    Invariants:
+      - At most one item may have status="in-progress".
+      - Duplicate ids are rejected.
     """
 
     normalized_action = action.strip().lower()
@@ -1654,9 +1692,29 @@ async def manage_todo_list(
 
     if normalized_action == "set":
         if todo_list is None:
-            return tool_error("invalid_arguments", "todo_list is required for set")
+            return tool_error(
+                "invalid_arguments",
+                "todo_list is required for set",
+                next_valid_actions=("retry manage_todo_list with action='set' and a non-empty todo_list",),
+                details={"item_schema": _TODO_ITEM_SCHEMA_HINT},
+            )
 
-        snapshot = TodoListSnapshot(items=todo_list, explanation=explanation)
+        try:
+            snapshot = TodoListSnapshot(items=todo_list, explanation=explanation)
+        except ValidationError as exc:
+            return tool_error(
+                "invalid_arguments",
+                "todo_list failed schema validation",
+                next_valid_actions=("retry manage_todo_list set with corrected items",),
+                details={
+                    "errors": [
+                        {"loc": list(err["loc"]), "msg": err["msg"], "type": err["type"]}
+                        for err in exc.errors(include_url=False, include_input=False)
+                    ],
+                    "item_schema": _TODO_ITEM_SCHEMA_HINT,
+                },
+            )
+
         await ctx.set_state(_TODO_LIST_STATE_KEY, snapshot.model_dump(mode="json"))
         _sync_todo_snapshot_to_runtime_session(ctx, snapshot)
         logger.debug(f"Updated todo list with {len(snapshot.items)} items")
