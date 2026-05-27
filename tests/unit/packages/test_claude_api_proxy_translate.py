@@ -100,6 +100,67 @@ def test_partial_tool_result_coverage_fills_in_missing_ids_only() -> None:
     assert by_id["toolu_00000003"].get("is_error") is not True
 
 
+def test_repeated_tool_name_after_orphan_does_not_steal_old_id() -> None:
+    # Reproduces the second production failure: an earlier-orphaned tool_use for
+    # name X must not "steal" the id from a later same-name tool_use's response.
+    # Previously the translator matched against a global pending list, so the
+    # late functionResponse popped the orphan's id and emitted a tool_result
+    # whose tool_use_id lived many turns back — Anthropic 400.
+    payload = {
+        "contents": [
+            {"role": "user", "parts": [{"text": "go"}]},
+            {"role": "model", "parts": [_fn_call("search", {"q": "first"})]},
+            {"role": "user", "parts": [{"text": "actually wait"}]},
+            {"role": "model", "parts": [_fn_call("search", {"q": "second"})]},
+            {"role": "user", "parts": [_fn_response("search", {"ok": True})]},
+        ]
+    }
+
+    messages = translate.extract_history(payload)
+
+    asst = [m for m in messages if m["role"] == "assistant"]
+    assert len(asst) == 2
+    first_id = asst[0]["content"][0]["id"]
+    second_id = asst[1]["content"][0]["id"]
+    assert first_id != second_id
+
+    # The real functionResponse must pair with the SECOND (immediately previous) id.
+    final_user = messages[-1]
+    assert final_user["role"] == "user"
+    real_results = [b for b in final_user["content"] if b.get("type") == "tool_result"]
+    assert len(real_results) == 1
+    assert real_results[0]["tool_use_id"] == second_id
+    assert real_results[0].get("is_error") is not True
+
+    # The orphan from the first model turn gets a synthetic placeholder in the
+    # message immediately following it.
+    orphan_followup = messages[2]
+    assert orphan_followup["role"] == "user"
+    placeholders = [b for b in orphan_followup["content"] if b.get("type") == "tool_result"]
+    assert [b["tool_use_id"] for b in placeholders] == [first_id]
+    assert placeholders[0]["is_error"] is True
+
+
+def test_orphan_function_response_with_no_prior_call_becomes_text() -> None:
+    # If a user turn carries a functionResponse for a tool the previous
+    # assistant turn never called, we must NOT emit a tool_result (Anthropic
+    # would 400). Preserve the payload as text so the model still sees it.
+    payload = {
+        "contents": [
+            {"role": "user", "parts": [{"text": "hi"}]},
+            {"role": "model", "parts": [{"text": "hello"}]},
+            {"role": "user", "parts": [_fn_response("ghost", {"value": 42})]},
+        ]
+    }
+
+    messages = translate.extract_history(payload)
+
+    assert messages[-1]["role"] == "user"
+    blocks = messages[-1]["content"]
+    assert not any(b.get("type") == "tool_result" for b in blocks)
+    assert any(b.get("type") == "text" and "ghost" in b.get("text", "") for b in blocks)
+
+
 def test_well_formed_history_is_unchanged() -> None:
     payload = {
         "contents": [
