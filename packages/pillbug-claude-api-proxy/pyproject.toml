@@ -1,0 +1,26 @@
+[project]
+name = "pillbug-claude-api-proxy"
+version = "0.1.0"
+description = "Gemini wire-format proxy that fronts Claude through the official Anthropic SDK with subscription OAuth"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "pillbug",
+    "anthropic>=0.40",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+]
+
+[project.scripts]
+pillbug-claude-api-proxy = "pillbug_claude_api_proxy.__main__:entrypoint"
+
+[build-system]
+requires = ["uv_build>=0.10.9,<0.11.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+pillbug = { workspace = true }
+
+[tool.uv.build-backend]
+module-name = "pillbug_claude_api_proxy"
+module-root = "src"

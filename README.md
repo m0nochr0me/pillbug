@@ -129,6 +129,7 @@ Workspace members under `packages/` are installed through uv extras and register
 | `trigger` | [pillbug-trigger](packages/pillbug-trigger) | HTTP ingress for external event sources with per-source prompt templates |
 | `dashboard` | [pillbug-dashboard](packages/pillbug-dashboard) | Operator dashboard service |
 | `genai_proxy` | [pillbug-genai-proxy](packages/pillbug-genai-proxy) | Gemini wire-format proxy that fronts any OpenAI-compatible chat completions endpoint |
+| `claude_api_proxy` | [pillbug-claude-api-proxy](packages/pillbug-claude-api-proxy) | Gemini wire-format proxy that fronts Claude through the Anthropic Messages API, billed against a Claude Pro/Max subscription via the Claude Code OAuth token |
 | `memory` | [pillbug-memory](packages/pillbug-memory) | Bundled flat-file Markdown memory store with five MCP tools, rooted in `workspace/memory/` |
 
 The `gmail` extra is a skill-side extra (not a workspace package): it installs the Google API client deps consumed by the bundled [skills/gmail](skills/gmail) workspace skill.
@@ -153,6 +154,10 @@ Most skills need their own credentials (Bluesky app password, Tavily API key, El
 ## OpenAI-compatible Backends
 
 Pillbug speaks the Gemini wire format directly, but the `pillbug-genai-proxy` extra ships a small FastAPI translator that exposes `POST /v1beta/models/{model}:generateContent` and forwards translated requests to an OpenAI-compatible upstream (llama.cpp, vLLM, LiteLLM, Ollama, etc.). Point the runtime at the proxy with `PB_GEMINI_BASE_URL` and keep the rest of the Gemini-first chat session, MCP tools, and AFC behavior unchanged. See [packages/pillbug-genai-proxy/README.md](packages/pillbug-genai-proxy/README.md) for the supported translation surface.
+
+## Claude (subscription-billed) Backend
+
+The `claude_api_proxy` extra ships a sibling FastAPI translator, `pillbug-claude-api-proxy`, that fronts Claude through the official [Anthropic Python SDK](https://github.com/anthropics/anthropic-sdk-python). Calls are billed against your **Claude Pro/Max subscription** via the Claude Code OAuth token (`claude setup-token`), not against Anthropic API credits. Same `PB_GEMINI_BASE_URL` switch — only the upstream changes. See [packages/pillbug-claude-api-proxy/README.md](packages/pillbug-claude-api-proxy/README.md) for the supported surface and the load-bearing system-prompt prefix the OAuth path requires.
 
 ## Limitations
 

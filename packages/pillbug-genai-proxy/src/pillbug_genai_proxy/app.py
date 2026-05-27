@@ -46,8 +46,8 @@ def build_app() -> FastAPI:
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
-    @app.post("/v1beta/models/{model}:generateContent")
-    @app.post("/v1/models/{model}:generateContent")
+    @app.post("/v1beta/models/{model:path}:generateContent")
+    @app.post("/v1/models/{model:path}:generateContent")
     async def generate_content(model: str, request: Request) -> JSONResponse:
         try:
             payload: Any = await request.json()
@@ -99,8 +99,8 @@ def build_app() -> FastAPI:
 
         return JSONResponse(content=openai_response_to_gemini(upstream_payload))
 
-    @app.post("/v1beta/models/{model}:streamGenerateContent")
-    @app.post("/v1/models/{model}:streamGenerateContent")
+    @app.post("/v1beta/models/{model:path}:streamGenerateContent")
+    @app.post("/v1/models/{model:path}:streamGenerateContent")
     async def stream_generate_content(model: str) -> PlainTextResponse:
         return PlainTextResponse(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,

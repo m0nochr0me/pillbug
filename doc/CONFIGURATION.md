@@ -35,7 +35,7 @@ Pillbug talks to Gemini through the `google-genai` SDK and selects a backend wit
 ### Developer backend (Google AI Studio / proxy)
 
 - `PB_GEMINI_API_KEY`: Required when `PB_GEMINI_BACKEND=developer`.
-- `PB_GEMINI_BASE_URL`: Optional override that redirects the SDK at a different `generateContent` endpoint. Only honored in `developer` mode. Use it to point Pillbug at the `pillbug-genai-proxy` translator so an OpenAI-compatible upstream (llama.cpp, vLLM, LiteLLM, Ollama) handles inference while the runtime keeps using the Gemini wire format.
+- `PB_GEMINI_BASE_URL`: Optional override that redirects the SDK at a different `generateContent` endpoint. Only honored in `developer` mode. Use it to point Pillbug at the `pillbug-genai-proxy` translator (for OpenAI-compatible local models — llama.cpp, vLLM, LiteLLM, Ollama) or the `pillbug-claude-api-proxy` translator (for subscription-billed Claude through the Anthropic Messages API).
 
 OpenAI-compatible local model example:
 
@@ -47,6 +47,17 @@ PB_GEMINI_MODEL=gemma-3-12b
 ```
 
 The proxy itself is a separate service configured through `PB_GENAI_PROXY_*` variables — see [packages/pillbug-genai-proxy/README.md](../packages/pillbug-genai-proxy/README.md).
+
+Claude (subscription-billed) example:
+
+```bash
+PB_GEMINI_BACKEND=developer
+PB_GEMINI_API_KEY=dummy
+PB_GEMINI_BASE_URL=http://127.0.0.1:9033
+PB_GEMINI_MODEL=claude-sonnet-4-6
+```
+
+The Claude proxy is a separate service configured through `PB_CLAUDE_API_PROXY_*` variables — see [packages/pillbug-claude-api-proxy/README.md](../packages/pillbug-claude-api-proxy/README.md). The host running the proxy must export a Claude Code OAuth token (`CLAUDE_CODE_OAUTH_TOKEN`, minted once via `claude setup-token`) tied to a Claude Pro/Max subscription.
 
 ### Vertex backend
 

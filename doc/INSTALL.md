@@ -40,6 +40,7 @@ uv sync --extra websocket
 uv sync --extra trigger
 uv sync --extra dashboard
 uv sync --extra genai_proxy
+uv sync --extra claude_api_proxy
 ```
 
 Combine extras when more than one integration is needed, for example:
@@ -49,6 +50,8 @@ uv sync --extra telegram,matrix,trigger,websocket
 ```
 
 The `genai_proxy` extra installs the `pillbug-genai-proxy` console script, a FastAPI translator that exposes the Gemini wire format on top of any OpenAI-compatible chat completions endpoint (llama.cpp, vLLM, LiteLLM, Ollama). Once it is running, point the Pillbug runtime at it with `PB_GEMINI_BASE_URL` instead of hitting the Google Gemini API. See [packages/pillbug-genai-proxy/README.md](../packages/pillbug-genai-proxy/README.md).
+
+The `claude_api_proxy` extra installs the sibling `pillbug-claude-api-proxy` console script. Same Gemini wire-format entry, but upstream calls go through the official [Anthropic Python SDK](https://github.com/anthropics/anthropic-sdk-python) and are **billed against your Claude Pro/Max subscription** via the Claude Code OAuth token. Mint a token once with `claude setup-token` and export it as `CLAUDE_CODE_OAUTH_TOKEN` (or `PB_CLAUDE_API_PROXY_OAUTH_TOKEN`) on the proxy host. Point Pillbug at the proxy by setting `PB_GEMINI_BASE_URL`. See [packages/pillbug-claude-api-proxy/README.md](../packages/pillbug-claude-api-proxy/README.md).
 
 ## For Agents
 
