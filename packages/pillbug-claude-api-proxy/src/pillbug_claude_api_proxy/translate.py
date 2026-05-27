@@ -80,18 +80,19 @@ def _inline_image_block(inline_data: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _parts_to_blocks(
-    parts: list[Any], *, pending_calls: list[dict[str, str]], counter: list[int]
+_FILE_DATA_PLACEHOLDER = {
+    "type": "text",
+    "text": "[File reference dropped: file uploads not supported by Claude API proxy]",
+}
+
+
+def _model_parts_to_blocks(
+    parts: list[Any], *, emitted_calls: dict[str, list[str]], counter: list[int]
 ) -> list[dict[str, Any]]:
-    """Convert Gemini parts of one content entry into Anthropic content blocks.
-
-    `pending_calls` and `counter` are shared across the whole transcript so
-    `functionResponse` parts can be linked back to the matching `functionCall`
-    by name (Gemini lacks the call id Anthropic requires).
-    """
-
+    # Walk an assistant turn's parts. `emitted_calls` is populated in-place with
+    # `name -> [tool_id, ...]` (FIFO) so the next user turn can pair its
+    # functionResponses against THIS turn's tool_use ids only.
     blocks: list[dict[str, Any]] = []
-
     for part in parts:
         if not isinstance(part, dict):
             continue
@@ -114,45 +115,79 @@ def _parts_to_blocks(
             args = function_call.get("args") or {}
             counter[0] += 1
             tool_id = f"toolu_{counter[0]:08d}"
-            pending_calls.append({"id": tool_id, "name": name})
+            emitted_calls.setdefault(name, []).append(tool_id)
             blocks.append({"type": "tool_use", "id": tool_id, "name": name, "input": args})
+            continue
+
+        file_data = _pick(part, "fileData", "file_data")
+        if isinstance(file_data, dict):
+            blocks.append(dict(_FILE_DATA_PLACEHOLDER))
+
+    return blocks
+
+
+def _user_parts_to_blocks(parts: list[Any], *, prev_calls: dict[str, list[str]]) -> list[dict[str, Any]]:
+    # Walk a user turn's parts. functionResponses are paired against `prev_calls`
+    # (mutated in-place; popped FIFO by name) — i.e. only against tool_use ids
+    # emitted by the IMMEDIATELY preceding assistant turn. Gemini's wire format
+    # lacks the call id Anthropic requires, but Gemini's own convention pairs
+    # turn-locally; matching against a global pending list lets a stale orphan
+    # for the same tool name steal a fresh response's id and produce a
+    # tool_result whose `tool_use_id` lives many turns back.
+    blocks: list[dict[str, Any]] = []
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+
+        text = part.get("text")
+        if isinstance(text, str):
+            blocks.append({"type": "text", "text": text})
+            continue
+
+        inline_data = _pick(part, "inlineData", "inline_data")
+        if isinstance(inline_data, dict):
+            block = _inline_image_block(inline_data)
+            if block is not None:
+                blocks.append(block)
             continue
 
         function_response = _pick(part, "functionResponse", "function_response")
         if isinstance(function_response, dict):
             name = function_response.get("name", "")
             response_payload = function_response.get("response", function_response)
-            matched_id: str | None = None
-            for index, pending in enumerate(pending_calls):
-                if pending["name"] == name:
-                    matched_id = pending["id"]
-                    pending_calls.pop(index)
-                    break
-            if matched_id is None:
-                counter[0] += 1
-                matched_id = f"toolu_{counter[0]:08d}"
             content_text = (
                 response_payload
                 if isinstance(response_payload, str)
                 else json.dumps(response_payload, ensure_ascii=False)
             )
-            blocks.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": matched_id,
-                    "content": [{"type": "text", "text": content_text}],
-                }
-            )
+            bucket = prev_calls.get(name)
+            if bucket:
+                matched_id = bucket.pop(0)
+                if not bucket:
+                    prev_calls.pop(name, None)
+                blocks.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": matched_id,
+                        "content": [{"type": "text", "text": content_text}],
+                    }
+                )
+            else:
+                # Orphan functionResponse with no matching tool_use in the prior
+                # assistant turn — preserve the payload as plain text so the
+                # model still sees the data, rather than emit an invalid
+                # tool_result that Anthropic would reject.
+                blocks.append(
+                    {
+                        "type": "text",
+                        "text": f"[Orphan tool response for {name!r}: {content_text}]",
+                    }
+                )
             continue
 
         file_data = _pick(part, "fileData", "file_data")
         if isinstance(file_data, dict):
-            blocks.append(
-                {
-                    "type": "text",
-                    "text": "[File reference dropped: file uploads not supported by Claude API proxy]",
-                }
-            )
+            blocks.append(dict(_FILE_DATA_PLACEHOLDER))
 
     return blocks
 
@@ -164,8 +199,8 @@ def extract_history(payload: dict[str, Any]) -> list[dict[str, Any]]:
     if isinstance(contents, dict):
         contents = [contents]
 
-    pending_calls: list[dict[str, str]] = []
     counter = [0]
+    prev_calls: dict[str, list[str]] = {}
     messages: list[dict[str, Any]] = []
 
     for entry in contents:
@@ -174,10 +209,23 @@ def extract_history(payload: dict[str, Any]) -> list[dict[str, Any]]:
         parts = entry.get("parts") or []
         if not isinstance(parts, list):
             continue
-        blocks = _parts_to_blocks(parts, pending_calls=pending_calls, counter=counter)
-        if not blocks:
-            continue
-        messages.append({"role": _gemini_role_to_anthropic(entry.get("role")), "content": blocks})
+        role = _gemini_role_to_anthropic(entry.get("role"))
+        if role == "assistant":
+            emitted: dict[str, list[str]] = {}
+            blocks = _model_parts_to_blocks(parts, emitted_calls=emitted, counter=counter)
+            if not blocks:
+                continue
+            messages.append({"role": "assistant", "content": blocks})
+            prev_calls = emitted
+        else:
+            blocks = _user_parts_to_blocks(parts, prev_calls=prev_calls)
+            # Any unconsumed entries in prev_calls are orphan tool_use ids whose
+            # follow-up never arrived; `_repair_tool_result_pairing` synthesizes
+            # placeholders for them below.
+            prev_calls = {}
+            if not blocks:
+                continue
+            messages.append({"role": "user", "content": blocks})
 
     return _repair_tool_result_pairing(messages)
 
