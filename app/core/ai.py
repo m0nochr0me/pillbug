@@ -63,6 +63,9 @@ _EMPTY_MODEL_RESPONSE_FALLBACK_PROMPT_NAME = "empty_model_response_fallback.prom
 _EMPTY_RESPONSE_NUDGE_PROMPT_NAME = "empty_response_nudge.prompt.md"
 _MODEL_INPUT_PROMPT_NAME = "model_input.prompt.md"
 _SKILLS_PROMPT_NAME = "skills.prompt.md"
+_UNKNOWN_TOOL_NUDGE_PROMPT_NAME = "unknown_tool_nudge.prompt.md"
+# Max distinct hallucinated tool names to re-prompt past in a single send before giving up.
+_UNKNOWN_TOOL_MAX_NUDGES = 2
 _CHANNEL_MEMO_PROMPTS = {"a2a": "a2a_channel_memo.prompt.md", "telegram": "telegram_channel_memo.prompt.md"}
 _DIRECT_REPLY_CHANNEL_EXCLUSIONS = frozenset({"a2a", "trigger"})
 _TODO_STATUS_LABELS = {
@@ -831,6 +834,79 @@ class GeminiChatSession:
                 history=cast("list[types.ContentOrDict] | None", sanitized_history),
             )
             return await self._chat.send_message(message=message, config=config)
+        except KeyError as exc:
+            # google-genai AFC crashes with a bare KeyError when the model emits a functionCall
+            # whose name isn't in the declared tool set (a hallucinated tool — common with the
+            # local models behind pillbug-genai-proxy). The failed turn is not recorded in chat
+            # history, so we re-send the same message with a note naming the missing tool and the
+            # tools that actually exist, letting the model answer or pick a real tool instead.
+            return await self._recover_from_unknown_tool_call(exc, message=message, config=config)
+
+    @staticmethod
+    def _unknown_tool_name(error: KeyError) -> str | None:
+        if error.args and isinstance(error.args[0], str):
+            return error.args[0]
+        return None
+
+    @staticmethod
+    def _normalize_message_to_parts(message: Any) -> list[types.Part]:
+        if isinstance(message, list):
+            return list(message)
+        if isinstance(message, str):
+            return [types.Part.from_text(text=message)]
+        return [message]
+
+    async def _list_available_tool_names(self) -> list[str]:
+        try:
+            mcp_client = await self._ensure_mcp_client_open()
+            tools = await mcp_client.list_tools()
+        except Exception:
+            logger.exception(f"Failed to list MCP tools for session={self._session_id}")
+            return []
+        return [tool.name for tool in tools if getattr(tool, "name", None)]
+
+    def _build_unknown_tool_message(
+        self,
+        message: Any,
+        tool_name: str,
+        available_tools: list[str],
+    ) -> list[types.Part]:
+        note = self._service.render_required_prompt_text(
+            _UNKNOWN_TOOL_NUDGE_PROMPT_NAME,
+            tool_name=tool_name,
+            available_tools=", ".join(sorted(available_tools)),
+        )
+        return [*self._normalize_message_to_parts(message), types.Part.from_text(text=note)]
+
+    async def _recover_from_unknown_tool_call(
+        self,
+        error: KeyError,
+        *,
+        message: Any,
+        config: types.GenerateContentConfig,
+    ) -> Any:
+        tool_name = self._unknown_tool_name(error)
+        if tool_name is None:
+            raise error
+
+        attempted: set[str] = set()
+        current_message: Any = message
+        last_error: KeyError = error
+        while tool_name is not None and tool_name not in attempted and len(attempted) < _UNKNOWN_TOOL_MAX_NUDGES:
+            attempted.add(tool_name)
+            available_tools = await self._list_available_tool_names()
+            logger.warning(
+                f"Model called unavailable tool {tool_name!r} for session={self._session_id}; "
+                f"re-prompting with {len(available_tools)} available tool(s)"
+            )
+            current_message = self._build_unknown_tool_message(current_message, tool_name, available_tools)
+            try:
+                return await self._chat.send_message(message=current_message, config=config)
+            except KeyError as retry_error:
+                last_error = retry_error
+                tool_name = self._unknown_tool_name(retry_error)
+
+        raise last_error
 
     async def _persist_history(self) -> None:
         try:
