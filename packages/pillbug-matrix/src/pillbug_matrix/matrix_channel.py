@@ -18,6 +18,7 @@ from nio import (
     RoomMessageImage,
     RoomMessageText,
     RoomMessageVideo,
+    RoomRedactError,
     RoomSendError,
     SyncError,
     SyncResponse,
@@ -40,6 +41,7 @@ _TRANSIENT_LOG_COOLDOWN_SECONDS = 60.0
 _TYPING_INTERVAL_SECONDS = 25.0
 _TYPING_TIMEOUT_MS = 30000
 _MAX_TYPING_ACTIONS = 10
+_PRESENCE_REACTION_KEY = "🤔"
 _FILE_UPLOAD_TIMEOUT_SECONDS = 120.0
 
 _MESSAGE_EVENT_TYPES = (RoomMessageText, RoomMessageImage, RoomMessageAudio, RoomMessageVideo, RoomMessageFile)
@@ -242,6 +244,7 @@ class MatrixChannelSettings(BaseSettings):
     sync_timeout_ms: int = 30000
     reply_to_message: bool = True
     reply_in_thread: bool = False
+    reaction_presence: bool = False
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -433,6 +436,16 @@ class MatrixChannel(BaseChannel):
             yield
             return
 
+        if self._settings.reaction_presence:
+            target_event_id = str(inbound_message.metadata.get("matrix_event_id", "")).strip() or None
+            reaction_event_id = await self._send_reaction(room_id, target_event_id) if target_event_id else None
+            try:
+                yield
+            finally:
+                if reaction_event_id:
+                    await self._redact_event(room_id, reaction_event_id)
+            return
+
         typing_task = asyncio.create_task(
             self._send_typing_presence(room_id),
             name=f"matrix-typing:{room_id}",
@@ -614,6 +627,50 @@ class MatrixChannel(BaseChannel):
                     room_id=room_id,
                     suppression_key=f"send_attachment:{room_id}:{file_path.name}",
                 )
+
+    @staticmethod
+    def _build_reaction_content(target_event_id: str, key: str) -> dict[str, object]:
+        return {
+            "m.relates_to": {
+                "rel_type": "m.annotation",
+                "event_id": target_event_id,
+                "key": key,
+            }
+        }
+
+    async def _send_reaction(self, room_id: str, target_event_id: str) -> str | None:
+        try:
+            response = await self._client.room_send(
+                room_id=room_id,
+                message_type="m.reaction",
+                content=self._build_reaction_content(target_event_id, _PRESENCE_REACTION_KEY),
+            )
+        except Exception as exc:
+            self._log_matrix_failure(
+                action="reaction send failed",
+                exc=exc,
+                room_id=room_id,
+                suppression_key=f"reaction:{room_id}",
+            )
+            return None
+        if isinstance(response, RoomSendError):
+            logger.error(f"Matrix reaction send failed room_id={room_id}: {response.message}")
+            return None
+        return getattr(response, "event_id", None)
+
+    async def _redact_event(self, room_id: str, event_id: str) -> None:
+        try:
+            response = await self._client.room_redact(room_id, event_id)
+        except Exception as exc:
+            self._log_matrix_failure(
+                action="reaction redact failed",
+                exc=exc,
+                room_id=room_id,
+                suppression_key=f"redact:{room_id}",
+            )
+            return
+        if isinstance(response, RoomRedactError):
+            logger.error(f"Matrix reaction redact failed room_id={room_id}: {response.message}")
 
     async def _send_typing_presence(self, room_id: str) -> None:
         for attempt in range(_MAX_TYPING_ACTIONS):
