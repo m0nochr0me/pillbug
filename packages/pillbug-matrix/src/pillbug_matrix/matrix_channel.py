@@ -128,6 +128,50 @@ def _resolve_attachment_path(attachment: OutboundAttachment) -> Path:
     return settings.WORKSPACE_ROOT / raw_path
 
 
+# Matrix room IDs and v1/v2 event IDs both contain ':', so we cannot reuse Slack's colon
+# separator. '|' is not part of any Matrix sigil grammar (`!`, `$`, `#`, `@`).
+_CONVERSATION_ID_SEPARATOR = "|"
+
+
+def _parse_conversation_id(conversation_id: str) -> tuple[str, str | None]:
+    """Split conversation_id into (room_id, thread_root_event_id)."""
+    room_id, separator, thread_root_event_id = conversation_id.partition(_CONVERSATION_ID_SEPARATOR)
+    room_id = room_id.strip()
+    if not room_id:
+        raise ValueError("Matrix conversation_id (room_id) must not be empty")
+
+    if not separator:
+        return room_id, None
+
+    normalized = thread_root_event_id.strip()
+    return room_id, normalized or None
+
+
+def _build_conversation_id(room_id: str, thread_root_event_id: str | None) -> str:
+    if thread_root_event_id:
+        return f"{room_id}{_CONVERSATION_ID_SEPARATOR}{thread_root_event_id}"
+    return room_id
+
+
+def _extract_thread_root(event: object) -> str | None:
+    """Return the thread root event_id when the event is part of an existing m.thread relation."""
+    source = getattr(event, "source", None)
+    if not isinstance(source, dict):
+        return None
+    content = source.get("content")
+    if not isinstance(content, dict):
+        return None
+    relates_to = content.get("m.relates_to")
+    if not isinstance(relates_to, dict):
+        return None
+    if relates_to.get("rel_type") != "m.thread":
+        return None
+    event_id = relates_to.get("event_id")
+    if isinstance(event_id, str) and event_id.strip():
+        return event_id.strip()
+    return None
+
+
 def _generate_mock_waveform(num_samples: int = 64) -> list[int]:
     return [random.randint(200, 900) for _ in range(num_samples)]
 
@@ -197,6 +241,7 @@ class MatrixChannelSettings(BaseSettings):
     allowed_room_ids: Annotated[list[str] | None, NoDecode] = None
     sync_timeout_ms: int = 30000
     reply_to_message: bool = True
+    reply_in_thread: bool = False
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -321,8 +366,6 @@ class MatrixChannel(BaseChannel):
                     if self._allowed_room_ids and room_id not in self._allowed_room_ids:
                         continue
 
-                    register_channel_conversation(self.name, room_id)
-
                     for event in room_info.timeline.events:
                         if event.sender == self._settings.user_id:
                             continue
@@ -341,14 +384,21 @@ class MatrixChannel(BaseChannel):
         attachments: tuple[OutboundAttachment, ...] | None = None,
     ) -> None:
         del metadata
-        room_id = conversation_id.strip()
-        if not room_id:
-            raise ValueError("Matrix conversation_id (room_id) must not be empty")
+        room_id, thread_root_event_id = _parse_conversation_id(conversation_id)
 
         if message_text.strip():
-            await self._send_text(room_id=room_id, text=message_text)
+            await self._send_text(
+                room_id=room_id,
+                text=message_text,
+                thread_root_event_id=thread_root_event_id,
+                reply_to_event_id=thread_root_event_id,
+            )
         if attachments:
-            await self._send_attachments(room_id=room_id, attachments=attachments)
+            await self._send_attachments(
+                room_id=room_id,
+                attachments=attachments,
+                thread_root_event_id=thread_root_event_id,
+            )
 
     async def send_response(
         self,
@@ -356,19 +406,29 @@ class MatrixChannel(BaseChannel):
         response_text: str,
         attachments: tuple[OutboundAttachment, ...] | None = None,
     ) -> None:
-        room_id = str(inbound_message.metadata.get("matrix_room_id") or inbound_message.conversation_id).strip()
+        room_id = self._room_id_from_inbound(inbound_message)
         if not room_id:
             raise ValueError("Cannot determine Matrix room_id from inbound message")
 
         reply_to_event_id = str(inbound_message.metadata.get("matrix_event_id", "")).strip() or None
+        thread_root_event_id = self._thread_root_from_inbound(inbound_message)
 
-        await self._send_text(room_id=room_id, text=response_text, reply_to_event_id=reply_to_event_id)
+        await self._send_text(
+            room_id=room_id,
+            text=response_text,
+            thread_root_event_id=thread_root_event_id,
+            reply_to_event_id=reply_to_event_id,
+        )
         if attachments:
-            await self._send_attachments(room_id=room_id, attachments=attachments)
+            await self._send_attachments(
+                room_id=room_id,
+                attachments=attachments,
+                thread_root_event_id=thread_root_event_id,
+            )
 
     @asynccontextmanager
     async def response_presence(self, inbound_message: InboundMessage) -> AsyncIterator[None]:
-        room_id = str(inbound_message.metadata.get("matrix_room_id") or inbound_message.conversation_id).strip()
+        room_id = self._room_id_from_inbound(inbound_message)
         if not room_id:
             yield
             return
@@ -399,6 +459,7 @@ class MatrixChannel(BaseChannel):
         *,
         room_id: str,
         text: str,
+        thread_root_event_id: str | None = None,
         reply_to_event_id: str | None = None,
     ) -> None:
         for index, chunk in enumerate(_chunk_message(text)):
@@ -409,12 +470,13 @@ class MatrixChannel(BaseChannel):
                 "formatted_body": _render_markdown_html(chunk),
             }
 
-            if index == 0 and reply_to_event_id and self._settings.reply_to_message:
-                content["m.relates_to"] = {
-                    "m.in_reply_to": {
-                        "event_id": reply_to_event_id,
-                    },
-                }
+            if index == 0:
+                relates_to = self._build_relates_to(
+                    thread_root_event_id=thread_root_event_id,
+                    reply_to_event_id=reply_to_event_id,
+                )
+                if relates_to:
+                    content["m.relates_to"] = relates_to
 
             response = await self._client.room_send(
                 room_id=room_id,
@@ -424,11 +486,50 @@ class MatrixChannel(BaseChannel):
             if isinstance(response, RoomSendError):
                 logger.error(f"Matrix send failed room_id={room_id}: {response.message}")
 
+    def _build_relates_to(
+        self,
+        *,
+        thread_root_event_id: str | None,
+        reply_to_event_id: str | None,
+    ) -> dict[str, object] | None:
+        if thread_root_event_id:
+            in_reply_to_event_id = reply_to_event_id or thread_root_event_id
+            return {
+                "rel_type": "m.thread",
+                "event_id": thread_root_event_id,
+                "is_falling_back": True,
+                "m.in_reply_to": {"event_id": in_reply_to_event_id},
+            }
+        if reply_to_event_id and self._settings.reply_to_message:
+            return {"m.in_reply_to": {"event_id": reply_to_event_id}}
+        return None
+
+    def _room_id_from_inbound(self, inbound_message: InboundMessage) -> str | None:
+        metadata_room = inbound_message.metadata.get("matrix_room_id")
+        if isinstance(metadata_room, str) and metadata_room.strip():
+            return metadata_room.strip()
+        try:
+            room_id, _thread_root = _parse_conversation_id(inbound_message.conversation_id)
+        except ValueError:
+            return None
+        return room_id
+
+    def _thread_root_from_inbound(self, inbound_message: InboundMessage) -> str | None:
+        metadata_root = inbound_message.metadata.get("matrix_thread_root_event_id")
+        if isinstance(metadata_root, str) and metadata_root.strip():
+            return metadata_root.strip()
+        try:
+            _room_id, thread_root = _parse_conversation_id(inbound_message.conversation_id)
+        except ValueError:
+            return None
+        return thread_root
+
     async def _send_attachments(
         self,
         *,
         room_id: str,
         attachments: tuple[OutboundAttachment, ...],
+        thread_root_event_id: str | None = None,
     ) -> None:
         for attachment in attachments:
             file_path = _resolve_attachment_path(attachment)
@@ -474,6 +575,14 @@ class MatrixChannel(BaseChannel):
                     "url": content_uri,
                     "info": info,
                 }
+
+                if thread_root_event_id:
+                    content["m.relates_to"] = {
+                        "rel_type": "m.thread",
+                        "event_id": thread_root_event_id,
+                        "is_falling_back": True,
+                        "m.in_reply_to": {"event_id": thread_root_event_id},
+                    }
 
                 if is_voice_message:
                     audio_block: dict[str, object] = {"waveform": _generate_mock_waveform()}
@@ -527,6 +636,13 @@ class MatrixChannel(BaseChannel):
         if not isinstance(event, _MESSAGE_EVENT_TYPES):
             return None
 
+        thread_root_event_id: str | None = None
+        if self._settings.reply_in_thread:
+            thread_root_event_id = _extract_thread_root(event) or event.event_id
+
+        conversation_id = _build_conversation_id(room_id, thread_root_event_id)
+        register_channel_conversation(self.name, conversation_id)
+
         message_text = ""
         metadata: dict[str, object] = {
             "source": "matrix",
@@ -534,6 +650,7 @@ class MatrixChannel(BaseChannel):
             "matrix_event_id": event.event_id,
             "matrix_sender": event.sender,
             "matrix_server_timestamp": event.server_timestamp,
+            "matrix_thread_root_event_id": thread_root_event_id,
         }
 
         if isinstance(event, RoomMessageText):
@@ -553,7 +670,7 @@ class MatrixChannel(BaseChannel):
 
         return InboundMessage(
             channel_name=self.name,
-            conversation_id=room_id,
+            conversation_id=conversation_id,
             user_id=event.sender,
             text=message_text,
             metadata=metadata,

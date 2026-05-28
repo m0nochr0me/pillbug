@@ -54,7 +54,8 @@ Add `--format json` if you want JSON output instead of shell exports.
 | `PB_MATRIX_DEVICE_ID` | no | unset | Optional device ID to reuse for the runtime client. |
 | `PB_MATRIX_ALLOWED_ROOM_IDS` | no | unset | Comma-separated allowlist of room IDs. |
 | `PB_MATRIX_SYNC_TIMEOUT_MS` | no | `30000` | `/sync` long-poll timeout in milliseconds. |
-| `PB_MATRIX_REPLY_TO_MESSAGE` | no | `true` | Adds `m.in_reply_to` metadata when replying to inbound messages. |
+| `PB_MATRIX_REPLY_TO_MESSAGE` | no | `true` | Adds `m.in_reply_to` metadata when replying to inbound messages (non-threaded path only). |
+| `PB_MATRIX_REPLY_IN_THREAD` | no | `false` | When enabled, the agent treats each Matrix thread as its own Pillbug session and replies inside that thread. Top-level (non-threaded) messages start a fresh thread rooted at the inbound event, so each thread becomes a separate LLM history. Useful for shared rooms; for 1:1 rooms leave disabled. |
 
 ## Runtime behavior
 
@@ -69,6 +70,7 @@ The channel currently behaves as follows:
 - Outbound `.ogg` files are always sent as `m.audio` with the MSC3245 voice-message markers (`org.matrix.msc3245.voice`, `org.matrix.msc1767.audio`, `org.matrix.msc1767.file`, `org.matrix.msc1767.text`) and the audio duration in milliseconds so clients like Element (web and mobile) render them as voice messages.
 - While Pillbug is generating a response, the plugin sends Matrix typing notifications.
 - Long outbound replies are chunked into 4000-character messages for readability.
+- When `PB_MATRIX_REPLY_IN_THREAD` is enabled the conversation id becomes `<room_id>:<thread_root_event_id>` so each Matrix thread maps to a distinct Pillbug session, and outbound messages carry an `m.relates_to` block with `rel_type: m.thread` plus a falling-back `m.in_reply_to` so Matrix clients that do not understand threads still render the reply as a normal reply.
 - Outbound text is sent as both a plaintext `body` (CommonMark source) and an HTML `formatted_body` rendered with `markdown-it-py` (`org.matrix.custom.html`), so Markdown features such as bold, italics, code blocks, lists, and links render in Matrix clients that support HTML. Chunking happens on the raw Markdown before rendering, so a single fenced block split across chunks may render with a partially closed code block in the affected chunks.
 
 ## Notes
