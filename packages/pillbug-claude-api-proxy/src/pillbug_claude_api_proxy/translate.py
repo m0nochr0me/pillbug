@@ -10,16 +10,14 @@ verbatim as structured Anthropic blocks, so no transcript-in-system-prompt
 bridge and no pseudo-XML scrubbing are needed.
 """
 
-from __future__ import annotations
-
 import json
 from typing import Any
 
 __all__ = (
-    "extract_system_text",
-    "extract_history",
-    "extract_tool_decls",
     "extract_generation_config",
+    "extract_history",
+    "extract_system_text",
+    "extract_tool_decls",
     "message_to_gemini_response",
 )
 
@@ -397,6 +395,12 @@ def extract_generation_config(payload: dict[str, Any]) -> dict[str, Any]:
         cleaned = [s for s in stop_sequences if isinstance(s, str) and s]
         if cleaned:
             out["stop_sequences"] = cleaned
+
+    # Claude 4+ models reject requests that set both temperature and top_p
+    # (HTTP 400). Gemini permits both, so when an operator configures both
+    # (PB_GEMINI_TEMPERATURE + PB_GEMINI_TOP_P) keep temperature and drop top_p.
+    if "temperature" in out and "top_p" in out:
+        del out["top_p"]
 
     return out
 

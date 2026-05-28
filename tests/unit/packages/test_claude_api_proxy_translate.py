@@ -161,6 +161,19 @@ def test_orphan_function_response_with_no_prior_call_becomes_text() -> None:
     assert any(b.get("type") == "text" and "ghost" in b.get("text", "") for b in blocks)
 
 
+def test_generation_config_drops_top_p_when_temperature_also_set() -> None:
+    # Claude 4+ models 400 if both temperature and top_p are present. Gemini
+    # allows both, so the translator must reconcile to at most one.
+    out = translate.extract_generation_config({"generationConfig": {"temperature": 0.7, "topP": 0.9}})
+    assert out["temperature"] == 0.7
+    assert "top_p" not in out
+
+
+def test_generation_config_keeps_top_p_when_temperature_absent() -> None:
+    out = translate.extract_generation_config({"generationConfig": {"topP": 0.9}})
+    assert out == {"top_p": 0.9}
+
+
 def test_well_formed_history_is_unchanged() -> None:
     payload = {
         "contents": [
