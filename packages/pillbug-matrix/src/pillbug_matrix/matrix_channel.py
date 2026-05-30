@@ -389,18 +389,27 @@ class MatrixChannel(BaseChannel):
         del metadata
         room_id, thread_root_event_id = _parse_conversation_id(conversation_id)
 
+        # Proactive sends (scheduled tasks, operator pushes) reuse a conversation_id whose
+        # thread root was captured from an earlier inbound message. Appending to that stale
+        # thread is wrong, so when threading is enabled we start a fresh thread rooted at this
+        # message instead of honoring the embedded thread root.
+        start_new_thread = self._settings.reply_in_thread
+        new_thread_root: str | None = None
+
         if message_text.strip():
-            await self._send_text(
+            new_thread_root = await self._send_text(
                 room_id=room_id,
                 text=message_text,
                 thread_root_event_id=thread_root_event_id,
                 reply_to_event_id=thread_root_event_id,
+                start_new_thread=start_new_thread,
             )
         if attachments:
             await self._send_attachments(
                 room_id=room_id,
                 attachments=attachments,
-                thread_root_event_id=thread_root_event_id,
+                thread_root_event_id=new_thread_root if start_new_thread else thread_root_event_id,
+                start_new_thread=start_new_thread and new_thread_root is None,
             )
 
     async def send_response(
@@ -474,7 +483,16 @@ class MatrixChannel(BaseChannel):
         text: str,
         thread_root_event_id: str | None = None,
         reply_to_event_id: str | None = None,
-    ) -> None:
+        start_new_thread: bool = False,
+    ) -> str | None:
+        """Send ``text`` as one or more chunks, returning the first event_id sent.
+
+        When ``start_new_thread`` is set the first chunk is sent top-level to root a new
+        thread and later chunks thread under it, so a chunked proactive message stays in
+        one self-contained thread instead of leaking onto the main timeline.
+        """
+        new_thread_root: str | None = None
+        first_event_id: str | None = None
         for index, chunk in enumerate(_chunk_message(text)):
             content: dict[str, object] = {
                 "msgtype": "m.text",
@@ -483,13 +501,25 @@ class MatrixChannel(BaseChannel):
                 "formatted_body": _render_markdown_html(chunk),
             }
 
-            if index == 0:
+            if start_new_thread:
+                relates_to = (
+                    self._build_relates_to(
+                        thread_root_event_id=new_thread_root,
+                        reply_to_event_id=new_thread_root,
+                    )
+                    if new_thread_root
+                    else None
+                )
+            elif index == 0:
                 relates_to = self._build_relates_to(
                     thread_root_event_id=thread_root_event_id,
                     reply_to_event_id=reply_to_event_id,
                 )
-                if relates_to:
-                    content["m.relates_to"] = relates_to
+            else:
+                relates_to = None
+
+            if relates_to:
+                content["m.relates_to"] = relates_to
 
             response = await self._client.room_send(
                 room_id=room_id,
@@ -498,6 +528,15 @@ class MatrixChannel(BaseChannel):
             )
             if isinstance(response, RoomSendError):
                 logger.error(f"Matrix send failed room_id={room_id}: {response.message}")
+                continue
+
+            event_id = getattr(response, "event_id", None)
+            if first_event_id is None:
+                first_event_id = event_id
+            if start_new_thread and new_thread_root is None and event_id:
+                new_thread_root = event_id
+
+        return first_event_id
 
     def _build_relates_to(
         self,
@@ -543,7 +582,11 @@ class MatrixChannel(BaseChannel):
         room_id: str,
         attachments: tuple[OutboundAttachment, ...],
         thread_root_event_id: str | None = None,
+        start_new_thread: bool = False,
     ) -> None:
+        # When ``start_new_thread`` is set the first attachment is sent top-level to root a
+        # new thread, then ``thread_root`` is updated so the rest thread under it.
+        thread_root = thread_root_event_id
         for attachment in attachments:
             file_path = _resolve_attachment_path(attachment)
             if not await asyncio.to_thread(file_path.is_file):
@@ -589,12 +632,12 @@ class MatrixChannel(BaseChannel):
                     "info": info,
                 }
 
-                if thread_root_event_id:
+                if thread_root:
                     content["m.relates_to"] = {
                         "rel_type": "m.thread",
-                        "event_id": thread_root_event_id,
+                        "event_id": thread_root,
                         "is_falling_back": True,
-                        "m.in_reply_to": {"event_id": thread_root_event_id},
+                        "m.in_reply_to": {"event_id": thread_root},
                     }
 
                 if is_voice_message:
@@ -620,6 +663,8 @@ class MatrixChannel(BaseChannel):
                     logger.error(f"Matrix attachment send failed room_id={room_id}: {response.message}")
                 else:
                     logger.info(f"Sent Matrix attachment room_id={room_id} msgtype={msgtype} path={file_path.name}")
+                    if start_new_thread and thread_root is None:
+                        thread_root = getattr(response, "event_id", None)
             except Exception as exc:
                 self._log_matrix_failure(
                     action="attachment send failed",
