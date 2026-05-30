@@ -1508,6 +1508,7 @@ source = { editable = "packages/pillbug-claude-api-proxy" }
 dependencies = [
     { name = "anthropic" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "pillbug" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -1516,6 +1517,7 @@ dependencies = [
 requires-dist = [
     { name = "anthropic", specifier = ">=0.40" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "pillbug", editable = "." },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]

@@ -67,6 +67,15 @@ The `anthropic-beta: oauth-2025-04-20` header — frequently cited in community 
 
 None of this is documented by Anthropic; treat the OAuth-as-third-party-API path as unofficial.
 
+## Audio input
+
+Claude has no native audio modality — the Anthropic Messages API has no audio content block (current models accept only text and image input). Pillbug forwards voice notes as Gemini `inlineData` audio parts, so the proxy rewrites them before history translation. `PB_CLAUDE_API_PROXY_AUDIO_MODE` controls how:
+
+- `placeholder` (default): each audio part becomes a short text note so the model knows a voice message arrived but was not transcribed. No API key required.
+- `elevenlabs`: inline audio is transcribed via [ElevenLabs Scribe](https://elevenlabs.io/docs/api-reference/speech-to-text/convert) (`model_id=scribe_v2`) and replaced with the transcript text. Any failure (no key, API error, empty result) falls back to the placeholder.
+
+The ElevenLabs key resolves the same way as the `text-to-speech` skill: the Docker/Kubernetes secret file `/run/secrets/elevenlabs_api_key` first, then the `ELEVENLABS_API_KEY` environment variable. Transcripts are cached by audio content hash, so the same clip re-sent across conversation turns is billed only once. Only inline audio (≤8 MiB, sent as `Part.from_bytes`) can be transcribed; larger files arrive as a Gemini file URI the proxy cannot fetch and always become a placeholder.
+
 ## Coverage
 
 Translates the subset of the Gemini wire format Pillbug actually sends:
@@ -94,4 +103,8 @@ Out of scope:
 | `PB_CLAUDE_API_PROXY_OAUTH_TOKEN` | (empty) | Bearer OAuth token from `claude setup-token`. Falls back to `CLAUDE_CODE_OAUTH_TOKEN`. |
 | `PB_CLAUDE_API_PROXY_CLAUDE_CODE_SYSTEM_PREFIX` | `You are Claude Code, Anthropic's official CLI for Claude.` | Prepended to `systemInstruction`. **Required by the OAuth subscription path**; setting empty triggers HTTP 429 on every call. |
 | `PB_CLAUDE_API_PROXY_OAUTH_BETA_HEADER` | (empty) | If set, sent as the `anthropic-beta` request header. Not currently required by the OAuth path; reserved for forward-compatibility. |
+| `PB_CLAUDE_API_PROXY_AUDIO_MODE` | `placeholder` | `placeholder` or `elevenlabs` — how inbound audio is handled (Claude has no audio modality). See **Audio input**. |
+| `PB_CLAUDE_API_PROXY_ELEVENLABS_MODEL` | `scribe_v2` | ElevenLabs Scribe model id used when `AUDIO_MODE=elevenlabs`. |
+| `PB_CLAUDE_API_PROXY_ELEVENLABS_BASE_URL` | `https://api.elevenlabs.io` | ElevenLabs API base URL. |
+| `ELEVENLABS_API_KEY` | (empty) | ElevenLabs Scribe key for `AUDIO_MODE=elevenlabs`. Resolved from `/run/secrets/elevenlabs_api_key` first, then this env var (no `PB_`-prefixed override — it is shared infrastructure). |
 | `PB_CLAUDE_API_PROXY_LOG_INCLUDE_TRACEBACK` | `false` | |

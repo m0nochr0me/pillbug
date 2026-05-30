@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse, PlainTextResponse
 from loguru import logger
 
-from pillbug_claude_api_proxy import translate
+from pillbug_claude_api_proxy import audio, translate
 from pillbug_claude_api_proxy.config import settings
 from pillbug_claude_api_proxy.upstream import run_inference
 
@@ -46,6 +46,10 @@ def build_app() -> FastAPI:
 
         if not isinstance(payload, dict):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="request body must be a JSON object")
+
+        # Claude has no audio modality: rewrite inbound audio parts (transcribe or
+        # placeholder) before history translation so they never hit the drop path.
+        await audio.transcribe_inbound_audio(payload)
 
         system_text = translate.extract_system_text(payload)
         history = translate.extract_history(payload)

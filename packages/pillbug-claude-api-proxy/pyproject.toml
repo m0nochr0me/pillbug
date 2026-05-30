@@ -8,6 +8,7 @@ dependencies = [
     "pillbug",
     "anthropic>=0.40",
     "fastapi>=0.115",
+    "httpx>=0.27",
     "uvicorn[standard]>=0.30",
 ]
 
