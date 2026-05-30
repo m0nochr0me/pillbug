@@ -17,6 +17,7 @@ wheels/
 !example*.env
 .credentials.json
 
+.zed/
 .github/
 .vscode/
 .claude/
