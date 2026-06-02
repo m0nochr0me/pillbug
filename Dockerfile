@@ -19,13 +19,13 @@ RUN --mount=type=cache,target=/tmp/uv-cache \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     --mount=type=bind,source=packages,target=packages \
-    uv sync --locked --no-install-project
+    uv sync --locked --no-install-project --no-dev
 
 RUN groupadd --gid 1000 pillbug \
     && useradd --uid 1000 --gid 1000 --create-home --home-dir /home/pillbug --shell /bin/bash pillbug \
     && install -d --owner 1000 --group 1000 /home/pillbug
 
-ADD . .
+COPY . .
 
 RUN --mount=type=cache,target=/tmp/uv-cache \
     uv pip install --system -e .
@@ -44,7 +44,7 @@ RUN if [ -n "$EXTRA_PACKAGES" ]; then \
 
 RUN --mount=type=cache,target=/tmp/uv-cache \
     if [ -n "$PILLBUG_INSTALL_EXTRAS" ]; then \
-    uv pip install --system -e ".[${PILLBUG_INSTALL_EXTRAS}]"; \
+    uv sync --locked --no-install-project --no-dev --inexact --extra "$PILLBUG_INSTALL_EXTRAS"; \
     fi
 
 # Run
