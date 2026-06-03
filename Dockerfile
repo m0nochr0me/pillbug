@@ -4,7 +4,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 # Env
 ENV TZ=UTC
-ENV LANG=en_US.UTF-8
+ENV LANG=C.UTF-8
 ENV PYTHON_JIT=1
 ENV UV_COMPILE_BYTECODE=1
 ENV PYTHONUNBUFFERED=1

@@ -12,6 +12,7 @@ deploy/
 skills/
 doc/
 VGM/
+tests/
 
 .env
 *.env
