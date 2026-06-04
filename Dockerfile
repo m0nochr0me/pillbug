@@ -1,6 +1,5 @@
 # ── Stage 1: shared base with all common deps ──
 FROM python:3.14-slim-bookworm AS base
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 # Env
 ENV TZ=UTC
@@ -15,7 +14,8 @@ WORKDIR /app
 
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-RUN --mount=type=cache,target=/tmp/uv-cache \
+RUN --mount=from=ghcr.io/astral-sh/uv:latest,source=/uv,target=/usr/local/bin/uv \
+    --mount=type=cache,target=/tmp/uv-cache \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     --mount=type=bind,source=packages,target=packages \
@@ -27,7 +27,8 @@ RUN groupadd --gid 1000 pillbug \
 
 COPY . .
 
-RUN --mount=type=cache,target=/tmp/uv-cache \
+RUN --mount=from=ghcr.io/astral-sh/uv:latest,source=/uv,target=/usr/local/bin/uv \
+    --mount=type=cache,target=/tmp/uv-cache \
     uv pip install --system -e .
 
 RUN chmod +x run.sh docker-entrypoint.sh
@@ -42,7 +43,8 @@ RUN if [ -n "$EXTRA_PACKAGES" ]; then \
     apt-get update && apt-get install -y --no-install-recommends $EXTRA_PACKAGES && rm -rf /var/lib/apt/lists/*; \
     fi
 
-RUN --mount=type=cache,target=/tmp/uv-cache \
+RUN --mount=from=ghcr.io/astral-sh/uv:latest,source=/uv,target=/usr/local/bin/uv \
+    --mount=type=cache,target=/tmp/uv-cache \
     if [ -n "$PILLBUG_INSTALL_EXTRAS" ]; then \
     uv sync --locked --no-install-project --no-dev --inexact --extra "$PILLBUG_INSTALL_EXTRAS"; \
     fi
