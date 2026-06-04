@@ -234,6 +234,24 @@ def _format_graph_error(method: str, url: str, status: int, text: str) -> str:
     return f"{base}: {message}{suffix}"
 
 
+def _validate_topic(topic: str) -> str:
+    """Validate a Threads topic tag — the 'Community or topic' shown on the post.
+
+    Threads allows one topic per post. Meta rejects periods and ampersands in
+    topic tags, so reject them here with a clear message instead of surfacing the
+    Graph API's generic error. A leading `#` is stripped for convenience.
+    """
+    cleaned = topic.strip()
+    if cleaned.startswith("#"):
+        cleaned = cleaned[1:].strip()
+    if not cleaned:
+        raise ThreadsError("empty topic tag")
+    bad = sorted({c for c in (".", "&") if c in cleaned})
+    if bad:
+        raise ThreadsError(f"topic tag may not contain {' or '.join(repr(c) for c in bad)}: {topic!r}")
+    return cleaned
+
+
 def _clean_image_url(url: str) -> str:
     """Trim and reject URLs that show signs of broken shell quoting.
 
@@ -430,6 +448,7 @@ async def cmd_post(args: argparse.Namespace) -> int:
 
     image_urls: list[str] = [_clean_image_url(u) for u in (args.image_url or [])]
     alts: list[str] = list(args.alt or [])
+    topic: str | None = _validate_topic(args.topic) if args.topic else None
 
     if not args.text and not image_urls:
         sys.exit("error: --text or at least one --image-url is required")
@@ -443,13 +462,12 @@ async def cmd_post(args: argparse.Namespace) -> int:
             await _check_image_url(session, url)
 
         if not image_urls:
-            container_id = await client.create_container(
-                user_id=user_id,
-                access_token=access_token,
-                params={"media_type": "TEXT", "text": args.text},
-            )
+            params: dict[str, Any] = {"media_type": "TEXT", "text": args.text}
+            if topic:
+                params["topic_tag"] = topic
+            container_id = await client.create_container(user_id=user_id, access_token=access_token, params=params)
         elif len(image_urls) == 1:
-            params: dict[str, Any] = {
+            params = {
                 "media_type": "IMAGE",
                 "image_url": image_urls[0],
             }
@@ -457,6 +475,8 @@ async def cmd_post(args: argparse.Namespace) -> int:
                 params["text"] = args.text
             if alts and alts[0]:
                 params["alt_text"] = alts[0]
+            if topic:
+                params["topic_tag"] = topic
             container_id = await client.create_container(user_id=user_id, access_token=access_token, params=params)
             await client.wait_for_container(container_id=container_id, access_token=access_token)
         else:
@@ -475,6 +495,8 @@ async def cmd_post(args: argparse.Namespace) -> int:
             }
             if args.text:
                 params["text"] = args.text
+            if topic:
+                params["topic_tag"] = topic
             container_id = await client.create_container(user_id=user_id, access_token=access_token, params=params)
             await client.wait_for_container(container_id=container_id, access_token=access_token)
 
@@ -527,6 +549,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--alt",
         action="append",
         help="Alt text for the N-th --image-url (position-aligned).",
+    )
+    post.add_argument(
+        "--topic",
+        help="Topic tag (the 'Community or topic') for the post. One per post; no '.' or '&'.",
     )
     post.set_defaults(func=cmd_post)
 

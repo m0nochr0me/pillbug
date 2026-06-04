@@ -88,6 +88,26 @@ uv run python skills/threads/scripts/threads.py post \
 `--alt` values align positionally with `--image-url`. Missing alts are
 omitted from the request.
 
+### Topic (Community or topic)
+
+`--topic` attaches a single topic tag — the same "Community or topic" the web
+composer offers (where it is auto-filled from the first hashtag). Via the API it
+is explicit, not derived from hashtags in `--text`.
+
+```bash
+uv run python skills/threads/scripts/threads.py post \
+  --text "Race day thoughts" --topic "F1"
+```
+
+Guidelines:
+
+- One topic per post. The flag takes a single value.
+- Topic tags may not contain periods (`.`) or ampersands (`&`); the script
+  rejects those client-side before calling the API.
+- A leading `#` is stripped, so `--topic "#F1"` and `--topic "F1"` are equivalent.
+- Applies to text, single-image, and carousel posts. For carousels the topic is
+  set on the parent post, never on individual images.
+
 On success the script prints the published thread `id` as JSON to stdout.
 
 ## Notes
