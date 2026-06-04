@@ -1,5 +1,5 @@
 # ── Stage 1: shared base with all common deps ──
-FROM python:3.14-slim-bookworm AS base
+FROM python:3.14-alpine AS base
 
 # Env
 ENV TZ=UTC
@@ -12,7 +12,8 @@ ENV UV_CACHE_DIR=/tmp/uv-cache
 
 WORKDIR /app
 
-RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+RUN apk add --no-cache bash setpriv shadow tzdata ca-certificates \
+    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 RUN --mount=from=ghcr.io/astral-sh/uv:latest,source=/uv,target=/usr/local/bin/uv \
     --mount=type=cache,target=/tmp/uv-cache \
@@ -22,8 +23,7 @@ RUN --mount=from=ghcr.io/astral-sh/uv:latest,source=/uv,target=/usr/local/bin/uv
     uv sync --locked --no-install-project --no-dev
 
 RUN groupadd --gid 1000 pillbug \
-    && useradd --uid 1000 --gid 1000 --create-home --home-dir /home/pillbug --shell /bin/bash pillbug \
-    && install -d --owner 1000 --group 1000 /home/pillbug
+    && useradd --uid 1000 --gid 1000 --create-home --home-dir /home/pillbug --shell /bin/bash pillbug
 
 COPY . .
 
@@ -40,7 +40,7 @@ ARG PILLBUG_INSTALL_EXTRAS=""
 ARG EXTRA_PACKAGES=""
 
 RUN if [ -n "$EXTRA_PACKAGES" ]; then \
-    apt-get update && apt-get install -y --no-install-recommends $EXTRA_PACKAGES && rm -rf /var/lib/apt/lists/*; \
+    apk add --no-cache $EXTRA_PACKAGES; \
     fi
 
 RUN --mount=from=ghcr.io/astral-sh/uv:latest,source=/uv,target=/usr/local/bin/uv \
