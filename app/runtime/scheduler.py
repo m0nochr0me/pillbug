@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from docket import Cron, Docket, Perpetual, Worker
 
-from app.core.ai import GeminiChatService, chat_service
+from app.core.ai import GeminiChatService, GeminiChatSession, chat_service
 from app.core.config import settings
 from app.core.log import logger
 from app.core.telemetry import runtime_telemetry
@@ -749,6 +749,7 @@ class AgentTaskScheduler:
 
         max_steps_per_run = goal.max_steps_per_run if goal is not None else None
 
+        session: GeminiChatSession | None = None
         try:
             if definition.clean_session:
                 session = await self._chat_service.reset_session(definition.resolved_session_id)
@@ -777,6 +778,11 @@ class AgentTaskScheduler:
             )
             raise
         finally:
+            # Each run builds a fresh session that lazily opens its own MCP transport; close it
+            # so the connection's file descriptors are released instead of leaking per run.
+            if session is not None:
+                await session.aclose()
+
             if forbidden_actions:
                 clear_task_forbidden_actions(definition.resolved_session_id)
 
