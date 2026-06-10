@@ -161,7 +161,7 @@ def _coerce_tool_response_text(response_payload: Any) -> str:
     return json.dumps(response_payload, ensure_ascii=False)
 
 
-def gemini_request_to_openai(
+def gemini_request_to_openai(  # noqa: C901
     request_payload: dict[str, Any],
     *,
     model_override: str | None = None,

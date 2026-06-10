@@ -309,7 +309,7 @@ class SlackChannel(BaseChannel):
         except Exception as exc:
             self._log_slack_failure(action="queue event failed", exc=exc, suppression_key="queue")
 
-    async def _handle_event(self, event: dict[str, Any]) -> InboundMessage | None:
+    async def _handle_event(self, event: dict[str, Any]) -> InboundMessage | None:  # noqa: C901
         event_type = event.get("type")
         subtype = event.get("subtype")
 

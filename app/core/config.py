@@ -371,7 +371,7 @@ class Settings(BaseSettings):
         return normalized
 
     @model_validator(mode="after")
-    def normalize_paths_and_validate_auth_configuration(self) -> Self:
+    def normalize_paths_and_validate_auth_configuration(self) -> Self:  # noqa: C901
         explicitly_configured_fields = set(self.model_fields_set)
 
         if "LOG_DIR" not in explicitly_configured_fields:

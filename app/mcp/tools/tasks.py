@@ -49,7 +49,7 @@ def _build_agent_task_goal(
 
 @mcp.tool
 @envelope_error
-async def manage_agent_task(
+async def manage_agent_task(  # noqa: C901
     action: Literal["list", "get", "create", "update", "delete"],
     task_id: str | None = None,
     name: str | None = None,
