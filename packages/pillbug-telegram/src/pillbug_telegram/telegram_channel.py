@@ -2,7 +2,6 @@
 
 import asyncio
 import mimetypes
-import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -16,6 +15,13 @@ from shingram.exceptions import TelegramAPIError
 
 from app.core.config import settings
 from app.core.log import ThrottledExceptionLogger, logger
+from app.runtime.channel_helpers import (
+    chunk_message,
+    render_attachment_text,
+    resolve_attachment_path,
+    sanitize_filename,
+    split_csv,
+)
 from app.runtime.channels import BaseChannel, register_channel_conversation
 from app.schema.messages import InboundMessage, OutboundAttachment
 from app.util.workspace import async_write_bytes_file, display_path
@@ -25,7 +31,6 @@ _TEXT_EVENT_TYPES = frozenset({"message", "edited_message", "command"})
 _DOWNLOADABLE_EVENT_TYPES = ("photo", "video", "document", "audio", "voice")
 _MAX_TELEGRAM_MESSAGE_CHARS = 4000
 _TELEGRAM_DOWNLOADS_DIR = settings.WORKSPACE_ROOT / "inbox" / "telegram"
-_FILENAME_SANITIZER = re.compile(r"[^A-Za-z0-9._-]+")
 _TRANSIENT_TELEGRAM_LOG_COOLDOWN_SECONDS = 60.0
 _TYPING_INTERVAL_SECONDS = 5.0
 _VOICE_MIME_TYPES = frozenset({"audio/ogg", "audio/opus"})
@@ -53,10 +58,6 @@ _MIME_EXTENSION_OVERRIDES = {
 }
 
 
-def _split_csv(value: str) -> tuple[str, ...]:
-    return tuple(item.strip() for item in value.split(",") if item.strip())
-
-
 def _parse_chat_ids(value: str) -> list[int]:
     chat_ids: list[int] = []
     for item in value.split(","):
@@ -70,31 +71,6 @@ def _parse_chat_ids(value: str) -> list[int]:
             raise ValueError("PB_TELEGRAM_ALLOWED_CHAT_IDS must be a comma-separated list of integer chat IDs") from exc
 
     return chat_ids
-
-
-def _chunk_message(text: str, *, max_chars: int = _MAX_TELEGRAM_MESSAGE_CHARS) -> tuple[str, ...]:
-    remaining = text.strip() or " "
-    chunks: list[str] = []
-
-    while len(remaining) > max_chars:
-        split_at = remaining.rfind("\n\n", 0, max_chars + 1)
-        if split_at < max_chars // 2:
-            split_at = remaining.rfind("\n", 0, max_chars + 1)
-        if split_at < max_chars // 2:
-            split_at = remaining.rfind(" ", 0, max_chars + 1)
-        if split_at < max_chars // 2:
-            split_at = max_chars
-
-        chunk = remaining[:split_at].rstrip()
-        if chunk:
-            chunks.append(chunk)
-
-        remaining = remaining[split_at:].lstrip()
-
-    if remaining:
-        chunks.append(remaining)
-
-    return tuple(chunks)
 
 
 def _message_payload_from_event(event: Event) -> dict | None:
@@ -134,11 +110,6 @@ def _extract_attachment_payload(message_payload: dict) -> tuple[str, dict] | Non
             return content_type, payload
 
     return None
-
-
-def _sanitize_filename(value: str) -> str:
-    sanitized = _FILENAME_SANITIZER.sub("_", value).strip("._")
-    return sanitized or "attachment"
 
 
 def _pick_file_extension(
@@ -182,7 +153,7 @@ def _build_download_filename(
     mime_type: str | None,
 ) -> str:
     preferred_name = original_file_name or Path(telegram_file_path).name or content_type
-    safe_stem = _sanitize_filename(Path(preferred_name).stem or content_type)
+    safe_stem = sanitize_filename(Path(preferred_name).stem or content_type)
     extension = _pick_file_extension(
         content_type=content_type,
         original_file_name=original_file_name,
@@ -219,14 +190,6 @@ def _resolve_send_method(attachment: OutboundAttachment) -> tuple[str, str]:
     return "sendDocument", "document"
 
 
-def _resolve_attachment_path(attachment: OutboundAttachment) -> Path:
-    """Resolve an outbound attachment path relative to the workspace root."""
-    raw_path = Path(attachment.path)
-    if raw_path.is_absolute():
-        return raw_path
-    return settings.WORKSPACE_ROOT / raw_path
-
-
 def _is_transient_telegram_error(exc: BaseException) -> bool:
     if isinstance(exc, TimeoutError):
         return True
@@ -249,29 +212,16 @@ def _render_attachment_text(
     duration_seconds: int | None,
     download_failed: bool,
 ) -> str:
-    attachment_label = _ATTACHMENT_LABELS.get(content_type, content_type)
-    lines: list[str] = []
-
-    if caption_text:
-        lines.append(caption_text)
-
-    if download_failed:
-        lines.append(
-            f"Telegram {attachment_label} received, but saving it to the workspace downloads directory failed."
-        )
-    elif workspace_path is not None:
-        lines.append(f"Telegram {attachment_label} saved to workspace path: {workspace_path}.")
-    else:
-        lines.append(f"Telegram {attachment_label} received.")
-
-    if original_file_name:
-        lines.append(f"Original filename: {original_file_name}.")
-    if mime_type:
-        lines.append(f"MIME type: {mime_type}.")
-    if duration_seconds is not None:
-        lines.append(f"Duration: {duration_seconds} seconds.")
-
-    return "\n".join(lines)
+    return render_attachment_text(
+        channel_label="Telegram",
+        attachment_label=_ATTACHMENT_LABELS.get(content_type, content_type),
+        caption_text=caption_text,
+        workspace_path=workspace_path,
+        original_file_name=original_file_name,
+        mime_type=mime_type,
+        duration_seconds=duration_seconds,
+        download_failed=download_failed,
+    )
 
 
 class TelegramChannelSettings(BaseSettings):
@@ -306,7 +256,7 @@ class TelegramChannelSettings(BaseSettings):
         if value is None:
             return _DEFAULT_ALLOWED_UPDATES
         if isinstance(value, str):
-            return _split_csv(value) or _DEFAULT_ALLOWED_UPDATES
+            return split_csv(value) or _DEFAULT_ALLOWED_UPDATES
         return value
 
     @field_validator("allowed_chat_ids", mode="before")
@@ -475,7 +425,7 @@ class TelegramChannel(BaseChannel):
         response_text: str,
         reply_to_message_id: object | None = None,
     ) -> None:
-        for index, chunk in enumerate(_chunk_message(response_text)):
+        for index, chunk in enumerate(chunk_message(response_text, max_chars=_MAX_TELEGRAM_MESSAGE_CHARS)):
             params = {
                 "chat_id": chat_id,
                 "text": chunk,
@@ -526,7 +476,7 @@ class TelegramChannel(BaseChannel):
         reply_to_message_id: int | None = None,
     ) -> None:
         for index, attachment in enumerate(attachments):
-            file_path = _resolve_attachment_path(attachment)
+            file_path = resolve_attachment_path(attachment)
             if not await asyncio.to_thread(file_path.is_file):
                 logger.warning(f"Skipping outbound attachment — file not found: {file_path}")
                 continue
