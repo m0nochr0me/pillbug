@@ -19,6 +19,8 @@ from app.runtime.channels import (
     register_channel_conversation,
     unregister_channel_plugin,
 )
+from app.runtime.command_execution import run_shell_command
+from app.runtime.outbound_dispatch import dispatch_outbound_draft
 from app.runtime.pipeline import InboundProcessingPipeline
 from app.runtime.session_binding import (
     bind_runtime_session_origin_metadata,
@@ -523,8 +525,6 @@ class ApplicationLoop:
         channel: ChannelPlugin,
         record: ApprovalRequest,
     ) -> None:
-        from app.mcp import _run_shell_command  # local import: avoids app.mcp ↔ loop reverse import
-
         decided_by = f"channel:{batch.channel_name}"
         try:
             await approval_store.approve(record.id, decided_by=decided_by, comment="approved via /yes")
@@ -545,7 +545,7 @@ class ApplicationLoop:
         )
 
         try:
-            result = await _run_shell_command(
+            result = await run_shell_command(
                 approved.command,
                 directory=approved.directory,
                 timeout_seconds=timeout_seconds,
@@ -614,8 +614,6 @@ class ApplicationLoop:
         channel: ChannelPlugin,
         record: OutboundDraft,
     ) -> None:
-        from app.mcp import _dispatch_outbound_draft  # local import: avoids reverse module import
-
         decided_by = f"channel:{batch.channel_name}"
         try:
             committed = await outbound_draft_store.commit(
@@ -633,7 +631,7 @@ class ApplicationLoop:
             return
 
         try:
-            dispatch_result = await _dispatch_outbound_draft(committed, ctx=None)
+            dispatch_result = await dispatch_outbound_draft(committed, ctx=None)
         except Exception:
             logger.exception(f"Dispatch crashed for outbound draft {record.id} via /yes")
             await self._send_inbound_response(

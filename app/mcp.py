@@ -3,11 +3,8 @@ Composition MCP Server
 """
 
 import asyncio
-import fnmatch
 import hashlib
 import json
-import mimetypes
-import os
 import re
 import secrets
 import time
@@ -35,16 +32,30 @@ from app.core.telemetry import runtime_telemetry
 from app.core.url_shortener import local_url_shortener
 from app.middleware.compactor import CompactorMiddleware
 from app.middleware.telemetry import TelemetryMiddleware
+from app.runtime import outbound_dispatch
 from app.runtime.approvals import approval_store, outbound_draft_store
 from app.runtime.channels import describe_channel_telemetry, get_channel_plugin, register_channel_conversation
+from app.runtime.command_execution import (
+    run_shell_command as _run_shell_command,
+)
+from app.runtime.command_execution import (
+    validate_command_timeout as _validate_command_timeout,
+)
 from app.runtime.mcp_plugins import load_mcp_tool_plugins
-from app.runtime.outbound_budget import DEFAULT_NON_CLI_LIMITS, outbound_send_budget
+from app.runtime.outbound_dispatch import (
+    dispatch_outbound_draft as _dispatch_outbound_draft,
+)
+from app.runtime.outbound_dispatch import (
+    get_a2a_channel_plugin as _get_a2a_channel_plugin,
+)
+from app.runtime.outbound_dispatch import (
+    requires_approval_envelope as _requires_approval_envelope,
+)
 from app.runtime.scheduler import task_scheduler
 from app.runtime.session_binding import (
     bind_runtime_session_todo_snapshot,
     get_runtime_session_for_mcp_session,
     get_runtime_session_origin_metadata,
-    record_pending_outbound_injection,
     record_runtime_session_skill_load,
     split_runtime_session_key,
 )
@@ -80,16 +91,12 @@ from app.schema.control import (
 from app.schema.messages import (
     A2AEnvelope,
     A2ATarget,
-    OutboundAttachment,
-    build_a2a_origin_routing_metadata,
-    extract_a2a_origin_channel_metadata,
     extract_a2a_origin_route,
 )
 from app.schema.tasks import AgentTaskGoal
 from app.schema.telemetry import ChannelsTelemetrySnapshot, RuntimeMetadata
 from app.schema.todo import TodoListSnapshot
 from app.util.skills import workspace_skill_name_for_path
-from app.util.text import classify_shell_stderr
 from app.util.tool_result import envelope_error, tool_error
 from app.util.web import (
     build_fetch_output_path,
@@ -109,7 +116,6 @@ from app.util.workspace import (
     display_path,
     is_hidden_path,
     resolve_path_within_root,
-    truncate_text,
 )
 
 __all__ = ("create_mcp_server", "mcp", "mcp_app")
@@ -143,26 +149,11 @@ def _validate_max_results(max_results: int) -> int:
     return min(max_results, settings.MCP_MAX_SEARCH_RESULTS)
 
 
-def _validate_command_timeout(timeout_seconds: float) -> float:
-    if timeout_seconds <= 0:
-        raise ValueError("timeout_seconds must be greater than 0")
-
-    return min(timeout_seconds, settings.MCP_MAX_COMMAND_TIMEOUT_SECONDS)
-
-
 def _validate_fetch_url_max_bytes(max_bytes: int) -> int:
     if max_bytes < 1:
         raise ValueError("max_bytes must be at least 1")
 
     return min(max_bytes, settings.MCP_FETCH_URL_MAX_BYTES)
-
-
-def _get_command_shell() -> str:
-    shell = os.environ.get("SHELL")
-    if shell and Path(shell).is_file():
-        return shell
-
-    return "/bin/sh"
 
 
 def _parse_channel_target(channel: str) -> tuple[str, str]:
@@ -177,64 +168,6 @@ def _parse_channel_target(channel: str) -> tuple[str, str]:
         raise ValueError("channel targets using ':' must include a destination after the channel name")
 
     return channel_name, conversation_id
-
-
-def _resolve_a2a_origin_routing_metadata(
-    runtime_session_key: str,
-    session_origin_metadata: dict[str, object] | None,
-) -> dict[str, object] | None:
-    if session_origin_metadata is not None and (
-        existing_origin_route := extract_a2a_origin_route(session_origin_metadata)
-    ):
-        return build_a2a_origin_routing_metadata(
-            channel_name=existing_origin_route[0],
-            conversation_id=existing_origin_route[1],
-            channel_metadata=extract_a2a_origin_channel_metadata(session_origin_metadata),
-        )
-
-    origin_route = split_runtime_session_key(runtime_session_key)
-    if origin_route is None:
-        return None
-
-    return build_a2a_origin_routing_metadata(
-        channel_name=origin_route[0],
-        conversation_id=origin_route[1],
-        channel_metadata=session_origin_metadata,
-    )
-
-
-def _get_outbound_a2a_metadata(ctx: Context | None) -> dict[str, object] | None:
-    if ctx is None:
-        return None
-
-    runtime_session_key = get_runtime_session_for_mcp_session(ctx.session_id)
-    if runtime_session_key is None:
-        return None
-
-    origin_channel_metadata = get_runtime_session_origin_metadata(runtime_session_key)
-    resolved_origin_metadata = _resolve_a2a_origin_routing_metadata(runtime_session_key, origin_channel_metadata)
-    if resolved_origin_metadata is None:
-        return None
-
-    return dict(resolved_origin_metadata)
-
-
-def _track_outbound_conversation(channel_name: str, conversation_id: str) -> None:
-    if not conversation_id:
-        return
-
-    register_channel_conversation(channel_name, conversation_id)
-    application_loop = mcp_app.state.application_loop
-    if application_loop is not None:
-        application_loop.track_outbound_conversation(channel_name, conversation_id)
-
-
-def _get_a2a_channel_plugin(create: bool = True) -> Any:
-    channel_plugin = get_channel_plugin("a2a", create=create)
-    if channel_plugin is None:
-        raise ValueError("A2A channel is not enabled or available")
-
-    return channel_plugin
 
 
 def _normalize_a2a_target(target: str) -> str:
@@ -998,184 +931,6 @@ async def _write_planning_artifact(
     return target_file
 
 
-def _requires_approval_envelope(record: OutboundDraft) -> dict[str, Any]:
-    return {
-        "status": "requires_approval",
-        "draft_id": record.id,
-        "kind": record.kind.value,
-        "channel": record.channel,
-        "target": record.target,
-        "next_valid_actions": ["wait_for_operator_commit"],
-        "message": (
-            f"Outbound draft recorded; operator must commit via "
-            f"POST /control/drafts/{record.id}/commit before this send takes effect."
-        ),
-    }
-
-
-async def _dispatch_send_message(record: OutboundDraft, *, ctx: Context | None) -> dict[str, Any]:
-    channel_plugin = get_channel_plugin(record.channel, create=True)
-    if channel_plugin is None:
-        return tool_error("not_found", f"Channel is not enabled or available: {record.channel}")
-
-    conversation_id = record.target
-    await channel_plugin.send_message(conversation_id or "", record.message, metadata=None)
-    _track_outbound_conversation(record.channel, conversation_id)
-
-    if settings.SESSION_CONTINUITY and ctx is not None:
-        source_session_key = get_runtime_session_for_mcp_session(ctx.session_id)
-        target_session_key = f"{record.channel}:{conversation_id}" if conversation_id else record.channel
-        if source_session_key and source_session_key != target_session_key:
-            record_pending_outbound_injection(source_session_key, target_session_key)
-
-    logger.info(f"Sent outbound message via channel={record.channel} destination={conversation_id or '<default>'}")
-    return {
-        "channel": record.channel,
-        "conversation_id": conversation_id or None,
-        "chars_sent": len(record.message),
-    }
-
-
-async def _dispatch_send_file(record: OutboundDraft) -> dict[str, Any]:
-    if record.attachment is None:
-        return tool_error("invalid_arguments", "send_file draft is missing the attachment payload")
-
-    channel_plugin = get_channel_plugin(record.channel, create=True)
-    if channel_plugin is None:
-        return tool_error("not_found", f"Channel is not enabled or available: {record.channel}")
-
-    conversation_id = record.target
-    resolved_path = _resolve_workspace_path(record.attachment.path)
-    if not resolved_path.is_file():
-        return tool_error("not_found", f"File not found in workspace: {_display_path(resolved_path)}")
-
-    mime_type = mimetypes.guess_type(resolved_path.name)[0]
-    attachment = OutboundAttachment(
-        path=str(resolved_path),
-        mime_type=mime_type,
-        display_name=record.attachment.caption,
-        send_as=record.attachment.send_as,
-    )
-
-    await channel_plugin.send_message(
-        conversation_id or "",
-        record.attachment.caption or record.message or "",
-        attachments=(attachment,),
-    )
-
-    logger.info(
-        f"Sent file via channel={record.channel} destination={conversation_id or '<default>'} path={_display_path(resolved_path)}"
-    )
-    return {
-        "channel": record.channel,
-        "conversation_id": conversation_id or None,
-        "file": _display_path(resolved_path),
-        "send_as": record.attachment.send_as or "auto",
-    }
-
-
-async def _dispatch_send_a2a_message(record: OutboundDraft, *, ctx: Context | None) -> dict[str, Any]:
-    channel_plugin = _get_a2a_channel_plugin(create=True)
-    metadata = _get_outbound_a2a_metadata(ctx)
-    await channel_plugin.send_message(record.target, record.message, metadata=metadata)
-    _track_outbound_conversation("a2a", record.target)
-    return {
-        "channel": "a2a",
-        "mode": "async",
-        "target": record.target,
-        "chars_sent": len(record.message),
-    }
-
-
-async def _dispatch_request_a2a_response(record: OutboundDraft, *, ctx: Context | None) -> dict[str, Any]:
-    channel_plugin = _get_a2a_channel_plugin(create=True)
-    send_request = getattr(channel_plugin, "send_request", None)
-    if not callable(send_request):
-        return tool_error(
-            "permission_denied",
-            "Configured A2A channel does not support synchronous requests",
-        )
-
-    send_request_callable = cast("Callable[..., Awaitable[A2AEnvelope]]", send_request)
-    metadata = _get_outbound_a2a_metadata(ctx)
-    response_envelope = await send_request_callable(
-        record.target,
-        record.message,
-        metadata=metadata,
-        timeout_seconds=record.timeout_seconds if record.timeout_seconds is not None else 60.0,
-    )
-    return {
-        "channel": "a2a",
-        "mode": "sync",
-        "target": record.target,
-        "sender_runtime_id": response_envelope.sender_runtime_id,
-        "conversation_id": response_envelope.conversation_id,
-        "intent": response_envelope.intent.value,
-        "response_text": response_envelope.text,
-        "message_id": response_envelope.message_id,
-        "reply_to_message_id": response_envelope.reply_to_message_id,
-        "hop_count": response_envelope.convergence_state.hop_count,
-        "max_hops": response_envelope.convergence_state.max_hops,
-        "stop_requested": response_envelope.convergence_state.stop_requested,
-    }
-
-
-def _outbound_limits_for_channel(channel: str) -> dict[str, int] | None:
-    """Resolve the rolling-window budget for `channel`. None = unlimited (plan P2 #15)."""
-    configured = settings.outbound_send_limits()
-    if channel in configured:
-        return configured[channel] or None
-    if channel == "cli":
-        return None
-    return dict(DEFAULT_NON_CLI_LIMITS)
-
-
-def _check_outbound_budget(channel: str, conversation_id: str) -> dict[str, Any] | None:
-    limits = _outbound_limits_for_channel(channel)
-    if limits is None:
-        return None
-    reason = outbound_send_budget.check_and_charge(channel, conversation_id, limits)
-    if reason is None:
-        return None
-    return tool_error(
-        "rate_limited",
-        f"Outbound send budget exceeded for channel {channel!r} ({reason})",
-        next_valid_actions=("wait", "request_approval"),
-        details={
-            "channel": channel,
-            "conversation_id": conversation_id,
-            "reason": reason,
-            "limits": dict(limits),
-        },
-    )
-
-
-async def _dispatch_outbound_draft(record: OutboundDraft, *, ctx: Context | None) -> dict[str, Any]:
-    if blocked := _check_outbound_budget(record.channel, record.target):
-        await runtime_telemetry.record_event(
-            event_type="outbound.rate_limited",
-            source="mcp",
-            level="warning",
-            message=f"rate_limited: {record.channel}",
-            data={
-                "draft_id": record.id,
-                "channel": record.channel,
-                "target": record.target,
-                "reason": blocked["details"]["reason"],
-            },
-        )
-        return blocked
-    if record.kind == OutboundDraftKind.SEND_MESSAGE:
-        return await _dispatch_send_message(record, ctx=ctx)
-    if record.kind == OutboundDraftKind.SEND_FILE:
-        return await _dispatch_send_file(record)
-    if record.kind == OutboundDraftKind.SEND_A2A_MESSAGE:
-        return await _dispatch_send_a2a_message(record, ctx=ctx)
-    if record.kind == OutboundDraftKind.REQUEST_A2A_RESPONSE:
-        return await _dispatch_request_a2a_response(record, ctx=ctx)
-    return tool_error("internal_error", f"Unknown outbound draft kind: {record.kind}")
-
-
 async def _emit_outbound_draft_event(record: OutboundDraft) -> None:
     await runtime_telemetry.record_event(
         event_type="control.draft_created",
@@ -1867,59 +1622,6 @@ async def exit_planning_mode(
     }
 
 
-_DEFAULT_COMMAND_ENV_ALLOWLIST: frozenset[str] = frozenset(
-    {
-        "PATH",
-        "HOME",
-        "LANG",
-        "TERM",
-        "TZ",
-    }
-)
-
-_DEFAULT_COMMAND_ENV_ALLOWLIST_PATTERNS: tuple[str, ...] = ("LC_*",)
-
-_SENSITIVE_ENV_NAME_PATTERN = re.compile(r"(token|secret|key|password|credential)", re.IGNORECASE)
-_SENSITIVE_OVERRIDE_PREFIX = "PB_PUBLIC_"
-
-
-def _env_name_is_sensitive(name: str) -> bool:
-    if name.startswith(_SENSITIVE_OVERRIDE_PREFIX):
-        return False
-    return bool(_SENSITIVE_ENV_NAME_PATTERN.search(name))
-
-
-def _env_name_is_allowed(name: str, passthrough: frozenset[str]) -> bool:
-    if name in _DEFAULT_COMMAND_ENV_ALLOWLIST:
-        return True
-    if name in passthrough:
-        return True
-    return any(fnmatch.fnmatchcase(name, pattern) for pattern in _DEFAULT_COMMAND_ENV_ALLOWLIST_PATTERNS)
-
-
-def _build_command_environment(ctx: Context | None) -> dict[str, str]:
-    passthrough = frozenset(settings.execute_command_env_passthrough())
-    environment: dict[str, str] = {}
-
-    for env_name, env_value in os.environ.items():
-        if not _env_name_is_allowed(env_name, passthrough):
-            continue
-        if _env_name_is_sensitive(env_name):
-            continue
-        environment[env_name] = env_value
-
-    environment["PB_RUNTIME_ID"] = settings.runtime_id
-    environment["PB_WORKSPACE_ROOT"] = str(settings.WORKSPACE_ROOT)
-
-    if ctx is not None:
-        runtime_session_key = get_runtime_session_for_mcp_session(ctx.session_id)
-        if runtime_session_key:
-            environment["PB_SESSION_KEY"] = runtime_session_key
-            environment["PB_SESSION_KEY_SAFE"] = runtime_session_key.replace(":", "__")
-
-    return environment
-
-
 def _command_is_allowlisted(command: str) -> bool:
     if _approvals_bypassed():
         return True
@@ -1928,81 +1630,6 @@ def _command_is_allowlisted(command: str) -> bool:
         return False
     stripped = command.strip()
     return any(pattern.fullmatch(stripped) for pattern in patterns)
-
-
-async def _run_shell_command(
-    command: str,
-    *,
-    directory: str,
-    timeout_seconds: float,
-    ctx: Context | None,
-) -> dict[str, Any]:
-    """Spawn the validated command; returns the structured result dict or an envelope on input errors."""
-
-    timeout_seconds = _validate_command_timeout(timeout_seconds)
-    target_directory = _resolve_workspace_path(directory)
-
-    if not await asyncio.to_thread(target_directory.exists):
-        return tool_error("not_found", f"Directory does not exist: {directory}")
-
-    if not await asyncio.to_thread(target_directory.is_dir):
-        return tool_error("invalid_arguments", f"Path is not a directory: {directory}")
-
-    shell = _get_command_shell()
-    environment = _build_command_environment(ctx)
-
-    process = await asyncio.create_subprocess_shell(
-        command,
-        cwd=str(target_directory),
-        executable=shell,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=environment,
-    )
-
-    timed_out = False
-
-    try:
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
-    except TimeoutError:
-        timed_out = True
-        process.kill()
-        stdout_bytes, stderr_bytes = await process.communicate()
-
-    stdout = stdout_bytes.decode("utf-8", errors="replace")
-    stderr = stderr_bytes.decode("utf-8", errors="replace")
-    shell_error = classify_shell_stderr(stderr)
-    combined_output, combined_truncated = truncate_text(stdout + stderr, settings.MCP_MAX_COMMAND_OUTPUT_CHARS)
-    stdout, stdout_truncated = truncate_text(stdout, settings.MCP_MAX_COMMAND_OUTPUT_CHARS)
-    stderr, stderr_truncated = truncate_text(stderr, settings.MCP_MAX_COMMAND_OUTPUT_CHARS)
-
-    exit_code = process.returncode
-    if timed_out:
-        run_status = "timeout"
-    elif exit_code is None or exit_code == 0:
-        run_status = "ok"
-    elif exit_code < 0:
-        run_status = "signal_terminated"
-    else:
-        run_status = "non_zero_exit"
-
-    logger.info(f"Executed command in {_display_path(target_directory)} with exit code {exit_code}: {command}")
-
-    return {
-        "command": command,
-        "directory": _display_path(target_directory),
-        "shell": shell,
-        "status": run_status,
-        "exit_code": exit_code,
-        "timed_out": timed_out,
-        "shell_error": shell_error,
-        "stdout": stdout,
-        "stderr": stderr,
-        "combined_output": combined_output,
-        "stdout_truncated": stdout_truncated,
-        "stderr_truncated": stderr_truncated,
-        "combined_output_truncated": combined_truncated,
-    }
 
 
 @mcp.tool
@@ -2541,6 +2168,7 @@ mcp_app.state.uvicorn_server = None
 
 def bind_application_loop(application_loop: Any | None) -> None:
     mcp_app.state.application_loop = application_loop
+    outbound_dispatch.bind_application_loop(application_loop)
 
 
 @mcp_app.get("/health")
