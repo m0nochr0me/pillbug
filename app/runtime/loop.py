@@ -3,7 +3,7 @@ import time
 from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 
 from google.genai import types
 
@@ -47,16 +47,13 @@ from app.schema.telemetry import (
     SessionsTelemetrySnapshot,
     SessionTelemetryEntry,
 )
+from app.util.clock import utcnow
 from app.util.rehydration import RehydrationBundle
 from app.util.session_history import serialize_history_tail
 
 _SUMMARIZE_PROMPT_NAME = "summarize.prompt.md"
 _COMPRESS_PROMPT_NAME = "compress.prompt.md"
 _SESSION_COMPRESSED_MESSAGE = "Session compressed"
-
-
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
 
 
 @dataclass(slots=True)
@@ -134,7 +131,7 @@ class ApplicationLoop:
         clear_session_mode(session_key)
 
         state = self._session_state_by_key.get(session_key)
-        now = _utcnow()
+        now = utcnow()
         if state is not None:
             state.last_command = "/clear"
             state.last_response_at = now
@@ -785,7 +782,7 @@ class ApplicationLoop:
         if not capped_entries:
             reply_text = "no pending drafts"
         else:
-            now = _utcnow()
+            now = utcnow()
             rendered_lines = [
                 self._format_draft_line_with_age(line, requested_at, now) for requested_at, line in capped_entries
             ]
@@ -1306,7 +1303,7 @@ class ApplicationLoop:
             first_seen_at=batch.received_at,
         )
         state.blocked_message_count += batch.message_count
-        state.last_activity_at = _utcnow()
+        state.last_activity_at = utcnow()
         self._sync_pending_count(batch.session_key)
 
     def _record_command_invocation(self, batch: InboundBatch, command: str) -> None:
@@ -1318,7 +1315,7 @@ class ApplicationLoop:
             first_seen_at=batch.received_at,
         )
         state.last_command = command
-        state.last_activity_at = _utcnow()
+        state.last_activity_at = utcnow()
 
     def _record_command_response(self, batch: InboundBatch, command: str) -> None:
         state = self._session_state_for(
@@ -1328,7 +1325,7 @@ class ApplicationLoop:
             user_id=batch.user_id,
             first_seen_at=batch.received_at,
         )
-        now = _utcnow()
+        now = utcnow()
         state.last_command = command
         state.last_response_at = now
         state.last_activity_at = now
@@ -1339,7 +1336,7 @@ class ApplicationLoop:
         if state is None:
             return
 
-        now = _utcnow()
+        now = utcnow()
         state.last_response_at = now
         state.last_activity_at = now
         self._sync_pending_count(session_key)
@@ -1349,7 +1346,7 @@ class ApplicationLoop:
         if state is None:
             return
 
-        state.last_activity_at = _utcnow()
+        state.last_activity_at = utcnow()
         self._sync_pending_count(session_key)
 
     def _record_session_error(self, session_key: str) -> None:
@@ -1358,7 +1355,7 @@ class ApplicationLoop:
             return
 
         state.error_count += 1
-        state.last_activity_at = _utcnow()
+        state.last_activity_at = utcnow()
         self._sync_pending_count(session_key)
 
     def _record_session_cache_metrics(
@@ -1439,7 +1436,7 @@ class ApplicationLoop:
         if not normalized_channel_name or not normalized_conversation_id:
             return
 
-        now = _utcnow()
+        now = utcnow()
         session_key = f"{normalized_channel_name}:{normalized_conversation_id}"
         state = self._session_state_for(
             session_key=session_key,

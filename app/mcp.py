@@ -96,6 +96,7 @@ from app.schema.messages import (
 from app.schema.tasks import AgentTaskGoal
 from app.schema.telemetry import ChannelsTelemetrySnapshot, RuntimeMetadata
 from app.schema.todo import TodoListSnapshot
+from app.util.clock import utcnow
 from app.util.skills import workspace_skill_name_for_path
 from app.util.tool_result import envelope_error, tool_error
 from app.util.web import (
@@ -769,10 +770,6 @@ def _outbound_source_label(ctx: Context | None) -> str:
         if runtime_session_key:
             return runtime_session_key
     return "mcp"
-
-
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
 
 
 def _resolve_runtime_session_key(ctx: Context | None) -> str | None:
@@ -1584,10 +1581,10 @@ async def exit_planning_mode(
     state = get_planning_state(runtime_session_key)
     objective = state.objective if state is not None else ""
     scope = state.scope if state is not None else None
-    entered_at = state.entered_at if state is not None else _utcnow()
+    entered_at = state.entered_at if state is not None else utcnow()
     enter_source = state.source if state is not None else "model"
 
-    exited_at = _utcnow()
+    exited_at = utcnow()
     plan_path = await _write_planning_artifact(
         session_key=runtime_session_key,
         objective=objective,
@@ -2431,10 +2428,10 @@ async def set_session_planning_mode(
     plan_state = get_planning_state(session_key)
     objective = plan_state.objective if plan_state is not None else ""
     plan_scope = plan_state.scope if plan_state is not None else None
-    entered_at = plan_state.entered_at if plan_state is not None else _utcnow()
+    entered_at = plan_state.entered_at if plan_state is not None else utcnow()
     enter_source = plan_state.source if plan_state is not None else "control-api"
 
-    exited_at = _utcnow()
+    exited_at = utcnow()
     plan_path = await _write_planning_artifact(
         session_key=session_key,
         objective=objective,

@@ -36,13 +36,10 @@ from app.schema.telemetry import (
     TaskRunTelemetry,
     TasksTelemetrySnapshot,
 )
+from app.util.clock import utcnow
 from app.util.workspace import async_read_text_file, async_write_text_file
 
 __all__ = ("AgentTaskScheduler", "task_scheduler")
-
-
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
 
 
 def _read_hash_value(payload: dict[Any, Any], field: str) -> Any:
@@ -71,7 +68,7 @@ class PillbugWorker(Worker):
         """
 
         log_context = self._log_context()
-        self.last_tick = _utcnow()
+        self.last_tick = utcnow()
 
         while not self._worker_stopping.is_set():  # pragma: no branch
             try:
@@ -136,7 +133,7 @@ class PillbugWorker(Worker):
                         f"Moved {due_work}/{total_work} due tasks from {self.docket.queue_key} to {self.docket.stream_key}",
                     )
 
-                self.last_tick = _utcnow()
+                self.last_tick = utcnow()
                 if self._consecutive_loop_errors:
                     recovered_after = self._consecutive_loop_errors
                     self._consecutive_loop_errors = 0
@@ -155,7 +152,7 @@ class PillbugWorker(Worker):
                     extra=log_context,
                 )
                 self._consecutive_loop_errors += 1
-                now = _utcnow()
+                now = utcnow()
                 if (
                     self._last_loop_error_event is None
                     or now - self._last_loop_error_event >= self._loop_error_cooldown
@@ -326,7 +323,7 @@ class AgentTaskScheduler:
                 continue
 
             last_tick = getattr(self._worker, "last_tick", None)
-            if last_tick is not None and _utcnow() - last_tick > self._heartbeat_stale_after:
+            if last_tick is not None and utcnow() - last_tick > self._heartbeat_stale_after:
                 await self._handle_worker_failure(
                     "stalled",
                     error=None,
@@ -416,7 +413,7 @@ class AgentTaskScheduler:
         worker_task = self._worker_task
         worker_alive = worker_task is not None and not worker_task.done()
         last_tick = getattr(self._worker, "last_tick", None)
-        heartbeat_fresh = last_tick is not None and _utcnow() - last_tick <= self._heartbeat_stale_after
+        heartbeat_fresh = last_tick is not None and utcnow() - last_tick <= self._heartbeat_stale_after
         return worker_alive, last_tick, self._started and worker_alive and heartbeat_fresh
 
     async def list_tasks(self) -> dict[str, Any]:
@@ -628,7 +625,7 @@ class AgentTaskScheduler:
                 }
 
             updated.revision += 1
-            updated.updated_at = _utcnow()
+            updated.updated_at = utcnow()
             self._tasks[task_id] = updated
             await self._persist_locked()
 
@@ -722,7 +719,7 @@ class AgentTaskScheduler:
                 behavior.cancel()
             return {"action": "cancel", "message": "Task definition is stale or disabled."}
 
-        started_at = _utcnow()
+        started_at = utcnow()
         raw_response = ""
         parsed_message = ""
         action = self._default_task_action(definition.schedule.kind)
@@ -803,7 +800,7 @@ class AgentTaskScheduler:
                 state="failed" if error else "completed",
                 action=action,
                 started_at=started_at,
-                finished_at=_utcnow(),
+                finished_at=utcnow(),
                 response_text=parsed_message or raw_response or None,
                 error=error,
             )
@@ -920,7 +917,7 @@ class AgentTaskScheduler:
                 return
 
             definition.enabled = False
-            definition.updated_at = _utcnow()
+            definition.updated_at = utcnow()
             await self._persist_locked()
 
     async def _reconcile_tasks(self) -> None:
@@ -971,10 +968,10 @@ class AgentTaskScheduler:
             return
 
         when = execution.when
-        if when is None or _utcnow() - when <= self._stuck_execution_grace:
+        if when is None or utcnow() - when <= self._stuck_execution_grace:
             return
 
-        overdue_seconds = (_utcnow() - when).total_seconds()
+        overdue_seconds = (utcnow() - when).total_seconds()
         logger.warning(
             f"Reclaiming stuck execution for task {task_id} "
             f"(state='{state}', due={when.isoformat()}, overdue={overdue_seconds:.0f}s)"
@@ -1021,7 +1018,7 @@ class AgentTaskScheduler:
         initial_when = self._initial_when(definition)
 
         if replace:
-            when = initial_when or _utcnow()
+            when = initial_when or utcnow()
             await self._docket.replace(function_name, when, definition.execution_key)()
             return
 
@@ -1072,7 +1069,7 @@ class AgentTaskScheduler:
             return self._cron_behavior(definition.schedule).initial_when
 
         if isinstance(definition.schedule, DelayedTaskSchedule):
-            return _utcnow() + timedelta(seconds=definition.schedule.delay_seconds)
+            return utcnow() + timedelta(seconds=definition.schedule.delay_seconds)
 
         return None
 
@@ -1277,7 +1274,7 @@ class AgentTaskScheduler:
             return False
         if execution.state in {"running", "completed", "failed", "cancelled"}:
             return False
-        return _utcnow() - execution.when > self._stuck_execution_grace
+        return utcnow() - execution.when > self._stuck_execution_grace
 
     def _last_run_telemetry(self, definition: AgentTaskDefinition) -> TaskRunTelemetry | None:
         if definition.last_run is None:

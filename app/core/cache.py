@@ -60,6 +60,7 @@ class CustomRedisCache(RedisCache):
 
         await self.client.close()
 
+
 if settings.REDIS_HOST:
     cache = CustomRedisCache(
         namespace=__project__,

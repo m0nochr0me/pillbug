@@ -9,9 +9,11 @@ crossing into ApplicationLoop internals.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from enum import StrEnum
 from typing import Final
+
+from app.util.clock import utcnow
 
 __all__ = (
     "PlanningState",
@@ -47,10 +49,6 @@ _PLANNING_BLOCK_REMINDER: Final[str] = (
 )
 
 
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
-
-
 def get_session_mode(session_key: str) -> SessionMode:
     normalized = session_key.strip()
     if not normalized:
@@ -78,7 +76,7 @@ def enter_planning_mode(
     state = PlanningState(
         objective=objective.strip(),
         scope=(scope.strip() or None) if scope is not None else None,
-        entered_at=_utcnow(),
+        entered_at=utcnow(),
         source=source,
     )
     _session_mode[normalized] = SessionMode.PLANNING

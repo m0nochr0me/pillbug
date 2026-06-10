@@ -2,14 +2,12 @@
 Schema definitions for session-scoped todo planning.
 """
 
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
-
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
+from app.util.clock import utcnow
 
 
 class TodoItem(BaseModel):
@@ -29,7 +27,7 @@ class TodoItem(BaseModel):
 class TodoListSnapshot(BaseModel):
     items: list[TodoItem] = Field(default_factory=list)
     explanation: str | None = None
-    updated_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
     @model_validator(mode="after")
     def validate_items(self) -> Self:

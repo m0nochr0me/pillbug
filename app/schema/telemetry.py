@@ -2,17 +2,14 @@
 Schema definitions for runtime telemetry payloads.
 """
 
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 from app.schema.control import RuntimeAuthConfiguration
 from app.schema.tasks import AgentTaskGoal, TaskSchedule
-
-
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
+from app.util.clock import utcnow
 
 
 class RuntimeMetadata(BaseModel):
@@ -21,7 +18,7 @@ class RuntimeMetadata(BaseModel):
     version: str = Field(min_length=1, description="The running application version.")
     agent_name: str | None = Field(default=None, description="Optional operator-facing agent name, when configured.")
     started_at: datetime = Field(
-        default_factory=_utcnow,
+        default_factory=utcnow,
         description="UTC timestamp when this runtime boot record was created.",
     )
     timezone: str = Field(min_length=1, description="Configured runtime timezone.")
@@ -55,7 +52,7 @@ class TelemetryEvent(BaseModel):
     )
     message: str = Field(min_length=1, description="Human-readable summary of the event.")
     data: dict[str, Any] = Field(default_factory=dict, description="Structured metadata for the event.")
-    occurred_at: datetime = Field(default_factory=_utcnow, description="UTC timestamp when the event was emitted.")
+    occurred_at: datetime = Field(default_factory=utcnow, description="UTC timestamp when the event was emitted.")
 
 
 class HealthStatus(BaseModel):
@@ -93,9 +90,7 @@ class RuntimeTelemetrySnapshot(BaseModel):
     )
     recent_event_count: int = Field(ge=0, description="Number of retained in-memory telemetry events.")
     recent_error_count: int = Field(ge=0, description="Number of retained error-level telemetry events.")
-    generated_at: datetime = Field(
-        default_factory=_utcnow, description="UTC timestamp when the snapshot was generated."
-    )
+    generated_at: datetime = Field(default_factory=utcnow, description="UTC timestamp when the snapshot was generated.")
 
 
 class ChannelTelemetryEntry(BaseModel):
@@ -118,9 +113,7 @@ class ChannelsTelemetrySnapshot(BaseModel):
     runtime_id: str = Field(min_length=1, description="Stable runtime identifier for this isolated Pillbug instance.")
     enabled_channels: tuple[str, ...] = Field(default_factory=tuple, description="Configured enabled channel names.")
     channels: list[ChannelTelemetryEntry] = Field(default_factory=list, description="Per-channel runtime telemetry.")
-    generated_at: datetime = Field(
-        default_factory=_utcnow, description="UTC timestamp when the snapshot was generated."
-    )
+    generated_at: datetime = Field(default_factory=utcnow, description="UTC timestamp when the snapshot was generated.")
 
 
 class CacheSummary(BaseModel):
@@ -200,9 +193,7 @@ class SessionsTelemetrySnapshot(BaseModel):
     sessions: list[SessionTelemetryEntry] = Field(
         default_factory=list, description="Tracked sessions ordered by recent activity."
     )
-    generated_at: datetime = Field(
-        default_factory=_utcnow, description="UTC timestamp when the snapshot was generated."
-    )
+    generated_at: datetime = Field(default_factory=utcnow, description="UTC timestamp when the snapshot was generated.")
 
 
 class SessionHistoryTurn(BaseModel):
@@ -245,7 +236,7 @@ class SessionHistoryPreview(BaseModel):
         default_factory=list,
         description="Tail of the conversation history (oldest first within the returned window).",
     )
-    generated_at: datetime = Field(default_factory=_utcnow, description="UTC timestamp when the preview was generated.")
+    generated_at: datetime = Field(default_factory=utcnow, description="UTC timestamp when the preview was generated.")
 
 
 class TaskExecutionTelemetry(BaseModel):
@@ -333,6 +324,4 @@ class TasksTelemetrySnapshot(BaseModel):
     tasks: list[AgentTaskTelemetryEntry] = Field(
         default_factory=list, description="Persisted task definitions with execution metadata."
     )
-    generated_at: datetime = Field(
-        default_factory=_utcnow, description="UTC timestamp when the snapshot was generated."
-    )
+    generated_at: datetime = Field(default_factory=utcnow, description="UTC timestamp when the snapshot was generated.")

@@ -2,17 +2,14 @@
 Schema definitions for authenticated operator and control surfaces.
 """
 
-from datetime import UTC, datetime
+from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
 from app.schema.tasks import AgentTaskGoal
-
-
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
+from app.util.clock import utcnow
 
 
 class AuthScope(StrEnum):
@@ -111,7 +108,7 @@ class ApprovalRequest(BaseModel):
         default="mcp",
         description="Identifier of the surface that drafted the command (e.g. 'mcp', session key).",
     )
-    requested_at: datetime = Field(default_factory=_utcnow)
+    requested_at: datetime = Field(default_factory=utcnow)
     decided_at: datetime | None = None
     decided_by: str | None = Field(default=None, description="Auth scope or principal that decided the draft.")
     decided_comment: str | None = Field(default=None, max_length=2000)
@@ -186,7 +183,7 @@ class OutboundDraft(BaseModel):
         default="mcp",
         description="Identifier of the surface that drafted the message (e.g. 'mcp', session key).",
     )
-    requested_at: datetime = Field(default_factory=_utcnow)
+    requested_at: datetime = Field(default_factory=utcnow)
     decided_at: datetime | None = None
     decided_by: str | None = None
     decided_comment: str | None = Field(default=None, max_length=2000)
@@ -315,7 +312,7 @@ class OperatorResponse(BaseModel):
     message: str = Field(min_length=1, description="Human-readable response text for dashboards or operators.")
     scope: AuthScope | None = Field(default=None, description="The scope that authorized the response, if known.")
     responded_at: datetime = Field(
-        default_factory=_utcnow,
+        default_factory=utcnow,
         description="UTC timestamp when the response payload was created.",
     )
     details: dict[str, Any] | None = Field(

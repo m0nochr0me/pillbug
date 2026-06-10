@@ -1,10 +1,8 @@
-from datetime import UTC, datetime
+from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
+from app.util.clock import utcnow
 
 
 class ShortUrlRecord(BaseModel):
@@ -19,7 +17,7 @@ class ShortUrlRecord(BaseModel):
         min_length=1,
     )
     created_at: datetime = Field(
-        default_factory=_utcnow,
+        default_factory=utcnow,
         description="UTC timestamp when the short URL token was created",
     )
 

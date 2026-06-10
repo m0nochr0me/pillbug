@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -29,6 +28,7 @@ from app.schema.control import (
     OutboundDraftKind,
     OutboundDraftStatus,
 )
+from app.util.clock import utcnow
 
 __all__ = (
     "ApprovalStore",
@@ -41,10 +41,6 @@ __all__ = (
 
 
 DraftKind = Literal["command", "outbound"]
-
-
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
 
 
 class ApprovalStore:
@@ -106,7 +102,7 @@ class ApprovalStore:
             timeout_seconds=timeout_seconds,
             status="pending",
             source=source,
-            requested_at=_utcnow(),
+            requested_at=utcnow(),
         )
         async with self._lock:
             self._cache[draft_id] = record
@@ -161,7 +157,7 @@ class ApprovalStore:
             updated = record.model_copy(
                 update={
                     "status": new_status,
-                    "decided_at": _utcnow(),
+                    "decided_at": utcnow(),
                     "decided_by": decided_by,
                     "decided_comment": comment,
                 }
@@ -180,7 +176,7 @@ class ApprovalStore:
                 raise PermissionError(f"Approval draft already used: {draft_id}")
             if record.status != "approved":
                 raise PermissionError(f"Approval draft is not approved (status={record.status}): {draft_id}")
-            updated = record.model_copy(update={"status": "used", "used_at": _utcnow()})
+            updated = record.model_copy(update={"status": "used", "used_at": utcnow()})
             self._cache[draft_id] = updated
             await self._persist(updated)
         return updated
@@ -251,7 +247,7 @@ class OutboundDraftStore:
             attachment=attachment,
             timeout_seconds=timeout_seconds,
             source=source,
-            requested_at=_utcnow(),
+            requested_at=utcnow(),
         )
         async with self._lock:
             self._cache[draft_id] = record
@@ -306,7 +302,7 @@ class OutboundDraftStore:
             updated = record.model_copy(
                 update={
                     "status": new_status,
-                    "decided_at": _utcnow(),
+                    "decided_at": utcnow(),
                     "decided_by": decided_by,
                     "decided_comment": comment,
                 }
