@@ -1,271 +1,49 @@
-"""
-AI client
-"""
+"""GeminiChatSession: per-session chat state, tool calling, and history management."""
 
 import asyncio
-import mimetypes
-from collections.abc import Awaitable, Callable
-from datetime import datetime
-from functools import cache
-from pathlib import Path
-from typing import Any, cast
-from urllib.parse import quote
-from zoneinfo import ZoneInfo
+from typing import TYPE_CHECKING, Any, cast
 
 import aiofile
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
-from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
-from google.oauth2 import service_account
-from pydantic import ValidationError
 
+from app.core.ai.attachments import (
+    _INLINE_ATTACHMENT_MAX_BYTES,
+    _extract_inbound_attachments,
+    _extract_injectable_content,
+    _has_file_data_parts,
+    _strip_file_data_parts,
+    _supported_attachment_mime_type,
+    resolve_inbound_attachment_path,
+)
 from app.core.config import settings
-from app.core.jinja import render_template
 from app.core.log import logger
-from app.runtime.channels import get_available_channels_context, get_channel_plugin
 from app.runtime.session_binding import (
     bind_mcp_session_to_runtime_session,
-    bind_runtime_session_todo_snapshot,
     consume_pending_outbound_injections,
     get_runtime_session_todo_snapshot,
 )
-from app.schema.ai import ChatResponse, ChatSessionSnapshot, ChatSessionUsageTotals, InboundAttachment, Skill
-from app.schema.messages import extract_a2a_origin_route
+from app.schema.ai import ChatResponse, ChatSessionUsageTotals, InboundAttachment
 from app.schema.todo import TodoListSnapshot
-from app.util.base_dir import get_module_root
 from app.util.rehydration import RehydrationBundle, render_rehydration_text, summarize_tool_observation
-from app.util.skills import discover_workspace_skills
-from app.util.workspace import resolve_path_within_root
 
-__all__ = (
-    "GeminiChatService",
-    "GeminiChatSession",
-    "chat_service",
-)
+if TYPE_CHECKING:
+    from app.core.ai.service import GeminiChatService
 
-_TEXT_ATTACHMENT_MIME_TYPES = {
-    "text/markdown": "text/markdown",
-    "text/plain": "text/plain",
-    "text/x-markdown": "text/markdown",
-}
-_ATTACHMENT_MIME_TYPE_OVERRIDES = {
-    ".markdown": "text/markdown",
-    ".md": "text/markdown",
-    ".pdf": "application/pdf",
-    ".txt": "text/plain",
-}
-_INLINE_ATTACHMENT_MAX_BYTES = 8 * 1024 * 1024
+
 _COMPRESSED_SESSION_HISTORY_PROMPT_NAME = "compressed_session_history.prompt.md"
-_DIRECT_REPLY_CHANNEL_MEMO_PROMPT_NAME = "direct_reply_channel_memo.prompt.md"
 _EMPTY_MODEL_RESPONSE_FALLBACK_PROMPT_NAME = "empty_model_response_fallback.prompt.md"
 _EMPTY_RESPONSE_NUDGE_PROMPT_NAME = "empty_response_nudge.prompt.md"
-_MODEL_INPUT_PROMPT_NAME = "model_input.prompt.md"
-_SKILLS_PROMPT_NAME = "skills.prompt.md"
 _UNKNOWN_TOOL_NUDGE_PROMPT_NAME = "unknown_tool_nudge.prompt.md"
 # Max distinct hallucinated tool names to re-prompt past in a single send before giving up.
 _UNKNOWN_TOOL_MAX_NUDGES = 2
-_CHANNEL_MEMO_PROMPTS = {"a2a": "a2a_channel_memo.prompt.md", "telegram": "telegram_channel_memo.prompt.md"}
-_DIRECT_REPLY_CHANNEL_EXCLUSIONS = frozenset({"a2a", "trigger"})
 _TODO_STATUS_LABELS = {
     "not-started": "not started",
     "in-progress": "in progress",
     "completed": "completed",
 }
-
-
-def _has_file_data_parts(history: list[types.Content]) -> bool:
-    for content in history:
-        for part in content.parts or []:
-            if getattr(part, "file_data", None) is not None:
-                return True
-    return False
-
-
-def _strip_file_data_parts(history: list[types.Content]) -> list[types.Content]:
-    sanitized: list[types.Content] = []
-    for content in history:
-        parts = content.parts or []
-        kept = [part for part in parts if getattr(part, "file_data", None) is None]
-        if not kept:
-            continue
-        sanitized.append(types.Content(role=content.role, parts=kept))
-    return sanitized
-
-
-def _extract_injectable_content(history: list[types.Content]) -> types.Content | None:
-    """Return the last model response from history with only text and thought parts (thought_signature preserved)."""
-    for content in reversed(history):
-        if getattr(content, "role", None) != "model":
-            continue
-        injectable_parts = [
-            p
-            for p in (content.parts or [])
-            if getattr(p, "thought", False) or isinstance(getattr(p, "text", None), str)
-        ]
-        if injectable_parts:
-            return types.Content(role="model", parts=injectable_parts)
-    return None
-
-
-def _normalize_supported_attachment_mime_type(mime_type: str) -> str | None:
-    normalized_mime_type = mime_type.strip().lower()
-    if not normalized_mime_type:
-        return None
-    if normalized_mime_type.startswith("audio/"):
-        return normalized_mime_type
-    if normalized_mime_type.startswith("image/"):
-        return normalized_mime_type
-    if normalized_mime_type == "application/pdf":
-        return normalized_mime_type
-    return _TEXT_ATTACHMENT_MIME_TYPES.get(normalized_mime_type)
-
-
-def _supported_attachment_mime_type(attachment_path: Path, attachment: InboundAttachment) -> str | None:
-    candidates: list[str] = []
-
-    if attachment.mime_type:
-        candidates.append(attachment.mime_type)
-
-    suffix_override = _ATTACHMENT_MIME_TYPE_OVERRIDES.get(attachment_path.suffix.lower())
-    if suffix_override is not None:
-        candidates.append(suffix_override)
-
-    guessed_mime_type, _ = mimetypes.guess_type(attachment_path.name)
-    if guessed_mime_type is not None:
-        candidates.append(guessed_mime_type)
-
-    if attachment.kind == "photo":
-        candidates.append("image/jpeg")
-
-    for candidate in candidates:
-        if normalized_candidate := _normalize_supported_attachment_mime_type(candidate):
-            return normalized_candidate
-
-    return None
-
-
-def _legacy_attachment_from_metadata(metadata: dict[str, Any]) -> InboundAttachment | None:
-    attachment_path = metadata.get("telegram_attachment_download_path")
-    if not isinstance(attachment_path, str) or not attachment_path.strip():
-        return None
-
-    return InboundAttachment(
-        path=attachment_path,
-        mime_type=metadata.get("telegram_attachment_mime_type")
-        if isinstance(metadata.get("telegram_attachment_mime_type"), str)
-        else None,
-        display_name=(
-            metadata.get("telegram_attachment_original_file_name")
-            if isinstance(metadata.get("telegram_attachment_original_file_name"), str)
-            else None
-        ),
-        source="telegram",
-        kind=metadata.get("telegram_attachment_type")
-        if isinstance(metadata.get("telegram_attachment_type"), str)
-        else None,
-    )
-
-
-def resolve_inbound_attachment_path(attachment_path: str, channel_source: str | None) -> Path | None:
-    """Resolve an inbound attachment within the per-channel sub-root (plan P2 #17).
-
-    Returns the resolved path when both the workspace sandbox and (if configured) the
-    per-channel sub-root accept it; returns None when the attachment escapes either
-    boundary. Channels without an explicit sub-root entry fall back to the workspace
-    root unchanged so unrelated plugins keep working.
-    """
-    try:
-        resolved = resolve_path_within_root(attachment_path, settings.WORKSPACE_ROOT)
-    except ValueError:
-        return None
-    sub_root = settings.inbound_attachment_roots().get(channel_source or "")
-    if sub_root is None:
-        return resolved
-    expected_root = (settings.WORKSPACE_ROOT / sub_root).resolve()
-    try:
-        resolved.relative_to(expected_root)
-    except ValueError:
-        return None
-    return resolved
-
-
-def _extract_inbound_attachments(metadata: dict[str, Any]) -> list[InboundAttachment]:
-    attachments: list[InboundAttachment] = []
-    raw_attachments = metadata.get("inbound_attachments")
-
-    raw_values: list[object] = []
-    if isinstance(raw_attachments, list | tuple):
-        raw_values.extend(raw_attachments)
-    elif isinstance(raw_attachments, dict):
-        raw_values.append(raw_attachments)
-
-    for raw_value in raw_values:
-        try:
-            attachments.append(InboundAttachment.model_validate(raw_value))
-        except ValidationError as exc:
-            logger.warning(f"Skipping invalid inbound attachment metadata entry: {exc}")
-
-    if not attachments and (legacy_attachment := _legacy_attachment_from_metadata(metadata)) is not None:
-        attachments.append(legacy_attachment)
-
-    return attachments
-
-
-def _normalize_channel_name(channel_name: str | None) -> str | None:
-    if channel_name is None:
-        return None
-
-    normalized_channel_name = channel_name.strip().lower()
-    return normalized_channel_name or None
-
-
-def _filter_base_context_channels(channels: list[str]) -> list[str]:
-    return [channel for channel in channels if channel.partition(":")[0].strip().lower() != "trigger"]
-
-
-def _resolve_user_origin_channel(
-    channel_name: str | None,
-    message_metadata: list[dict[str, Any]] | None,
-) -> str | None:
-    if message_metadata:
-        for metadata in reversed(message_metadata):
-            if origin_route := extract_a2a_origin_route(metadata):
-                return _normalize_channel_name(origin_route[0])
-
-    return _normalize_channel_name(channel_name)
-
-
-def _resolve_direct_reply_channel_name(
-    channel_name: str | None,
-    message_metadata: list[dict[str, Any]] | None,
-) -> str | None:
-    origin_channel_name = _resolve_user_origin_channel(channel_name, message_metadata)
-    if origin_channel_name is None or origin_channel_name in _DIRECT_REPLY_CHANNEL_EXCLUSIONS:
-        return None
-
-    return origin_channel_name
-
-
-@cache
-def _load_agents_md_cached(path: str, mtime_ns: int) -> str:
-    # P1 #8: mtime-keyed cache mirrors `_load_security_patterns_from_disk` in
-    # app/runtime/pipeline.py. Keeps AGENTS.md off the hot path while still picking up
-    # edits that change the file's mtime.
-    del mtime_ns
-    return Path(path).read_text(encoding="utf-8")
-
-
-async def _read_agents_md(agents_md_path: Path) -> str:
-    def _read() -> str:
-        try:
-            mtime_ns = agents_md_path.stat().st_mtime_ns
-        except OSError:
-            return ""
-        return _load_agents_md_cached(str(agents_md_path), mtime_ns)
-
-    return await asyncio.to_thread(_read)
 
 
 def _render_todo_list_instruction(todo_snapshot: TodoListSnapshot | None) -> str | None:
@@ -284,233 +62,6 @@ def _render_todo_list_instruction(todo_snapshot: TodoListSnapshot | None) -> str
 
     lines.append("Use manage_todo_list to keep this plan accurate when progress changes.")
     return "\n".join(lines)
-
-
-class GeminiChatService:
-    def __init__(self) -> None:
-        self.ai_client = self._build_genai_client()
-        self._sessions_dir = settings.SESSIONS_DIR
-        self._module_root = get_module_root("app")
-        self._prompts_dir = self._module_root / "prompts"
-        self._outbound_injection_handler: Callable[[str, types.Content], Awaitable[None]] | None = None
-
-    @staticmethod
-    def _build_genai_client() -> genai.Client:
-        if settings.GEMINI_BACKEND == "vertex":
-            credentials = None
-            if settings.GEMINI_VERTEX_CREDENTIALS_PATH is not None:
-                credentials = service_account.Credentials.from_service_account_file(
-                    str(settings.GEMINI_VERTEX_CREDENTIALS_PATH),
-                    scopes=["https://www.googleapis.com/auth/cloud-platform"],
-                )
-
-            return genai.Client(
-                vertexai=True,
-                project=settings.GEMINI_VERTEX_PROJECT,
-                location=settings.GEMINI_VERTEX_LOCATION,
-                credentials=credentials,
-            )
-
-        http_options = types.HttpOptions(base_url=settings.GEMINI_BASE_URL) if settings.GEMINI_BASE_URL else None
-        return genai.Client(api_key=settings.GEMINI_API_KEY, http_options=http_options)
-
-    def set_outbound_injection_handler(self, handler: Callable[[str, types.Content], Awaitable[None]] | None) -> None:
-        self._outbound_injection_handler = handler
-
-    def create_session(
-        self,
-        session_id: str,
-        history: list[types.Content] | None = None,
-        usage_totals: ChatSessionUsageTotals | None = None,
-    ) -> GeminiChatSession:
-        return GeminiChatSession(self, session_id=session_id, history=history, usage_totals=usage_totals)
-
-    async def restore_session(self, session_id: str) -> GeminiChatSession:
-        snapshot = await self._load_session_snapshot(session_id)
-        history = snapshot.history if snapshot is not None else None
-        usage_totals = snapshot.usage_totals if snapshot is not None else None
-        if history:
-            logger.info(f"Restored session history for {session_id} with {len(history)} messages")
-
-        return self.create_session(
-            session_id=session_id,
-            history=history or None,
-            usage_totals=usage_totals,
-        )
-
-    async def reset_session(self, session_id: str) -> GeminiChatSession:
-        await self._delete_session_history(session_id)
-        bind_runtime_session_todo_snapshot(session_id, None)
-        return self.create_session(session_id=session_id)
-
-    async def save_session_history(
-        self,
-        session_id: str,
-        history: list[types.Content],
-        usage_totals: ChatSessionUsageTotals,
-        system_instruction: str | None = None,
-    ) -> None:
-        self._sessions_dir.mkdir(parents=True, exist_ok=True)
-        snapshot = ChatSessionSnapshot(
-            session_id=session_id,
-            history=history,
-            usage_totals=usage_totals,
-            system_instruction=system_instruction,
-        )
-        session_path = self._get_session_path(session_id)
-
-        async with aiofile.AIOFile(session_path, "w", encoding="utf-8") as session_file:
-            await session_file.write(snapshot.model_dump_json(indent=2))
-
-    async def load_history_snapshot(self, session_id: str) -> list[types.Content]:
-        snapshot = await self._load_session_snapshot(session_id)
-        if snapshot is None or not snapshot.history:
-            return []
-        return list(snapshot.history)
-
-    async def _load_session_snapshot(self, session_id: str) -> ChatSessionSnapshot | None:
-        session_path = self._get_session_path(session_id)
-        if not session_path.is_file():
-            return None
-
-        try:
-            async with aiofile.AIOFile(session_path, "r", encoding="utf-8") as session_file:
-                return ChatSessionSnapshot.model_validate_json(str(await session_file.read()))
-        except Exception:
-            logger.exception(f"Failed to restore session history from {session_path}")
-            return None
-
-    async def _delete_session_history(self, session_id: str) -> None:
-        session_path = self._get_session_path(session_id)
-        if session_path.exists():
-            session_path.unlink()
-
-    def _get_session_path(self, session_id: str):
-        return self._sessions_dir / quote(session_id, safe="")
-
-    def _resolve_prompt_path(self, prompt_name: str) -> Path:
-        normalized_prompt_name = Path(prompt_name).name
-        if normalized_prompt_name != prompt_name:
-            raise ValueError(f"Prompt name must not contain directory segments: {prompt_name}")
-
-        prompt_path = self._prompts_dir / normalized_prompt_name
-        if not prompt_path.is_file():
-            raise FileNotFoundError(f"Prompt file not found: {prompt_path}")
-
-        return prompt_path
-
-    async def read_prompt_text(self, prompt_name: str) -> str:
-        return self.render_prompt_text(prompt_name)
-
-    def render_prompt_text(self, prompt_name: str, **context: Any) -> str:
-        prompt_path = self._resolve_prompt_path(prompt_name)
-        template_name = prompt_path.relative_to(self._module_root).as_posix()
-        return render_template(template_name, **context)
-
-    def render_required_prompt_text(self, prompt_name: str, **context: Any) -> str:
-        rendered = self.render_prompt_text(prompt_name, **context).strip()
-        if not rendered:
-            raise ValueError(f"Prompt rendered blank text: {prompt_name}")
-
-        return rendered
-
-    async def get_base_context(
-        self,
-        *,
-        channel_name: str | None = None,
-        message_metadata: list[dict[str, Any]] | None = None,
-    ) -> str:
-        now = datetime.now(ZoneInfo(settings.TIMEZONE))
-        available_channels = _filter_base_context_channels(await get_available_channels_context())
-        base_context_lines = [
-            "---",
-            f"datetime: {now:%Y-%b-%d %H:%M:%S}",
-            f"timezone: {settings.TIMEZONE}",
-            f"workspace: {settings.WORKSPACE_ROOT}",
-            f"available_channels: {', '.join(available_channels)}",
-        ]
-
-        if direct_reply_channel_name := _resolve_direct_reply_channel_name(channel_name, message_metadata):
-            direct_reply_instruction = self.render_prompt_text(
-                _DIRECT_REPLY_CHANNEL_MEMO_PROMPT_NAME,
-                channel_name=direct_reply_channel_name,
-            ).strip()
-            if direct_reply_instruction:
-                base_context_lines.append(direct_reply_instruction)
-
-        base_context_lines.append("---\n")
-
-        return "\n".join(base_context_lines)
-
-    def _render_channel_instruction_memo(self, channel_name: str, context: dict[str, Any]) -> str | None:
-        prompt_name = _CHANNEL_MEMO_PROMPTS.get(channel_name)
-        if prompt_name is None:
-            return None
-
-        rendered = self.render_prompt_text(prompt_name, **context).strip()
-        return rendered or None
-
-    async def get_channel_instruction_memos(self) -> list[str]:
-        memos: list[str] = []
-
-        for channel_name in sorted(settings.enabled_channels()):
-            channel = get_channel_plugin(channel_name, create=True)
-            if channel is None:
-                continue
-
-            instruction_context = getattr(channel, "instruction_context", None)
-            if not callable(instruction_context):
-                continue
-
-            try:
-                context = instruction_context()
-            except Exception:
-                logger.exception(f"Failed to build instruction context for channel={channel_name}")
-                continue
-
-            if not isinstance(context, dict) or not context:
-                continue
-
-            if memo := self._render_channel_instruction_memo(channel_name, context):
-                memos.append(memo)
-
-        return memos
-
-    async def discover_skills(self) -> list[Skill]:
-        """
-        Glob directories in the skills base dir, and treat each one as a skill
-        """
-        return await asyncio.to_thread(discover_workspace_skills, settings.WORKSPACE_ROOT)
-
-    async def build_system_instruction(
-        self,
-        *,
-        channel_name: str | None = None,
-        message_metadata: list[dict[str, Any]] | None = None,
-    ) -> str | None:
-        # P1 #5: the system instruction holds only stable content (agents_md → skills →
-        # channel_memos → base_context). The per-session todo snapshot moved to the user
-        # turn so it doesn't fragment Gemini's automatic prefix cache. base_context still
-        # carries the volatile datetime line; it lives at the end so the cached prefix is
-        # everything before it.
-        agents_md = await _read_agents_md(settings.WORKSPACE_ROOT / "AGENTS.md")
-        skills_prompt: str | None = None
-        if skills := await self.discover_skills():
-            skills_prompt = self.render_prompt_text(
-                _SKILLS_PROMPT_NAME,
-                skills=skills,
-            )
-        channel_memos = await self.get_channel_instruction_memos()
-        return self.render_prompt_text(
-            _MODEL_INPUT_PROMPT_NAME,
-            base_context=await self.get_base_context(
-                channel_name=channel_name,
-                message_metadata=message_metadata,
-            ),
-            agents_md=agents_md,
-            channel_memos=tuple(channel_memos),
-            skills=skills_prompt.strip() if skills_prompt else None,
-        )
 
 
 class GeminiChatSession:
@@ -1085,6 +636,3 @@ class GeminiChatSession:
                 texts.append(part_text)
 
         return "".join(texts)
-
-
-chat_service = GeminiChatService()

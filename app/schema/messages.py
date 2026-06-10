@@ -3,12 +3,14 @@ Schema definitions for messages received from channels.
 """
 
 import re
-from datetime import UTC, datetime
+from datetime import datetime
 from enum import StrEnum
 from typing import Any, Self
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_validator
+
+from app.util.clock import utcnow
 
 _RUNTIME_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$")
 _A2A_CONVERGENCE_METADATA_KEY = "pillbug_convergence"
@@ -80,10 +82,6 @@ def extract_a2a_origin_channel_metadata(metadata: dict[str, Any]) -> dict[str, o
     return normalized_channel_metadata or None
 
 
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
-
-
 class OutboundAttachment(BaseModel):
     path: str = Field(
         ...,
@@ -126,7 +124,7 @@ class InboundMessage(BaseModel):
     text: str
     user_id: str | None = None
     message_id: str = Field(default_factory=lambda: uuid4().hex)
-    received_at: datetime = Field(default_factory=_utcnow)
+    received_at: datetime = Field(default_factory=utcnow)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @property

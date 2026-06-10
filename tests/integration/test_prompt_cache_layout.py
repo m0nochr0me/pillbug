@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from app.core import ai as ai_mod
+from app.core.ai import service as ai_service_mod
 from app.core.config import settings
 from app.runtime.session_binding import bind_runtime_session_todo_snapshot
 from app.schema.todo import TodoItem, TodoListSnapshot
@@ -95,6 +96,6 @@ async def test_channel_memos_iterated_in_sorted_order(monkeypatch, service, work
         captured.append(name)
         return None  # short-circuits the memo branch; we only care about iteration order
 
-    monkeypatch.setattr(ai_mod, "get_channel_plugin", _fake_get_plugin)
+    monkeypatch.setattr(ai_service_mod, "get_channel_plugin", _fake_get_plugin)
     await service.get_channel_instruction_memos()
     assert captured == ["alpha", "mid", "zeta"]

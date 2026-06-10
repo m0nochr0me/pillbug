@@ -2,24 +2,21 @@
 Schema definitions for scheduled background agent tasks.
 """
 
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Annotated, Literal, Self
 from uuid import uuid4
 
 from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 from app.core.config import settings
-
-
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
+from app.util.clock import utcnow
 
 
 class AgentTaskRunRecord(BaseModel):
     state: Literal["completed", "failed"]
     action: Literal["continue", "cancel"] = "continue"
-    started_at: datetime = Field(default_factory=_utcnow)
-    finished_at: datetime = Field(default_factory=_utcnow)
+    started_at: datetime = Field(default_factory=utcnow)
+    finished_at: datetime = Field(default_factory=utcnow)
     response_text: str | None = None
     error: str | None = None
 
@@ -97,8 +94,8 @@ class AgentTaskDefinition(BaseModel):
         default=None,
         description="Optional per-task goal contract (max steps, forbidden actions, etc.).",
     )
-    created_at: datetime = Field(default_factory=_utcnow)
-    updated_at: datetime = Field(default_factory=_utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
     last_run: AgentTaskRunRecord | None = None
 
     @model_validator(mode="after")

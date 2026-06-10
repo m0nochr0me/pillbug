@@ -2,7 +2,6 @@
 Redis client and connection pool setup
 """
 
-
 from redis.asyncio import ConnectionPool, Redis
 
 from app.core.config import settings

@@ -13,6 +13,7 @@ import pytest
 
 from app import mcp as mcp_mod
 from app.core.config import settings
+from app.runtime.command_execution import build_command_environment
 
 
 @pytest.fixture
@@ -26,7 +27,7 @@ def test_pillbug_secrets_are_not_inherited(monkeypatch, workspace_settings):
     monkeypatch.setenv("PB_A2A_BEARER_TOKEN", "and-yet-another-leak")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "definitely-not-allowed")
 
-    env = mcp_mod._build_command_environment(ctx=None)
+    env = build_command_environment(ctx=None)
 
     assert "PB_GEMINI_API_KEY" not in env
     assert "PB_DASHBOARD_BEARER_TOKEN" not in env
@@ -35,7 +36,7 @@ def test_pillbug_secrets_are_not_inherited(monkeypatch, workspace_settings):
 
 
 def test_pillbug_injected_vars_are_present(workspace_settings):
-    env = mcp_mod._build_command_environment(ctx=None)
+    env = build_command_environment(ctx=None)
 
     assert env["PB_RUNTIME_ID"] == settings.runtime_id
     assert env["PB_WORKSPACE_ROOT"] == str(settings.WORKSPACE_ROOT)
@@ -49,7 +50,7 @@ def test_default_allowlist_vars_pass_through(monkeypatch, workspace_settings):
     monkeypatch.setenv("TERM", "xterm")
     monkeypatch.setenv("TZ", "UTC")
 
-    env = mcp_mod._build_command_environment(ctx=None)
+    env = build_command_environment(ctx=None)
 
     assert env["PATH"] == "/usr/bin:/bin"
     assert env["HOME"] == "/tmp/fake-home"
@@ -65,7 +66,7 @@ def test_passthrough_can_forward_extra_names(monkeypatch, workspace_settings):
     monkeypatch.setenv("CUSTOM_VAR", "yes")
     monkeypatch.setenv("UNRELATED_VAR", "no")
 
-    env = mcp_mod._build_command_environment(ctx=None)
+    env = build_command_environment(ctx=None)
 
     assert env["MY_TOOL_HOME"] == "/opt/my-tool"
     assert env["CUSTOM_VAR"] == "yes"
@@ -82,7 +83,7 @@ def test_passthrough_cannot_unblock_sensitive_names(monkeypatch, workspace_setti
     monkeypatch.setenv("SOME_PASSWORD", "still-blocked")
     monkeypatch.setenv("API_KEY", "still-blocked")
 
-    env = mcp_mod._build_command_environment(ctx=None)
+    env = build_command_environment(ctx=None)
 
     assert "MY_SECRET_TOKEN" not in env
     assert "SOME_PASSWORD" not in env
@@ -93,7 +94,7 @@ def test_pb_public_prefix_overrides_sensitive_block(monkeypatch, workspace_setti
     monkeypatch.setattr(settings, "EXECUTE_COMMAND_ENV_PASSTHROUGH", "PB_PUBLIC_DEMO_TOKEN")
     monkeypatch.setenv("PB_PUBLIC_DEMO_TOKEN", "intentionally-shared")
 
-    env = mcp_mod._build_command_environment(ctx=None)
+    env = build_command_environment(ctx=None)
 
     assert env["PB_PUBLIC_DEMO_TOKEN"] == "intentionally-shared"
 

@@ -5,7 +5,6 @@ import mimetypes
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Annotated, Any
 
 import aiohttp
@@ -19,13 +18,21 @@ from slack_sdk.web.async_client import AsyncWebClient
 
 from app.core.config import settings
 from app.core.log import ThrottledExceptionLogger, logger
+from app.runtime.channel_helpers import (
+    build_threaded_conversation_id,
+    chunk_message,
+    parse_threaded_conversation_id,
+    render_attachment_text,
+    resolve_attachment_path,
+    sanitize_filename,
+    split_csv,
+)
 from app.runtime.channels import BaseChannel, register_channel_conversation
 from app.schema.messages import InboundMessage, OutboundAttachment
 from app.util.workspace import async_write_bytes_file, display_path
 
 _MAX_SLACK_MESSAGE_CHARS = 3500
 _SLACK_DOWNLOADS_DIR = settings.WORKSPACE_ROOT / "downloads" / "slack"
-_FILENAME_SANITIZER = re.compile(r"[^A-Za-z0-9._-]+")
 _MENTION_PATTERN = re.compile(r"<@[UW][A-Z0-9]+>")
 _TRANSIENT_SLACK_LOG_COOLDOWN_SECONDS = 60.0
 _INTERESTING_EVENT_TYPES = frozenset({"message", "app_mention"})
@@ -46,40 +53,6 @@ _IGNORED_MESSAGE_SUBTYPES = frozenset(
 _SLACK_QUEUE_SENTINEL: Any = object()
 
 
-def _split_csv(value: str) -> list[str]:
-    return [item.strip() for item in value.split(",") if item.strip()]
-
-
-def _chunk_message(text: str, *, max_chars: int = _MAX_SLACK_MESSAGE_CHARS) -> tuple[str, ...]:
-    remaining = text.strip() or " "
-    chunks: list[str] = []
-
-    while len(remaining) > max_chars:
-        split_at = remaining.rfind("\n\n", 0, max_chars + 1)
-        if split_at < max_chars // 2:
-            split_at = remaining.rfind("\n", 0, max_chars + 1)
-        if split_at < max_chars // 2:
-            split_at = remaining.rfind(" ", 0, max_chars + 1)
-        if split_at < max_chars // 2:
-            split_at = max_chars
-
-        chunk = remaining[:split_at].rstrip()
-        if chunk:
-            chunks.append(chunk)
-
-        remaining = remaining[split_at:].lstrip()
-
-    if remaining:
-        chunks.append(remaining)
-
-    return tuple(chunks)
-
-
-def _sanitize_filename(value: str) -> str:
-    sanitized = _FILENAME_SANITIZER.sub("_", value).strip("._")
-    return sanitized or "attachment"
-
-
 def _is_transient_slack_error(exc: BaseException) -> bool:
     if isinstance(exc, TimeoutError | ConnectionError | OSError | aiohttp.ClientError):
         return True
@@ -91,35 +64,21 @@ def _is_transient_slack_error(exc: BaseException) -> bool:
     return False
 
 
-def _resolve_attachment_path(attachment: OutboundAttachment) -> Path:
-    raw_path = Path(attachment.path)
-    if raw_path.is_absolute():
-        return raw_path
-    return settings.WORKSPACE_ROOT / raw_path
-
-
 def _strip_mentions(text: str) -> str:
     return _MENTION_PATTERN.sub("", text).strip()
 
 
 def _parse_conversation_id(conversation_id: str) -> tuple[str, str | None]:
     """Split conversation_id into (channel_id, thread_ts)."""
-    channel_id, separator, thread_ts = conversation_id.partition(":")
-    channel_id = channel_id.strip()
-    if not channel_id:
-        raise ValueError("Slack conversation_id must include a non-empty channel id")
-
-    if not separator:
-        return channel_id, None
-
-    normalized_thread_ts = thread_ts.strip()
-    return channel_id, normalized_thread_ts or None
+    return parse_threaded_conversation_id(
+        conversation_id,
+        separator=":",
+        empty_error="Slack conversation_id must include a non-empty channel id",
+    )
 
 
 def _build_conversation_id(channel_id: str, thread_ts: str | None) -> str:
-    if thread_ts:
-        return f"{channel_id}:{thread_ts}"
-    return channel_id
+    return build_threaded_conversation_id(channel_id, thread_ts, separator=":")
 
 
 def _render_attachment_text(
@@ -130,24 +89,15 @@ def _render_attachment_text(
     mime_type: str | None,
     download_failed: bool,
 ) -> str:
-    lines: list[str] = []
-
-    if caption_text:
-        lines.append(caption_text)
-
-    if download_failed:
-        lines.append("Slack file received, but saving it to the workspace downloads directory failed.")
-    elif workspace_path is not None:
-        lines.append(f"Slack file saved to workspace path: {workspace_path}.")
-    else:
-        lines.append("Slack file received.")
-
-    if original_file_name:
-        lines.append(f"Original filename: {original_file_name}.")
-    if mime_type:
-        lines.append(f"MIME type: {mime_type}.")
-
-    return "\n".join(lines)
+    return render_attachment_text(
+        channel_label="Slack",
+        attachment_label="file",
+        caption_text=caption_text,
+        workspace_path=workspace_path,
+        original_file_name=original_file_name,
+        mime_type=mime_type,
+        download_failed=download_failed,
+    )
 
 
 class SlackChannelSettings(BaseSettings):
@@ -190,7 +140,7 @@ class SlackChannelSettings(BaseSettings):
         if value is None:
             return None
         if isinstance(value, str):
-            parsed = _split_csv(value)
+            parsed = split_csv(value)
             return parsed or None
         return value
 
@@ -359,7 +309,7 @@ class SlackChannel(BaseChannel):
         except Exception as exc:
             self._log_slack_failure(action="queue event failed", exc=exc, suppression_key="queue")
 
-    async def _handle_event(self, event: dict[str, Any]) -> InboundMessage | None:
+    async def _handle_event(self, event: dict[str, Any]) -> InboundMessage | None:  # noqa: C901
         event_type = event.get("type")
         subtype = event.get("subtype")
 
@@ -444,7 +394,7 @@ class SlackChannel(BaseChannel):
         text: str,
         thread_ts: str | None,
     ) -> None:
-        chunks = _chunk_message(text)
+        chunks = chunk_message(text, max_chars=_MAX_SLACK_MESSAGE_CHARS)
         for chunk in chunks:
             params: dict[str, Any] = {"channel": channel_id, "text": chunk}
             if thread_ts:
@@ -469,7 +419,7 @@ class SlackChannel(BaseChannel):
         attachments: tuple[OutboundAttachment, ...],
     ) -> None:
         for attachment in attachments:
-            file_path = _resolve_attachment_path(attachment)
+            file_path = resolve_attachment_path(attachment)
             if not await asyncio.to_thread(file_path.is_file):
                 logger.warning(f"Skipping outbound attachment — file not found: {file_path}")
                 continue
@@ -507,7 +457,7 @@ class SlackChannel(BaseChannel):
         any_downloaded = False
         any_failed = False
         bot_token = self._settings.bot_token.get_secret_value()
-        target_dir = _SLACK_DOWNLOADS_DIR / _sanitize_filename(channel_id)
+        target_dir = _SLACK_DOWNLOADS_DIR / sanitize_filename(channel_id)
         await asyncio.to_thread(target_dir.mkdir, parents=True, exist_ok=True)
 
         async with aiohttp.ClientSession(headers={"Authorization": f"Bearer {bot_token}"}) as session:
@@ -546,8 +496,8 @@ class SlackChannel(BaseChannel):
                         response.raise_for_status()
                         file_bytes = await response.read()
 
-                    safe_message_ts = _sanitize_filename(message_ts)
-                    safe_name = _sanitize_filename(normalized_file_name or str(file_id or "attachment"))
+                    safe_message_ts = sanitize_filename(message_ts)
+                    safe_name = sanitize_filename(normalized_file_name or str(file_id or "attachment"))
                     target_path = target_dir / f"{safe_message_ts}_{safe_name}"
                     if not target_path.suffix and normalized_mime_type:
                         guessed = mimetypes.guess_extension(normalized_mime_type, strict=False)

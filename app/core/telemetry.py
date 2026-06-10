@@ -4,7 +4,7 @@ Runtime telemetry broker and event stream helpers.
 
 import asyncio
 from collections import deque
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any, Literal, Protocol
 from uuid import uuid4
 
@@ -20,12 +20,9 @@ from app.schema.telemetry import (
     TasksTelemetrySnapshot,
     TelemetryEvent,
 )
+from app.util.clock import utcnow
 
 __all__ = ("RuntimeTelemetry", "runtime_telemetry")
-
-
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
 
 
 class _ApplicationLoopTelemetryProvider(Protocol):
@@ -136,7 +133,7 @@ class RuntimeTelemetry:
         return HealthStatus(
             runtime_id=self._metadata.runtime_id,
             started_at=self._metadata.started_at,
-            uptime_seconds=max((_utcnow() - self._metadata.started_at).total_seconds(), 0.0),
+            uptime_seconds=max((utcnow() - self._metadata.started_at).total_seconds(), 0.0),
             last_activity_at=last_activity_at,
             active_session_count=sessions_snapshot.active_session_count,
             scheduler_started=tasks_snapshot.scheduler.started,
@@ -158,7 +155,7 @@ class RuntimeTelemetry:
         return RuntimeTelemetrySnapshot(
             metadata=self.metadata(),
             auth_configuration=auth_configuration,
-            uptime_seconds=max((_utcnow() - self._metadata.started_at).total_seconds(), 0.0),
+            uptime_seconds=max((utcnow() - self._metadata.started_at).total_seconds(), 0.0),
             active_session_count=sessions_snapshot.active_session_count,
             pending_session_count=sessions_snapshot.pending_session_count,
             scheduler_started=tasks_snapshot.scheduler.started,
