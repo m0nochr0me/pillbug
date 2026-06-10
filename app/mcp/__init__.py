@@ -3219,7 +3219,3 @@ async def serve_mcp_server() -> None:
         await task_scheduler.aclose()
         with suppress(asyncio.CancelledError):
             await server_task
-
-
-if __name__ == "__main__":
-    asyncio.run(serve_mcp_server())
