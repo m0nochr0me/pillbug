@@ -20,11 +20,11 @@ from app.runtime.task_runtime_state import (
     clear_task_forbidden_actions,
     set_task_forbidden_actions,
 )
+from app.runtime.task_store import TaskStore
 from app.schema.tasks import (
     AgentTaskDefinition,
     AgentTaskGoal,
     AgentTaskRunRecord,
-    AgentTaskStore,
     CronTaskSchedule,
     DelayedTaskSchedule,
     TaskSchedule,
@@ -37,7 +37,6 @@ from app.schema.telemetry import (
     TasksTelemetrySnapshot,
 )
 from app.util.clock import utcnow
-from app.util.workspace import async_read_text_file, async_write_text_file
 
 __all__ = ("AgentTaskScheduler", "task_scheduler")
 
@@ -187,9 +186,7 @@ class AgentTaskScheduler:
         store_path: Path | None = None,
     ) -> None:
         self._chat_service = chat_service
-        self._store_path = store_path or settings.TASKS_STORE_PATH
-        self._tasks: dict[str, AgentTaskDefinition] = {}
-        self._lock = asyncio.Lock()
+        self._store = TaskStore(store_path or settings.TASKS_STORE_PATH)
         self._startup_lock = asyncio.Lock()
         self._running_tasks: set[str] = set()
         self._docket: Docket | None = None
@@ -211,8 +208,8 @@ class AgentTaskScheduler:
             if self._started:
                 return
 
-            await self._load_store()
-            await asyncio.to_thread(self._store_path.parent.mkdir, parents=True, exist_ok=True)
+            await self._store.load()
+            await self._store.ensure_parent_dir()
 
             docket = Docket(
                 name=settings.docket_name(),
@@ -243,11 +240,11 @@ class AgentTaskScheduler:
                 event_type="scheduler.started",
                 source="scheduler",
                 message="Embedded task scheduler started.",
-                data={"backend": self._scheduler_backend(), "task_count": len(self._tasks)},
+                data={"backend": self._scheduler_backend(), "task_count": len(self._store.tasks)},
             )
 
             try:
-                for definition in self._tasks.values():
+                for definition in self._store.tasks.values():
                     self._register_task(definition)
 
                 await self._reconcile_tasks()
@@ -418,7 +415,7 @@ class AgentTaskScheduler:
 
     async def list_tasks(self) -> dict[str, Any]:
         await self.ensure_started()
-        definitions = await self._task_snapshots()
+        definitions = await self._store.snapshots()
         tasks = [await self._serialize_task(definition) for definition in definitions]
         return {
             "tasks": tasks,
@@ -427,7 +424,7 @@ class AgentTaskScheduler:
 
     async def get_task(self, task_id: str) -> dict[str, Any]:
         await self.ensure_started()
-        definition = await self._task_snapshot(task_id)
+        definition = await self._store.snapshot(task_id)
         if definition is None:
             raise ValueError(f"Task not found: {task_id}")
 
@@ -437,7 +434,7 @@ class AgentTaskScheduler:
 
     async def enable_task(self, task_id: str) -> dict[str, Any]:
         await self.ensure_started()
-        definition = await self._task_snapshot(task_id)
+        definition = await self._store.snapshot(task_id)
         if definition is None:
             raise ValueError(f"Task not found: {task_id}")
 
@@ -461,7 +458,7 @@ class AgentTaskScheduler:
 
     async def disable_task(self, task_id: str) -> dict[str, Any]:
         await self.ensure_started()
-        definition = await self._task_snapshot(task_id)
+        definition = await self._store.snapshot(task_id)
         if definition is None:
             raise ValueError(f"Task not found: {task_id}")
 
@@ -485,7 +482,7 @@ class AgentTaskScheduler:
 
     async def run_task_now(self, task_id: str) -> dict[str, Any]:
         await self.ensure_started()
-        definition = await self._task_snapshot(task_id)
+        definition = await self._store.snapshot(task_id)
         if definition is None:
             raise ValueError(f"Task not found: {task_id}")
 
@@ -497,7 +494,7 @@ class AgentTaskScheduler:
             apply_schedule_effects=False,
             trigger="control",
         )
-        latest_definition = await self._task_snapshot(task_id) or definition
+        latest_definition = await self._store.snapshot(task_id) or definition
         return {
             "task": await self._serialize_task(latest_definition),
             "run": run_result,
@@ -534,9 +531,9 @@ class AgentTaskScheduler:
             goal=goal,
         )
 
-        async with self._lock:
-            self._tasks[definition.task_id] = definition
-            await self._persist_locked()
+        async with self._store.lock:
+            self._store.tasks[definition.task_id] = definition
+            await self._store.persist_locked()
 
         self._register_task(definition)
         if definition.enabled:
@@ -571,8 +568,8 @@ class AgentTaskScheduler:
     ) -> dict[str, Any]:
         await self.ensure_started()
 
-        async with self._lock:
-            current = self._tasks.get(task_id)
+        async with self._store.lock:
+            current = self._store.tasks.get(task_id)
             if current is None:
                 raise ValueError(f"Task not found: {task_id}")
 
@@ -626,8 +623,8 @@ class AgentTaskScheduler:
 
             updated.revision += 1
             updated.updated_at = utcnow()
-            self._tasks[task_id] = updated
-            await self._persist_locked()
+            self._store.tasks[task_id] = updated
+            await self._store.persist_locked()
 
         self._register_task(updated)
         if updated.enabled:
@@ -655,12 +652,12 @@ class AgentTaskScheduler:
     async def delete_task(self, task_id: str) -> dict[str, Any]:
         await self.ensure_started()
 
-        async with self._lock:
-            definition = self._tasks.pop(task_id, None)
+        async with self._store.lock:
+            definition = self._store.tasks.pop(task_id, None)
             if definition is None:
                 raise ValueError(f"Task not found: {task_id}")
 
-            await self._persist_locked()
+            await self._store.persist_locked()
 
         await self._cancel_task(definition.execution_key)
         logger.info(f"Deleted scheduled agent task {task_id}")
@@ -681,7 +678,7 @@ class AgentTaskScheduler:
         revision: int,
         behavior: Perpetual,
     ) -> dict[str, str]:
-        definition = await self._task_snapshot(task_id)
+        definition = await self._store.snapshot(task_id)
         if definition is None or not definition.enabled or definition.revision != revision:
             behavior.cancel()
             return {"action": "cancel", "message": "Task definition is stale or disabled."}
@@ -783,7 +780,7 @@ class AgentTaskScheduler:
             if forbidden_actions:
                 clear_task_forbidden_actions(definition.resolved_session_id)
 
-            latest = await self._task_snapshot(task_id)
+            latest = await self._store.snapshot(task_id)
             if behavior is not None and (latest is None or not latest.enabled or latest.revision != revision):
                 behavior.cancel()
 
@@ -794,7 +791,7 @@ class AgentTaskScheduler:
                 and action == "cancel"
             ):
                 behavior.cancel()
-                await self._disable_task(task_id, revision)
+                await self._store.disable(task_id, revision)
 
             run_record = AgentTaskRunRecord(
                 state="failed" if error else "completed",
@@ -804,7 +801,7 @@ class AgentTaskScheduler:
                 response_text=parsed_message or raw_response or None,
                 error=error,
             )
-            await self._record_run(task_id=task_id, revision=revision, run_record=run_record)
+            await self._store.record_run(task_id=task_id, revision=revision, run_record=run_record)
             await self._append_progress_entry(definition, revision, run_record, trigger=trigger)
 
             if error is None:
@@ -869,57 +866,6 @@ class AgentTaskScheduler:
         with path.open("a", encoding="utf-8") as fh:
             fh.write(line)
 
-    async def _load_store(self) -> None:
-        if not await asyncio.to_thread(self._store_path.is_file):
-            async with self._lock:
-                self._tasks = {}
-            return
-
-        raw_store = await async_read_text_file(self._store_path)
-        store = AgentTaskStore.model_validate_json(raw_store)
-        async with self._lock:
-            self._tasks = {task.task_id: task for task in store.tasks}
-
-    async def _persist_locked(self) -> None:
-        store = AgentTaskStore(tasks=sorted(self._tasks.values(), key=lambda task: task.created_at))
-        payload = store.model_dump_json(indent=2)
-        await asyncio.to_thread(self._store_path.parent.mkdir, parents=True, exist_ok=True)
-        await async_write_text_file(self._store_path, payload, mode="w")
-
-    async def _task_snapshot(self, task_id: str) -> AgentTaskDefinition | None:
-        async with self._lock:
-            definition = self._tasks.get(task_id)
-            return definition.model_copy(deep=True) if definition is not None else None
-
-    async def _task_snapshots(self) -> list[AgentTaskDefinition]:
-        async with self._lock:
-            return [task.model_copy(deep=True) for task in self._tasks.values()]
-
-    async def _record_run(
-        self,
-        *,
-        task_id: str,
-        revision: int,
-        run_record: AgentTaskRunRecord,
-    ) -> None:
-        async with self._lock:
-            definition = self._tasks.get(task_id)
-            if definition is None or definition.revision != revision:
-                return
-
-            definition.last_run = run_record
-            await self._persist_locked()
-
-    async def _disable_task(self, task_id: str, revision: int) -> None:
-        async with self._lock:
-            definition = self._tasks.get(task_id)
-            if definition is None or definition.revision != revision or not definition.enabled:
-                return
-
-            definition.enabled = False
-            definition.updated_at = utcnow()
-            await self._persist_locked()
-
     async def _reconcile_tasks(self) -> None:
         """Reconcile the persisted task store against Docket execution state.
 
@@ -936,10 +882,10 @@ class AgentTaskScheduler:
             execution.key for execution in snapshot.running
         }
 
-        known_keys = {definition.execution_key for definition in await self._task_snapshots()}
+        known_keys = {definition.execution_key for definition in await self._store.snapshots()}
         await self._cancel_orphaned_executions(active_keys, known_keys)
 
-        for definition in await self._task_snapshots():
+        for definition in await self._store.snapshots():
             if not definition.enabled:
                 continue
 
@@ -1292,7 +1238,7 @@ class AgentTaskScheduler:
         )
 
     async def describe_tasks_telemetry(self) -> TasksTelemetrySnapshot:
-        definitions = await self._task_snapshots() if self._started or self._tasks else []
+        definitions = await self._store.snapshots() if self._started or self._store.tasks else []
         execution_by_key = await self._execution_telemetry_by_key() if self._started else {}
 
         task_entries: list[AgentTaskTelemetryEntry] = []
