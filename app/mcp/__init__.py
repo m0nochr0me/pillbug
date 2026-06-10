@@ -6,33 +6,56 @@ import asyncio
 import hashlib
 import json
 import re
-import secrets
 import time
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 
 import aiohttp
-import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
-from fastmcp import Context, FastMCP
-from fastmcp.client.transports import StreamableHttpTransport
-from fastmcp.server import create_proxy
-from fastmcp.server.middleware.logging import LoggingMiddleware
+from fastmcp import Context
 from pydantic import Field, ValidationError
 
 from app import __project__, __version__
 from app.core.agent_card import build_extended_agent_card, build_public_agent_card
 from app.core.config import settings
-from app.core.log import logger, uvicorn_log_config
+from app.core.log import logger
 from app.core.telemetry import runtime_telemetry
 from app.core.url_shortener import local_url_shortener
-from app.middleware.compactor import CompactorMiddleware
-from app.middleware.telemetry import TelemetryMiddleware
-from app.runtime import outbound_dispatch
+from app.mcp.auth import (
+    _audit_control_action,
+    _authorize_a2a,
+    _authorize_control,
+    _authorize_telemetry,
+    _build_runtime_metadata,
+    _ensure_a2a_discovery_available,
+    _operator_response,
+)
+from app.mcp.server import (
+    _mcp_http_app,
+    bind_application_loop,
+    create_mcp_server,
+    mcp,
+    mcp_app,
+    serve_mcp_server,
+    wait_for_server_startup,
+)
+from app.mcp.shared import (
+    _approvals_bypassed,
+    _assert_not_echoing_a2a_origin,
+    _channel_is_autosend,
+    _display_path,
+    _normalize_a2a_target,
+    _outbound_source_label,
+    _parse_channel_target,
+    _resolve_runtime_session_key,
+    _resolve_workspace_path,
+    _validate_fetch_url_max_bytes,
+    _validate_max_results,
+    _validate_page_size,
+)
 from app.runtime.approvals import approval_store, outbound_draft_store
 from app.runtime.channels import describe_channel_telemetry, get_channel_plugin, register_channel_conversation
 from app.runtime.command_execution import (
@@ -41,7 +64,6 @@ from app.runtime.command_execution import (
 from app.runtime.command_execution import (
     validate_command_timeout as _validate_command_timeout,
 )
-from app.runtime.mcp_plugins import load_mcp_tool_plugins
 from app.runtime.outbound_dispatch import (
     dispatch_outbound_draft as _dispatch_outbound_draft,
 )
@@ -55,9 +77,7 @@ from app.runtime.scheduler import task_scheduler
 from app.runtime.session_binding import (
     bind_runtime_session_todo_snapshot,
     get_runtime_session_for_mcp_session,
-    get_runtime_session_origin_metadata,
     record_runtime_session_skill_load,
-    split_runtime_session_key,
 )
 from app.runtime.session_mode import (
     SessionMode,
@@ -75,26 +95,20 @@ from app.runtime.task_runtime_state import task_forbidden_actions_for_session
 from app.schema.control import (
     ApprovalDecision,
     ApprovedAction,
-    AuthScope,
-    AuthTokenBinding,
     ControlMessageRequest,
-    OperatorResponse,
     OutboundAttachmentDraft,
     OutboundDraft,
     OutboundDraftDecision,
     OutboundDraftKind,
     PlanningModeRequest,
-    RuntimeAuthConfiguration,
     TaskCreateRequest,
     TaskUpdateRequest,
 )
 from app.schema.messages import (
     A2AEnvelope,
-    A2ATarget,
-    extract_a2a_origin_route,
 )
 from app.schema.tasks import AgentTaskGoal
-from app.schema.telemetry import ChannelsTelemetrySnapshot, RuntimeMetadata
+from app.schema.telemetry import ChannelsTelemetrySnapshot
 from app.schema.todo import TodoListSnapshot
 from app.util.clock import utcnow
 from app.util.skills import workspace_skill_name_for_path
@@ -114,99 +128,20 @@ from app.util.workspace import (
     async_read_text_file,
     async_write_bytes_file,
     async_write_text_file,
-    display_path,
     is_hidden_path,
-    resolve_path_within_root,
 )
 
-__all__ = ("create_mcp_server", "mcp", "mcp_app")
+__all__ = (
+    "bind_application_loop",
+    "create_mcp_server",
+    "mcp",
+    "mcp_app",
+    "serve_mcp_server",
+    "wait_for_server_startup",
+)
 
-mcp = FastMCP(f"{__project__}-composition-server")
-mcp.add_middleware(LoggingMiddleware(include_payloads=True, max_payload_length=1000))
-mcp.add_middleware(TelemetryMiddleware())
 
 _TODO_LIST_STATE_KEY = "todo_list"
-
-
-def _display_path(path: Path) -> str:
-    return display_path(path, settings.WORKSPACE_ROOT)
-
-
-def _resolve_workspace_path(path: str | Path) -> Path:
-    return resolve_path_within_root(path, settings.WORKSPACE_ROOT)
-
-
-def _validate_page_size(page_size: int) -> int:
-    if page_size < 1:
-        raise ValueError("page_size must be at least 1")
-
-    return min(page_size, settings.MCP_MAX_PAGE_SIZE)
-
-
-def _validate_max_results(max_results: int) -> int:
-    if max_results < 1:
-        raise ValueError("max_results must be at least 1")
-
-    return min(max_results, settings.MCP_MAX_SEARCH_RESULTS)
-
-
-def _validate_fetch_url_max_bytes(max_bytes: int) -> int:
-    if max_bytes < 1:
-        raise ValueError("max_bytes must be at least 1")
-
-    return min(max_bytes, settings.MCP_FETCH_URL_MAX_BYTES)
-
-
-def _parse_channel_target(channel: str) -> tuple[str, str]:
-    channel_name, separator, conversation_id = channel.strip().partition(":")
-    if not channel_name:
-        raise ValueError("channel must not be empty")
-
-    if not separator:
-        return channel_name, ""
-
-    if not conversation_id:
-        raise ValueError("channel targets using ':' must include a destination after the channel name")
-
-    return channel_name, conversation_id
-
-
-def _normalize_a2a_target(target: str) -> str:
-    return A2ATarget.parse(target).as_conversation_target()
-
-
-def _assert_not_echoing_a2a_origin(
-    *,
-    channel_name: str,
-    conversation_id: str,
-    ctx: Context | None,
-) -> None:
-    if ctx is None:
-        return
-
-    runtime_session_key = get_runtime_session_for_mcp_session(ctx.session_id)
-    if runtime_session_key is None:
-        return
-
-    session_route = split_runtime_session_key(runtime_session_key)
-    if session_route is None or session_route[0] != "a2a":
-        return
-
-    session_origin_metadata = get_runtime_session_origin_metadata(runtime_session_key)
-    if session_origin_metadata is None:
-        return
-
-    origin_route = extract_a2a_origin_route(session_origin_metadata)
-    if origin_route is None:
-        return
-
-    if (channel_name, conversation_id) != origin_route:
-        return
-
-    raise ValueError(
-        "This local A2A session already knows how to reach the preserved origin channel. "
-        "Reply normally in the current session instead of using send_message to echo the result manually."
-    )
 
 
 async def _get_todo_snapshot(ctx: Context) -> TodoListSnapshot:
@@ -242,108 +177,6 @@ def _serialize_todo_snapshot(action: str, snapshot: TodoListSnapshot) -> dict[st
     }
 
 
-def _build_runtime_metadata() -> RuntimeMetadata:
-    return runtime_telemetry.metadata()
-
-
-def _build_runtime_auth_configuration() -> RuntimeAuthConfiguration:
-    token_bindings: list[AuthTokenBinding] = []
-    dashboard_token = settings.dashboard_bearer_token()
-    a2a_token = settings.a2a_bearer_token()
-
-    if dashboard_token is not None:
-        token_bindings.append(
-            AuthTokenBinding(
-                token_name="dashboard-bearer",
-                principal="dashboard",
-                scopes=(AuthScope.TELEMETRY, AuthScope.CONTROL),
-            )
-        )
-
-    if a2a_token is not None:
-        token_bindings.append(
-            AuthTokenBinding(
-                token_name="a2a-bearer",
-                principal="a2a",
-                scopes=(AuthScope.A2A,),
-            )
-        )
-
-    return RuntimeAuthConfiguration(
-        token_bindings=tuple(token_bindings),
-        telemetry_protected=dashboard_token is not None,
-        control_protected=True,
-        a2a_protected=a2a_token is not None,
-    )
-
-
-def _extract_bearer_token(authorization: str | None) -> str | None:
-    if authorization is None:
-        return None
-
-    scheme, _, token = authorization.strip().partition(" ")
-    if scheme.lower() != "bearer" or not token:
-        return None
-
-    return token.strip() or None
-
-
-async def _authorize_telemetry(authorization: str | None) -> AuthScope | None:
-    expected_token = settings.dashboard_bearer_token()
-    if expected_token is None:
-        return None
-
-    presented_token = _extract_bearer_token(authorization)
-    if presented_token is None or not secrets.compare_digest(presented_token, expected_token):
-        raise HTTPException(
-            status_code=401,
-            detail="Missing or invalid bearer token.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    return AuthScope.TELEMETRY
-
-
-async def _authorize_control(authorization: str | None) -> AuthScope:
-    expected_token = settings.dashboard_bearer_token()
-    if expected_token is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Control API requires PB_DASHBOARD_BEARER_TOKEN to be configured.",
-        )
-
-    presented_token = _extract_bearer_token(authorization)
-    if presented_token is None or not secrets.compare_digest(presented_token, expected_token):
-        raise HTTPException(
-            status_code=401,
-            detail="Missing or invalid bearer token.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    return AuthScope.CONTROL
-
-
-async def _authorize_a2a(authorization: str | None) -> AuthScope:
-    expected_token = settings.a2a_bearer_token()
-    if expected_token is None:
-        return AuthScope.A2A
-
-    presented_token = _extract_bearer_token(authorization)
-    if presented_token is None or not secrets.compare_digest(presented_token, expected_token):
-        raise HTTPException(
-            status_code=401,
-            detail="Missing or invalid bearer token.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    return AuthScope.A2A
-
-
-def _ensure_a2a_discovery_available() -> None:
-    if "a2a" not in settings.enabled_channels():
-        raise HTTPException(status_code=404, detail="A2A discovery is not enabled on this runtime.")
-
-
 def _agent_card_response(request: Request, payload: dict[str, Any], *, cache_control: str) -> JSONResponse:
     response_body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     etag = hashlib.sha256(response_body).hexdigest()
@@ -366,58 +199,6 @@ def _agent_card_response(request: Request, payload: dict[str, Any], *, cache_con
             "Cache-Control": cache_control,
             "ETag": etag,
         },
-    )
-
-
-def _operator_response(
-    *,
-    action: str,
-    message: str,
-    scope: AuthScope,
-    details: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    return OperatorResponse(
-        runtime_id=settings.runtime_id,
-        ok=True,
-        action=action,
-        message=message,
-        scope=scope,
-        details=details,
-    ).model_dump(mode="json")
-
-
-async def _audit_control_action(
-    request: Request,
-    *,
-    action: str,
-    scope: AuthScope,
-    message: str,
-    level: Literal["info", "warning", "error"] = "info",
-    details: dict[str, Any] | None = None,
-) -> None:
-    payload = {
-        "runtime_id": settings.runtime_id,
-        "scope": scope.value,
-        "action": action,
-        "path": str(request.url.path),
-        "client_host": request.client.host if request.client is not None else None,
-        **{key: value for key, value in (details or {}).items() if value is not None},
-    }
-    rendered_payload = json.dumps(payload, sort_keys=True, default=str)
-
-    if level == "error":
-        logger.error(f"Control action {message} {rendered_payload}")
-    elif level == "warning":
-        logger.warning(f"Control action {message} {rendered_payload}")
-    else:
-        logger.info(f"Control action {message} {rendered_payload}")
-
-    await runtime_telemetry.record_event(
-        event_type=f"control.{action}",
-        source="control-api",
-        level=level,
-        message=message,
-        data=payload,
     )
 
 
@@ -751,31 +532,6 @@ async def find_files(
         "matches": matches,
         "count": len(matches),
     }
-
-
-def _approvals_bypassed() -> bool:
-    """P1 #22: when true, approval gates are short-circuited (yolo mode)."""
-    return settings.DANGEROUSLY_APPROVE_EVERYTHING
-
-
-def _channel_is_autosend(channel_name: str) -> bool:
-    if _approvals_bypassed():
-        return True
-    return channel_name in settings.outbound_autosend_channels()
-
-
-def _outbound_source_label(ctx: Context | None) -> str:
-    if ctx is not None:
-        runtime_session_key = get_runtime_session_for_mcp_session(ctx.session_id)
-        if runtime_session_key:
-            return runtime_session_key
-    return "mcp"
-
-
-def _resolve_runtime_session_key(ctx: Context | None) -> str | None:
-    if ctx is None:
-        return None
-    return get_runtime_session_for_mcp_session(ctx.session_id)
 
 
 def _build_agent_task_goal(
@@ -2124,50 +1880,6 @@ async def manage_agent_task(
     )
 
 
-# Optional MCP tool plugins listed in PB_MCP_TOOL_FACTORIES.
-# Each factory has signature `(mcp, ctx)` and is responsible for self-gating
-# (e.g. checking that a companion channel is enabled).
-load_mcp_tool_plugins(mcp)
-
-
-# Load MCP server configuration from app/mcp.json if it exists, and mount configured servers
-if (mcp_config_file := settings.BASE_DIR / "mcp.json").is_file():
-    logger.info(f"Loading MCP config from {mcp_config_file}")
-
-    from app.schema.mcp_config import MCPConfig
-
-    mcp_config = MCPConfig.model_validate_json(mcp_config_file.read_text(encoding="utf-8"))
-
-    for server in mcp_config.servers.values():
-        proxy = create_proxy(StreamableHttpTransport(server.url, headers=server.headers))
-        if settings.MCP_USE_COMPACTOR_MIDDLEWARE and server.compacting:
-            proxy.add_middleware(CompactorMiddleware(cleanup_stages=server.compacting))
-        mcp.mount(proxy, namespace=server.name)
-
-
-_mcp_http_app = mcp.http_app(
-    transport="streamable-http",
-    json_response=True,
-)
-
-mcp_app = FastAPI(
-    docs_url=None,
-    redoc_url=None,
-    openapi_url=None,
-    lifespan=_mcp_http_app.lifespan,
-)
-
-mcp_app.state.runtime_metadata = _build_runtime_metadata()
-mcp_app.state.runtime_auth_configuration = _build_runtime_auth_configuration()
-mcp_app.state.application_loop = None
-mcp_app.state.uvicorn_server = None
-
-
-def bind_application_loop(application_loop: Any | None) -> None:
-    mcp_app.state.application_loop = application_loop
-    outbound_dispatch.bind_application_loop(application_loop)
-
-
 @mcp_app.get("/health")
 async def get_health_status(request: Request) -> dict[str, Any]:
     await _authorize_telemetry(request.headers.get("authorization"))
@@ -3175,47 +2887,3 @@ async def redirect_short_url(token: str) -> RedirectResponse:
 
 
 mcp_app.mount("/", _mcp_http_app)
-
-
-def create_mcp_server() -> uvicorn.Server:
-    server = uvicorn.Server(
-        uvicorn.Config(
-            mcp_app,
-            host=settings.MCP_HOST,
-            port=settings.MCP_PORT,
-            reload=False,
-            log_config=uvicorn_log_config,
-        )
-    )
-    mcp_app.state.uvicorn_server = server
-    return server
-
-
-async def wait_for_server_startup(
-    server_task: asyncio.Task[None],
-    server_started: Callable[[], bool],
-) -> None:
-    for _ in range(100):
-        if server_started():
-            return
-        if server_task.done():
-            if error := server_task.exception():
-                raise RuntimeError("Composition MCP server failed to start") from error
-            raise RuntimeError("Composition MCP server exited before startup completed")
-        await asyncio.sleep(0.05)
-    raise TimeoutError("Timed out waiting for Composition MCP server to start")
-
-
-async def serve_mcp_server() -> None:
-    server = create_mcp_server()
-    server_task = asyncio.create_task(server.serve())
-
-    try:
-        await wait_for_server_startup(server_task, lambda: server.started)
-        await task_scheduler.ensure_started()
-        await server_task
-    finally:
-        server.should_exit = True
-        await task_scheduler.aclose()
-        with suppress(asyncio.CancelledError):
-            await server_task
