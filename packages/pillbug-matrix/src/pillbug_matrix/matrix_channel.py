@@ -3,7 +3,6 @@
 import asyncio
 import mimetypes
 import random
-import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -29,6 +28,15 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app.core.config import settings
 from app.core.log import ThrottledExceptionLogger, logger
+from app.runtime.channel_helpers import (
+    build_threaded_conversation_id,
+    chunk_message,
+    parse_threaded_conversation_id,
+    render_attachment_text,
+    resolve_attachment_path,
+    sanitize_filename,
+    split_csv,
+)
 from app.runtime.channels import BaseChannel, register_channel_conversation
 from app.schema.messages import InboundMessage, OutboundAttachment
 from app.util.workspace import async_write_bytes_file, display_path
@@ -36,7 +44,6 @@ from app.util.workspace import async_write_bytes_file, display_path
 _MAX_MESSAGE_CHARS = 4000
 _MARKDOWN_RENDERER = MarkdownIt("commonmark", {"html": False, "breaks": True, "linkify": True}).enable("linkify")
 _MATRIX_DOWNLOADS_DIR = settings.WORKSPACE_ROOT / "downloads" / "matrix"
-_FILENAME_SANITIZER = re.compile(r"[^A-Za-z0-9._-]+")
 _TRANSIENT_LOG_COOLDOWN_SECONDS = 60.0
 _TYPING_INTERVAL_SECONDS = 25.0
 _TYPING_TIMEOUT_MS = 30000
@@ -77,42 +84,8 @@ _MIME_TO_MSGTYPE_PREFIX = {
 }
 
 
-def _split_csv(value: str) -> list[str]:
-    return [item.strip() for item in value.split(",") if item.strip()]
-
-
-def _chunk_message(text: str, *, max_chars: int = _MAX_MESSAGE_CHARS) -> tuple[str, ...]:
-    remaining = text.strip() or " "
-    chunks: list[str] = []
-
-    while len(remaining) > max_chars:
-        split_at = remaining.rfind("\n\n", 0, max_chars + 1)
-        if split_at < max_chars // 2:
-            split_at = remaining.rfind("\n", 0, max_chars + 1)
-        if split_at < max_chars // 2:
-            split_at = remaining.rfind(" ", 0, max_chars + 1)
-        if split_at < max_chars // 2:
-            split_at = max_chars
-
-        chunk = remaining[:split_at].rstrip()
-        if chunk:
-            chunks.append(chunk)
-
-        remaining = remaining[split_at:].lstrip()
-
-    if remaining:
-        chunks.append(remaining)
-
-    return tuple(chunks)
-
-
 def _render_markdown_html(text: str) -> str:
     return _MARKDOWN_RENDERER.render(text).strip()
-
-
-def _sanitize_filename(value: str) -> str:
-    sanitized = _FILENAME_SANITIZER.sub("_", value).strip("._")
-    return sanitized or "attachment"
 
 
 def _is_transient_matrix_error(exc: BaseException) -> bool:
@@ -123,13 +96,6 @@ def _is_transient_matrix_error(exc: BaseException) -> bool:
     return "timeout" in error_message or "connection" in error_message
 
 
-def _resolve_attachment_path(attachment: OutboundAttachment) -> Path:
-    raw_path = Path(attachment.path)
-    if raw_path.is_absolute():
-        return raw_path
-    return settings.WORKSPACE_ROOT / raw_path
-
-
 # Matrix room IDs and v1/v2 event IDs both contain ':', so we cannot reuse Slack's colon
 # separator. '|' is not part of any Matrix sigil grammar (`!`, `$`, `#`, `@`).
 _CONVERSATION_ID_SEPARATOR = "|"
@@ -137,22 +103,15 @@ _CONVERSATION_ID_SEPARATOR = "|"
 
 def _parse_conversation_id(conversation_id: str) -> tuple[str, str | None]:
     """Split conversation_id into (room_id, thread_root_event_id)."""
-    room_id, separator, thread_root_event_id = conversation_id.partition(_CONVERSATION_ID_SEPARATOR)
-    room_id = room_id.strip()
-    if not room_id:
-        raise ValueError("Matrix conversation_id (room_id) must not be empty")
-
-    if not separator:
-        return room_id, None
-
-    normalized = thread_root_event_id.strip()
-    return room_id, normalized or None
+    return parse_threaded_conversation_id(
+        conversation_id,
+        separator=_CONVERSATION_ID_SEPARATOR,
+        empty_error="Matrix conversation_id (room_id) must not be empty",
+    )
 
 
 def _build_conversation_id(room_id: str, thread_root_event_id: str | None) -> str:
-    if thread_root_event_id:
-        return f"{room_id}{_CONVERSATION_ID_SEPARATOR}{thread_root_event_id}"
-    return room_id
+    return build_threaded_conversation_id(room_id, thread_root_event_id, separator=_CONVERSATION_ID_SEPARATOR)
 
 
 def _extract_thread_root(event: object) -> str | None:
@@ -214,25 +173,15 @@ def _render_attachment_text(
     mime_type: str | None,
     download_failed: bool,
 ) -> str:
-    attachment_label = _ATTACHMENT_LABELS.get(kind, kind)
-    lines: list[str] = []
-
-    if caption_text:
-        lines.append(caption_text)
-
-    if download_failed:
-        lines.append(f"Matrix {attachment_label} received, but saving it to the workspace downloads directory failed.")
-    elif workspace_path is not None:
-        lines.append(f"Matrix {attachment_label} saved to workspace path: {workspace_path}.")
-    else:
-        lines.append(f"Matrix {attachment_label} received.")
-
-    if original_file_name:
-        lines.append(f"Original filename: {original_file_name}.")
-    if mime_type:
-        lines.append(f"MIME type: {mime_type}.")
-
-    return "\n".join(lines)
+    return render_attachment_text(
+        channel_label="Matrix",
+        attachment_label=_ATTACHMENT_LABELS.get(kind, kind),
+        caption_text=caption_text,
+        workspace_path=workspace_path,
+        original_file_name=original_file_name,
+        mime_type=mime_type,
+        download_failed=download_failed,
+    )
 
 
 class MatrixChannelSettings(BaseSettings):
@@ -276,7 +225,7 @@ class MatrixChannelSettings(BaseSettings):
         if value is None:
             return None
         if isinstance(value, str):
-            parsed = _split_csv(value)
+            parsed = split_csv(value)
             return parsed or None
         return value
 
@@ -493,7 +442,7 @@ class MatrixChannel(BaseChannel):
         """
         new_thread_root: str | None = None
         first_event_id: str | None = None
-        for index, chunk in enumerate(_chunk_message(text)):
+        for index, chunk in enumerate(chunk_message(text, max_chars=_MAX_MESSAGE_CHARS)):
             content: dict[str, object] = {
                 "msgtype": "m.text",
                 "body": chunk,
@@ -588,7 +537,7 @@ class MatrixChannel(BaseChannel):
         # new thread, then ``thread_root`` is updated so the rest thread under it.
         thread_root = thread_root_event_id
         for attachment in attachments:
-            file_path = _resolve_attachment_path(attachment)
+            file_path = resolve_attachment_path(attachment)
             if not await asyncio.to_thread(file_path.is_file):
                 logger.warning(f"Skipping outbound attachment — file not found: {file_path}")
                 continue
@@ -825,8 +774,8 @@ class MatrixChannel(BaseChannel):
             else:
                 raise ValueError("Matrix download response did not contain file data")
 
-            safe_event_id = _sanitize_filename(getattr(event, "event_id", "attachment"))
-            file_stem = _sanitize_filename(Path(original_file_name or kind).stem)
+            safe_event_id = sanitize_filename(getattr(event, "event_id", "attachment"))
+            file_stem = sanitize_filename(Path(original_file_name or kind).stem)
 
             extension = ""
             if original_file_name:
@@ -835,7 +784,7 @@ class MatrixChannel(BaseChannel):
                 extension = mimetypes.guess_extension(mime_type, strict=False) or ""
 
             download_filename = f"{safe_event_id}_{file_stem}{extension}"
-            safe_room_id = _sanitize_filename(room_id)
+            safe_room_id = sanitize_filename(room_id)
             target_path = _MATRIX_DOWNLOADS_DIR / safe_room_id / download_filename
 
             await asyncio.to_thread(target_path.parent.mkdir, parents=True, exist_ok=True)
