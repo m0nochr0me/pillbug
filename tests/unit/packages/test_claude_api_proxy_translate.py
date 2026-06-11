@@ -193,3 +193,44 @@ def test_well_formed_history_is_unchanged() -> None:
         for b in m["content"]
         if isinstance(b, dict) and b.get("type") == "tool_result"
     )
+
+
+def _text_blocks(message: dict) -> list[dict]:
+    return [b for b in message["content"] if isinstance(b, dict) and b.get("type") == "text"]
+
+
+def test_empty_text_model_turn_does_not_emit_empty_anthropic_block() -> None:
+    # Production failure: an empty model response (recorded as `{"text": ""}` in
+    # Gemini history, which the runtime nudges past) reached the proxy and was
+    # forwarded as an empty Anthropic text block. Anthropic 400s with
+    # "messages: text content blocks must be non-empty".
+    payload = {
+        "contents": [
+            {"role": "user", "parts": [{"text": "go"}]},
+            {"role": "model", "parts": [_fn_call("search", {"q": "x"})]},
+            {"role": "user", "parts": [_fn_response("search", {"ok": True})]},
+            {"role": "model", "parts": [{"text": ""}]},
+            {"role": "user", "parts": [{"text": "please continue"}]},
+        ]
+    }
+
+    messages = translate.extract_history(payload)
+
+    # No message carries an empty (or whitespace-only) text block.
+    assert all(b["text"].strip() for m in messages for b in _text_blocks(m))
+    # Roles still alternate after the empty assistant turn is dropped: the
+    # tool_result turn and the nudge turn are merged into one user message.
+    assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+    final_user = messages[-1]
+    assert any(b.get("type") == "tool_result" for b in final_user["content"])
+    assert any(b.get("type") == "text" and "please continue" in b.get("text", "") for b in final_user["content"])
+
+
+def test_whitespace_only_text_block_is_dropped() -> None:
+    payload = {"contents": [{"role": "user", "parts": [{"text": "   \n  "}, {"text": "real question"}]}]}
+
+    messages = translate.extract_history(payload)
+
+    assert len(messages) == 1
+    texts = [b["text"] for b in _text_blocks(messages[0])]
+    assert texts == ["real question"]

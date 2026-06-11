@@ -85,6 +85,15 @@ _FILE_DATA_PLACEHOLDER = {
 }
 
 
+def _text_block(text: str) -> dict[str, Any] | None:
+    # Anthropic rejects empty text content blocks (HTTP 400 "text content blocks
+    # must be non-empty"). Gemini history legitimately contains empty-text parts —
+    # a model turn that produced only a tool call, or an empty model response that
+    # the runtime nudges past and records as `{"text": ""}` — so skip blocks whose
+    # text is empty/whitespace rather than forwarding them.
+    return {"type": "text", "text": text} if text.strip() else None
+
+
 def _model_parts_to_blocks(
     parts: list[Any], *, emitted_calls: dict[str, list[str]], counter: list[int]
 ) -> list[dict[str, Any]]:
@@ -98,7 +107,9 @@ def _model_parts_to_blocks(
 
         text = part.get("text")
         if isinstance(text, str):
-            blocks.append({"type": "text", "text": text})
+            text_block = _text_block(text)
+            if text_block is not None:
+                blocks.append(text_block)
             continue
 
         inline_data = _pick(part, "inlineData", "inline_data")
@@ -140,7 +151,9 @@ def _user_parts_to_blocks(parts: list[Any], *, prev_calls: dict[str, list[str]])
 
         text = part.get("text")
         if isinstance(text, str):
-            blocks.append({"type": "text", "text": text})
+            text_block = _text_block(text)
+            if text_block is not None:
+                blocks.append(text_block)
             continue
 
         inline_data = _pick(part, "inlineData", "inline_data")
@@ -226,7 +239,22 @@ def extract_history(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 continue
             messages.append({"role": "user", "content": blocks})
 
-    return _repair_tool_result_pairing(messages)
+    return _repair_tool_result_pairing(_merge_consecutive_same_role(messages))
+
+
+def _merge_consecutive_same_role(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    # Anthropic requires user/assistant roles to alternate. Dropping content-less
+    # turns (e.g. an empty-text model response the runtime nudges past) can leave
+    # two same-role messages adjacent; concatenate their content blocks so the
+    # sequence still alternates. Runs before `_repair_tool_result_pairing` so the
+    # repair pass sees clean alternating input.
+    merged: list[dict[str, Any]] = []
+    for message in messages:
+        if merged and merged[-1]["role"] == message["role"]:
+            merged[-1]["content"] = [*merged[-1]["content"], *message["content"]]
+        else:
+            merged.append({"role": message["role"], "content": list(message["content"])})
+    return merged
 
 
 def _synthetic_tool_result(tool_use_id: str) -> dict[str, Any]:
