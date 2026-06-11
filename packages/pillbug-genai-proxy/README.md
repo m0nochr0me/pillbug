@@ -40,5 +40,6 @@ Translates the subset of the Gemini wire format Pillbug actually sends:
 - `systemInstruction`, text and `inlineData` (image) parts, function declarations, function call/response parts.
 - `generationConfig.{temperature, topP, maxOutputTokens}` → OpenAI sampling params.
 - `usage` → `usageMetadata`.
+- Streaming: `:streamGenerateContent?alt=sse` re-frames the upstream's OpenAI SSE stream as Gemini SSE chunks (requests `stream_options.include_usage`; upstreams without it report zero usage on streamed turns). Text deltas stream incrementally; tool calls are buffered whole and emitted as `functionCall` parts on the final chunk.
 
-Out of scope: streaming (`:streamGenerateContent` returns 501), file uploads (`/upload/v1beta/files` returns 501), `thinkingConfig` (dropped — AFC is client-side anyway).
+Out of scope: file uploads (`/upload/v1beta/files` returns 501), `thinkingConfig` (dropped — AFC is client-side anyway).

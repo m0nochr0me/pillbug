@@ -737,9 +737,26 @@
               return;
             }
             this._chatSocket = null;
+            this.finalizeStreamingChatMessage();
             if (this.chatStatus === "live") {
               this.chatStatus = "disconnected";
               this.chatError = `Disconnected: ${reason}`;
+            }
+          });
+
+          socket.on("stream", (payload) => {
+            if (this._chatSocket !== socket || this.chatConversationId !== sessionId) {
+              return;
+            }
+            const delta = payload && typeof payload.delta === "string" ? payload.delta : "";
+            if (!delta) {
+              return;
+            }
+            const last = this.chatMessages[this.chatMessages.length - 1];
+            if (last && last.role === "runtime" && last.streaming) {
+              last.text += delta;
+            } else {
+              this.chatMessages.push({ role: "runtime", text: delta, at: new Date().toISOString(), streaming: true });
             }
           });
 
@@ -751,10 +768,24 @@
             if (!text) {
               return;
             }
+            const last = this.chatMessages[this.chatMessages.length - 1];
+            if (last && last.role === "runtime" && last.streaming) {
+              // A streamed response ends with the authoritative full-text `message`
+              // event — replace the accumulated delta buffer instead of duplicating it.
+              last.text = text;
+              last.streaming = false;
+              return;
+            }
             this.chatMessages.push({ role: "runtime", text, at: new Date().toISOString() });
           });
 
           socket.connect();
+        },
+        finalizeStreamingChatMessage() {
+          const last = this.chatMessages[this.chatMessages.length - 1];
+          if (last && last.role === "runtime" && last.streaming) {
+            last.streaming = false;
+          }
         },
         disconnectChatSocket() {
           if (this._chatSocket) {
@@ -765,6 +796,7 @@
             }
             this._chatSocket = null;
           }
+          this.finalizeStreamingChatMessage();
           if (this.chatStatus === "live" || this.chatStatus === "connecting") {
             this.chatStatus = "idle";
           }

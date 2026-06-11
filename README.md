@@ -161,6 +161,5 @@ The `claude_api_proxy` extra ships a sibling FastAPI translator, `pillbug-claude
 
 ## Limitations
 
-- Streaming (`:streamGenerateContent`) and Gemini file uploads are not translated by the OpenAI-compatibility proxy.
 - Only HTTP MCP servers are supported at this time.
 - Matrix support currently runs without end-to-end encryption.

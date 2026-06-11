@@ -96,6 +96,7 @@ class GeminiChatService:
         self._module_root = get_module_root("app")
         self._prompts_dir = self._module_root / "prompts"
         self._outbound_injection_handler: Callable[[str, types.Content], Awaitable[None]] | None = None
+        self._streaming_disabled_reason: str | None = None
 
     @staticmethod
     def _build_genai_client() -> genai.Client:
@@ -119,6 +120,20 @@ class GeminiChatService:
 
     def set_outbound_injection_handler(self, handler: Callable[[str, types.Content], Awaitable[None]] | None) -> None:
         self._outbound_injection_handler = handler
+
+    @property
+    def streaming_disabled(self) -> bool:
+        return self._streaming_disabled_reason is not None
+
+    def disable_streaming(self, reason: str) -> None:
+        """Sticky opt-out: once the upstream rejects streamGenerateContent (the pillbug
+        proxies return 501), every later turn skips the streaming attempt."""
+        if self._streaming_disabled_reason is not None:
+            return
+        self._streaming_disabled_reason = reason
+        logger.warning(
+            f"Upstream rejected streamGenerateContent; using non-streaming sends for the rest of this runtime: {reason}"
+        )
 
     def create_session(
         self,

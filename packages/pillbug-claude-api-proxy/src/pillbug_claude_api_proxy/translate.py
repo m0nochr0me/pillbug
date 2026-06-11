@@ -14,6 +14,7 @@ import json
 from typing import Any
 
 __all__ = (
+    "StreamChunkAssembler",
     "extract_generation_config",
     "extract_history",
     "extract_system_text",
@@ -486,3 +487,147 @@ def _block_attr(block: Any, name: str, default: Any) -> Any:
     if isinstance(block, dict):
         return block.get(name, default)
     return getattr(block, name, default)
+
+
+class StreamChunkAssembler:
+    """Translate Anthropic Messages stream events into Gemini streamGenerateContent chunks.
+
+    Chunk contract (google-genai's `chats._validate_response` marks the whole turn
+    invalid otherwise, dropping it from curated history): every emitted chunk carries
+    `candidates[0].content.parts` with at least one part, and `finishReason` plus
+    `usageMetadata` ride on the last content-bearing chunk. Text deltas are therefore
+    emitted with a one-event delay so the final delta can be merged with the finish
+    metadata, and `tool_use` blocks — whose JSON arrives as partial fragments — are
+    buffered whole and emitted as `functionCall` parts on the final chunk.
+    """
+
+    def __init__(self) -> None:
+        self._pending_text: str | None = None
+        self._open_tool_blocks: dict[int, dict[str, Any]] = {}
+        self._function_call_parts: list[dict[str, Any]] = []
+        self._input_tokens = 0
+        self._output_tokens = 0
+        self._stop_reason: str | None = None
+        self._model_version = ""
+
+    def handle_event(self, event: Any) -> list[dict[str, Any]]:
+        event_type = _block_attr(event, "type", None)
+
+        if event_type == "content_block_delta":
+            return self._on_content_block_delta(event)
+        if event_type == "message_stop":
+            return self._finalize()
+        if event_type == "message_start":
+            self._on_message_start(event)
+        elif event_type == "content_block_start":
+            self._on_content_block_start(event)
+        elif event_type == "content_block_stop":
+            self._on_content_block_stop(event)
+        elif event_type == "message_delta":
+            self._on_message_delta(event)
+        return []
+
+    def _on_message_start(self, event: Any) -> None:
+        message = _block_attr(event, "message", None)
+        if message is None:
+            return
+        self._model_version = _block_attr(message, "model", "") or ""
+        usage = _block_attr(message, "usage", None)
+        if usage is not None:
+            self._input_tokens = int(_block_attr(usage, "input_tokens", 0) or 0)
+
+    def _on_content_block_start(self, event: Any) -> None:
+        block = _block_attr(event, "content_block", None)
+        if _block_type(block) != "tool_use":
+            return
+        index = int(_block_attr(event, "index", 0) or 0)
+        self._open_tool_blocks[index] = {
+            "name": _block_attr(block, "name", "") or "",
+            "json_fragments": [],
+        }
+
+    def _on_content_block_delta(self, event: Any) -> list[dict[str, Any]]:
+        delta = _block_attr(event, "delta", None)
+        delta_type = _block_attr(delta, "type", None)
+        if delta_type == "text_delta":
+            text = _block_attr(delta, "text", "")
+            if isinstance(text, str) and text:
+                return self._push_text(text)
+        elif delta_type == "input_json_delta":
+            index = int(_block_attr(event, "index", 0) or 0)
+            bucket = self._open_tool_blocks.get(index)
+            partial_json = _block_attr(delta, "partial_json", "")
+            if bucket is not None and isinstance(partial_json, str):
+                bucket["json_fragments"].append(partial_json)
+        return []
+
+    def _on_content_block_stop(self, event: Any) -> None:
+        index = int(_block_attr(event, "index", 0) or 0)
+        bucket = self._open_tool_blocks.pop(index, None)
+        if bucket is not None:
+            self._function_call_parts.append(
+                {"functionCall": {"name": bucket["name"], "args": _parse_tool_args(bucket["json_fragments"])}}
+            )
+
+    def _on_message_delta(self, event: Any) -> None:
+        stop_reason = _block_attr(_block_attr(event, "delta", None), "stop_reason", None)
+        if isinstance(stop_reason, str) and stop_reason:
+            self._stop_reason = stop_reason
+        usage = _block_attr(event, "usage", None)
+        if usage is not None:
+            self._output_tokens = int(_block_attr(usage, "output_tokens", 0) or 0)
+
+    def _push_text(self, text: str) -> list[dict[str, Any]]:
+        previous, self._pending_text = self._pending_text, text
+        if previous is None:
+            return []
+        return [self._chunk([{"text": previous}])]
+
+    def _finalize(self) -> list[dict[str, Any]]:
+        chunks: list[dict[str, Any]] = []
+        if self._function_call_parts:
+            if self._pending_text is not None:
+                chunks.append(self._chunk([{"text": self._pending_text}]))
+            chunks.append(self._chunk(self._function_call_parts, final=True))
+        else:
+            # Mirrors the non-streaming translator: an empty turn still produces
+            # one `{"text": ""}` part so the finish metadata has content to ride on.
+            chunks.append(self._chunk([{"text": self._pending_text or ""}], final=True))
+
+        self._pending_text = None
+        self._function_call_parts = []
+        return chunks
+
+    def _chunk(self, parts: list[dict[str, Any]], *, final: bool = False) -> dict[str, Any]:
+        candidate: dict[str, Any] = {
+            "content": {"role": "model", "parts": parts},
+            "index": 0,
+        }
+        chunk: dict[str, Any] = {
+            "candidates": [candidate],
+            "modelVersion": self._model_version,
+        }
+        if final:
+            finish_reason = (
+                _FINISH_REASON_MAP.get(self._stop_reason, "STOP") if isinstance(self._stop_reason, str) else "STOP"
+            )
+            candidate["finishReason"] = finish_reason
+            chunk["usageMetadata"] = {
+                "promptTokenCount": self._input_tokens,
+                "candidatesTokenCount": self._output_tokens,
+                "totalTokenCount": self._input_tokens + self._output_tokens,
+            }
+        return chunk
+
+
+def _parse_tool_args(json_fragments: list[str]) -> dict[str, Any]:
+    raw = "".join(json_fragments).strip()
+    if not raw:
+        return {}
+    try:
+        args = json.loads(raw)
+    except ValueError:
+        return {"_raw": raw}
+    if not isinstance(args, dict):
+        return {"_raw": args}
+    return args

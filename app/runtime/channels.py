@@ -4,7 +4,7 @@ Channel management for Pillbug.
 
 import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from importlib import import_module
 from typing import Any, Protocol, cast
@@ -135,6 +135,31 @@ class CliChannel(BaseChannel):
         attachments: tuple[OutboundAttachment, ...] | None = None,
     ) -> None:
         await self.send_message(inbound_message.conversation_id, response_text, attachments=attachments)
+
+    @asynccontextmanager
+    async def stream_response(
+        self,
+        inbound_message: InboundMessage,
+    ) -> AsyncIterator[Callable[[str], Awaitable[None]]]:
+        # Optional streaming capability (see ApplicationLoop._resolve_response_stream):
+        # deltas passed to the yielded emitter print incrementally; on clean exit the
+        # streamed output IS the delivered response, so no send_response follows.
+        del inbound_message
+        printed_any = False
+
+        async def emit(delta: str) -> None:
+            nonlocal printed_any
+            if not delta:
+                return
+            prefix = "" if printed_any else self._assistant_prefix
+            printed_any = True
+            await asyncio.to_thread(print, f"{prefix}{delta}", end="", flush=True)
+
+        try:
+            yield emit
+        finally:
+            if printed_any:
+                await asyncio.to_thread(print)
 
 
 ChannelFactory = Callable[[], ChannelPlugin]

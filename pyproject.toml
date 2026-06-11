@@ -1,6 +1,6 @@
 [project]
 name = "pillbug"
-version = "0.1.4"
+version = "0.1.5"
 description = "Async AI agent runtime"
 readme = "README.md"
 requires-python = ">=3.14"
@@ -26,7 +26,10 @@ dependencies = [
     "fakeredis>=2.34.1",
     "fastapi>=0.135.1",
     "fastmcp[tasks]>=3.1.0",
-    "google-genai>=1.67.0",
+    # <2: google-genai 2.x (through 2.8.0) breaks MCP-session tools — generate_content
+    # deep-copies the config (chokes on live session futures) and the streaming schema
+    # filter crashes on boolean additionalProperties. Re-test before lifting the cap.
+    "google-genai>=1.67.0,<2",
     "jinja2>=3.1.6",
     "loguru>=0.7.3",
     "pydantic>=2.0",

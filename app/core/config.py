@@ -204,6 +204,7 @@ class Settings(BaseSettings):
     EXECUTE_COMMAND_ALLOWLIST: str = ""
     OUTBOUND_AUTOSEND_CHANNELS: str = "cli"
     OUTBOUND_SEND_LIMITS_JSON: str = ""
+    STREAMING_CHANNELS: str = ""
     INBOUND_ATTACHMENT_ROOTS_JSON: str = ""
     DANGEROUSLY_APPROVE_EVERYTHING: bool = False
 
@@ -489,6 +490,9 @@ class Settings(BaseSettings):
 
     def outbound_autosend_channels(self) -> tuple[str, ...]:
         return _split_csv(self.OUTBOUND_AUTOSEND_CHANNELS)
+
+    def streaming_channels(self) -> tuple[str, ...]:
+        return _split_csv(self.STREAMING_CHANNELS)
 
     def outbound_send_limits(self) -> dict[str, dict[str, int]]:
         return _parse_outbound_send_limits(self.OUTBOUND_SEND_LIMITS_JSON)

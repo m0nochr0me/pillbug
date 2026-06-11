@@ -24,7 +24,7 @@ from loguru import logger
 from pillbug_claude_api_proxy import translate
 from pillbug_claude_api_proxy.config import settings
 
-__all__ = ("run_inference",)
+__all__ = ("run_inference", "start_inference_stream")
 
 
 _client: AsyncAnthropic | None = None
@@ -79,7 +79,7 @@ def _compose_system_prompt(system_text: str | None) -> list[dict[str, str]] | st
     return None
 
 
-async def run_inference(
+def _build_request_kwargs(
     *,
     system_text: str | None,
     history: list[dict[str, Any]],
@@ -87,10 +87,6 @@ async def run_inference(
     generation_config: dict[str, Any],
     model: str,
 ) -> dict[str, Any]:
-    """Run one Anthropic Messages call and return a Gemini-shape response payload."""
-
-    client = _get_client()
-
     target_model = settings.MODEL or model
     if not target_model:
         raise RuntimeError("no model configured: set PB_CLAUDE_API_PROXY_MODEL or include it in the request URL")
@@ -115,6 +111,28 @@ async def run_inference(
     if "stop_sequences" in generation_config:
         request_kwargs["stop_sequences"] = generation_config["stop_sequences"]
 
+    return request_kwargs
+
+
+async def run_inference(
+    *,
+    system_text: str | None,
+    history: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    generation_config: dict[str, Any],
+    model: str,
+) -> dict[str, Any]:
+    """Run one Anthropic Messages call and return a Gemini-shape response payload."""
+
+    client = _get_client()
+    request_kwargs = _build_request_kwargs(
+        system_text=system_text,
+        history=history,
+        tools=tools,
+        generation_config=generation_config,
+        model=model,
+    )
+
     try:
         message = await asyncio.wait_for(
             client.messages.create(**request_kwargs),
@@ -131,3 +149,29 @@ async def run_inference(
     )
 
     return translate.message_to_gemini_response(message)
+
+
+async def start_inference_stream(
+    *,
+    system_text: str | None,
+    history: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    generation_config: dict[str, Any],
+    model: str,
+) -> Any:
+    """Open a streaming Anthropic Messages call and return the raw event stream.
+
+    Awaiting the SDK call sends the request, so upstream failures (auth, bad
+    request, overload) raise here — before the proxy commits to an SSE response —
+    and surface to the client as a normal HTTP error.
+    """
+
+    client = _get_client()
+    request_kwargs = _build_request_kwargs(
+        system_text=system_text,
+        history=history,
+        tools=tools,
+        generation_config=generation_config,
+        model=model,
+    )
+    return await client.messages.create(**request_kwargs, stream=True)

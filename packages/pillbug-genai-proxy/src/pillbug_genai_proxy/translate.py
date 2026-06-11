@@ -21,6 +21,7 @@ from typing import Any
 from loguru import logger
 
 __all__ = (
+    "StreamChunkAssembler",
     "gemini_request_to_openai",
     "openai_response_to_gemini",
 )
@@ -343,3 +344,129 @@ def openai_response_to_gemini(response_payload: dict[str, Any]) -> dict[str, Any
         "usageMetadata": usage_metadata,
         "modelVersion": response_payload.get("model", ""),
     }
+
+
+def _parse_tool_args(arguments: str) -> dict[str, Any]:
+    raw = arguments.strip()
+    if not raw:
+        return {}
+    try:
+        args = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning(f"Streamed tool call arguments were not valid JSON: {raw!r}")
+        return {"_raw": raw}
+    if not isinstance(args, dict):
+        return {"_raw": args}
+    return args
+
+
+class StreamChunkAssembler:
+    """Translate OpenAI chat-completions stream chunks into Gemini streamGenerateContent chunks.
+
+    Chunk contract (google-genai's `chats._validate_response` marks the whole turn
+    invalid otherwise, dropping it from curated history): every emitted chunk carries
+    `candidates[0].content.parts` with at least one part, and `finishReason` plus
+    `usageMetadata` ride on the last content-bearing chunk. Text deltas are therefore
+    emitted with a one-chunk delay so the final delta can be merged with the finish
+    metadata, and tool calls — whose argument JSON arrives as partial fragments — are
+    buffered whole and emitted as `functionCall` parts when the stream finalizes.
+    """
+
+    def __init__(self) -> None:
+        self._pending_text: str | None = None
+        self._tool_calls: dict[int, dict[str, Any]] = {}
+        self._finish_reason: str | None = None
+        self._usage: dict[str, Any] = {}
+        self._model_version = ""
+
+    def handle_chunk(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return []
+
+        model = payload.get("model")
+        if isinstance(model, str) and model:
+            self._model_version = model
+
+        usage = payload.get("usage")
+        if isinstance(usage, dict):
+            self._usage = usage
+
+        choices = payload.get("choices") or []
+        if not choices or not isinstance(choices[0], dict):
+            return []
+        choice = choices[0]
+
+        finish_reason = choice.get("finish_reason")
+        if isinstance(finish_reason, str) and finish_reason:
+            self._finish_reason = finish_reason
+
+        delta = choice.get("delta") or {}
+        if not isinstance(delta, dict):
+            return []
+
+        for tool_call in delta.get("tool_calls") or []:
+            if not isinstance(tool_call, dict):
+                continue
+            index = tool_call.get("index", 0)
+            index = index if isinstance(index, int) else 0
+            bucket = self._tool_calls.setdefault(index, {"name": "", "argument_fragments": []})
+            function = tool_call.get("function") or {}
+            if isinstance(function, dict):
+                name = function.get("name")
+                if isinstance(name, str) and name:
+                    bucket["name"] = name
+                arguments = function.get("arguments")
+                if isinstance(arguments, str) and arguments:
+                    bucket["argument_fragments"].append(arguments)
+
+        content = delta.get("content")
+        if isinstance(content, str) and content:
+            previous, self._pending_text = self._pending_text, content
+            if previous is not None:
+                return [self._chunk([{"text": previous}])]
+
+        return []
+
+    def finalize(self) -> list[dict[str, Any]]:
+        chunks: list[dict[str, Any]] = []
+        function_call_parts = [
+            {"functionCall": {"name": bucket["name"], "args": _parse_tool_args("".join(bucket["argument_fragments"]))}}
+            for _, bucket in sorted(self._tool_calls.items())
+            if bucket["name"]
+        ]
+
+        if function_call_parts:
+            if self._pending_text is not None:
+                chunks.append(self._chunk([{"text": self._pending_text}]))
+            chunks.append(self._chunk(function_call_parts, final=True))
+        else:
+            # Mirrors `openai_response_to_gemini`: an empty turn still produces one
+            # `{"text": ""}` part so the finish metadata has content to ride on.
+            chunks.append(self._chunk([{"text": self._pending_text or ""}], final=True))
+
+        self._pending_text = None
+        self._tool_calls = {}
+        return chunks
+
+    def _chunk(self, parts: list[dict[str, Any]], *, final: bool = False) -> dict[str, Any]:
+        candidate: dict[str, Any] = {
+            "content": {"role": "model", "parts": parts},
+            "index": 0,
+        }
+        chunk: dict[str, Any] = {
+            "candidates": [candidate],
+            "modelVersion": self._model_version,
+        }
+        if final:
+            finish_reason = (
+                _FINISH_REASON_MAP.get(self._finish_reason.lower(), "STOP")
+                if isinstance(self._finish_reason, str)
+                else "STOP"
+            )
+            candidate["finishReason"] = finish_reason
+            chunk["usageMetadata"] = {
+                "promptTokenCount": self._usage.get("prompt_tokens", 0) or 0,
+                "candidatesTokenCount": self._usage.get("completion_tokens", 0) or 0,
+                "totalTokenCount": self._usage.get("total_tokens", 0) or 0,
+            }
+        return chunk

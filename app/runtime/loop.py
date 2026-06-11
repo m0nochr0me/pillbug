@@ -1,6 +1,7 @@
 import asyncio
 import time
-from contextlib import suppress
+from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager, suppress
 from dataclasses import dataclass
 
 from google.genai import types
@@ -386,14 +387,46 @@ class ApplicationLoop:
             batch.last_message,
         )
 
+        response_stream = None
+        if use_source_response_policy:
+            response_stream = self._resolve_response_stream(response_channel, response_inbound_message)
+
+        streamed_chars = 0
+        stream_delivery_failed = False
+
         try:
             turn_started_at = time.perf_counter()
             async with response_channel.response_presence(response_inbound_message):
-                response = await session.send_message(
-                    model_input,
-                    message_metadata=message_metadata,
-                    channel_name=batch.channel_name,
-                )
+                if response_stream is not None:
+                    async with response_stream as emit_delta:
+
+                        async def _forward_delta(delta: str) -> None:
+                            nonlocal streamed_chars, stream_delivery_failed
+                            if stream_delivery_failed or not delta:
+                                return
+                            try:
+                                await emit_delta(delta)
+                            except Exception:
+                                stream_delivery_failed = True
+                                logger.exception(
+                                    f"Streaming delivery failed for session={batch.session_key}; "
+                                    f"falling back to a full response send"
+                                )
+                                return
+                            streamed_chars += len(delta)
+
+                        response = await session.send_message(
+                            model_input,
+                            message_metadata=message_metadata,
+                            channel_name=batch.channel_name,
+                            on_text_delta=_forward_delta,
+                        )
+                else:
+                    response = await session.send_message(
+                        model_input,
+                        message_metadata=message_metadata,
+                        channel_name=batch.channel_name,
+                    )
             turn_latency_ms = (time.perf_counter() - turn_started_at) * 1000.0
         except Exception:
             logger.exception(f"Failed to process inbound message for session={batch.session_key}")
@@ -418,19 +451,25 @@ class ApplicationLoop:
         if response.usage_metadata is not None:
             logger.info(f"Completed response for {batch.session_key}: {response.usage_metadata.model_dump_json()}")
 
+        response_streamed = streamed_chars > 0 and not stream_delivery_failed
         response_text = response.text.strip()
         if not response_text:
             response_text = "I could not produce a text response right now. Please try again."
             logger.warning(f"Model response was blank for {batch.session_key}; using runtime fallback text")
+            response_streamed = False
 
-        response_sent = await self._send_resolved_response(
-            source_channel=channel,
-            source_inbound_message=batch.last_message,
-            response_channel=response_channel,
-            response_inbound_message=response_inbound_message,
-            use_source_response_policy=use_source_response_policy,
-            response_text=response_text,
-        )
+        if response_streamed:
+            # The stream context delivered the full response on clean exit.
+            response_sent = True
+        else:
+            response_sent = await self._send_resolved_response(
+                source_channel=channel,
+                source_inbound_message=batch.last_message,
+                response_channel=response_channel,
+                response_inbound_message=response_inbound_message,
+                use_source_response_policy=use_source_response_policy,
+                response_text=response_text,
+            )
         if response_sent:
             self._session_telemetry.record_session_response(batch.session_key)
         else:
@@ -450,6 +489,7 @@ class ApplicationLoop:
                 "message_count": batch.message_count,
                 "response_chars": len(response_text),
                 "response_sent": response_sent,
+                "response_streamed": response_streamed,
                 **cache_metrics,
             },
         )
@@ -596,6 +636,29 @@ class ApplicationLoop:
             return response_policy(inbound_message)
         except Exception:
             logger.exception(f"Failed to resolve channel response policy for {channel.name}")
+            return None
+
+    def _resolve_response_stream(
+        self,
+        channel: ChannelPlugin,
+        inbound_message: InboundMessage,
+    ) -> AbstractAsyncContextManager[Callable[[str], Awaitable[None]]] | None:
+        if channel.name not in settings.streaming_channels():
+            return None
+
+        stream_response = getattr(channel, "stream_response", None)
+        if not callable(stream_response):
+            return None
+
+        if self._channel_response_policy(channel, inbound_message) is not None:
+            # Reply-policy channels decide suppression at send time; streaming would leak
+            # output before the policy runs, so they stay non-streaming.
+            return None
+
+        try:
+            return stream_response(inbound_message)
+        except Exception:
+            logger.exception(f"Failed to open response stream for channel={channel.name}")
             return None
 
     async def _maybe_send_channel_response(

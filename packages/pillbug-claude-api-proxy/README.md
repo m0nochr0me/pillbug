@@ -83,10 +83,10 @@ Translates the subset of the Gemini wire format Pillbug actually sends:
 - `systemInstruction`, text and `inlineData` (image, base64) parts, function declarations, function call/response parts.
 - `generationConfig.{temperature, topP, maxOutputTokens, stopSequences}` → Anthropic sampling params.
 - `usage` (from `Message.usage.input_tokens` / `output_tokens`) → `usageMetadata`.
+- Streaming: `:streamGenerateContent?alt=sse` re-frames the Anthropic event stream as Gemini SSE chunks. Text deltas stream incrementally; `tool_use` blocks are buffered whole and emitted as `functionCall` parts on the final chunk, which also carries `finishReason` and `usageMetadata`.
 
 Out of scope:
 
-- Streaming (`:streamGenerateContent` returns 501).
 - File uploads (`/upload/v1beta/files` returns 501).
 - Tool execution stays on Pillbug's side — the proxy only relays the model's `tool_use` intent.
 - `thinkingConfig` (dropped — Pillbug doesn't use Anthropic extended thinking through this path).

@@ -51,10 +51,21 @@ refused on the Socket.IO handshake.
 | - | - | - |
 | `message` | client → server | string, or `{ "text": "..." }` |
 | `message` | server → client | `{ "session_id": "<ULID>", "text": "..." }` |
+| `stream` | server → client | `{ "session_id": "<ULID>", "delta": "..." }` |
 
 Empty payloads are ignored. Outbound messages are emitted to every socket
 currently registered for the session ID; in normal operation that is exactly
 one socket.
+
+### Streaming
+
+When the runtime enables streaming for this channel (`PB_STREAMING_CHANNELS=websocket`),
+response text is additionally emitted incrementally as `stream` events while the model
+generates it. A successfully streamed response always ends with the regular `message`
+event carrying the full text, so clients that ignore `stream` events keep working
+unchanged; streaming-aware clients should replace their accumulated delta buffer with
+that terminal `message`. If the turn fails mid-stream, no terminal `message` follows the
+partial deltas — the runtime's error reply arrives as an ordinary `message` instead.
 
 ## Idle Timeout
 

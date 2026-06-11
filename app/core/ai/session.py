@@ -1,6 +1,7 @@
 """GeminiChatSession: per-session chat state, tool calling, and history management."""
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, cast
 
 import aiofile
@@ -8,6 +9,7 @@ from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
 from google.genai import errors as genai_errors
 from google.genai import types
+from pydantic import BaseModel
 
 from app.core.ai.attachments import (
     _INLINE_ATTACHMENT_MAX_BYTES,
@@ -44,6 +46,20 @@ _TODO_STATUS_LABELS = {
     "in-progress": "in progress",
     "completed": "completed",
 }
+
+
+class _StreamedSendResult(BaseModel):
+    """Aggregated streamed turn, shaped like the response fields send_message reads."""
+
+    text: str
+    parts: None = None
+    usage_metadata: types.GenerateContentResponseUsageMetadata | None = None
+
+
+def _is_streaming_unsupported_error(exc: Exception) -> bool:
+    if getattr(exc, "code", None) == 501:
+        return True
+    return "not implemented" in str(exc).lower()
 
 
 def _render_todo_list_instruction(todo_snapshot: TodoListSnapshot | None) -> str | None:
@@ -129,6 +145,7 @@ class GeminiChatSession:
         message_metadata: list[dict[str, Any]] | None = None,
         channel_name: str | None = None,
         max_remote_calls: int | None = None,
+        on_text_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> ChatResponse:
         # P2 #12: scheduled tasks can lower the per-run AFC cap via `max_remote_calls`.
         effective_max_remote_calls = max_remote_calls if max_remote_calls is not None else settings.GEMINI_MAX_AFC_CALLS
@@ -143,6 +160,7 @@ class GeminiChatSession:
             mcp_client = await self._ensure_mcp_client_open()
             response = await self._send_chat_message(
                 message=message_parts,
+                on_text_delta=on_text_delta,
                 config=types.GenerateContentConfig(
                     system_instruction=system_instruction,
                     temperature=settings.GEMINI_TEMPERATURE,
@@ -189,6 +207,7 @@ class GeminiChatSession:
                 mcp_client = await self._ensure_mcp_client_open()
                 nudge_response = await self._send_chat_message(
                     message=self._service.render_required_prompt_text(_EMPTY_RESPONSE_NUDGE_PROMPT_NAME),
+                    on_text_delta=on_text_delta,
                     config=types.GenerateContentConfig(
                         system_instruction=system_instruction,
                         temperature=settings.GEMINI_TEMPERATURE,
@@ -364,7 +383,17 @@ class GeminiChatSession:
         *,
         message: Any,
         config: types.GenerateContentConfig,
+        on_text_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> Any:
+        if on_text_delta is not None and not self._service.streaming_disabled:
+            streamed_result = await self._send_chat_message_streaming(
+                message=message,
+                config=config,
+                on_text_delta=on_text_delta,
+            )
+            if streamed_result is not None:
+                return streamed_result
+
         try:
             return await self._chat.send_message(message=message, config=config)
         except genai_errors.ClientError as exc:
@@ -392,6 +421,60 @@ class GeminiChatSession:
             # history, so we re-send the same message with a note naming the missing tool and the
             # tools that actually exist, letting the model answer or pick a real tool instead.
             return await self._recover_from_unknown_tool_call(exc, message=message, config=config)
+
+    async def _send_chat_message_streaming(
+        self,
+        *,
+        message: Any,
+        config: types.GenerateContentConfig,
+        on_text_delta: Callable[[str], Awaitable[None]],
+    ) -> _StreamedSendResult | None:
+        """Streamed send; returns None when the turn should fall back to a non-streaming send.
+
+        The SDK records chat history only once the stream generator is fully consumed, and
+        AFC tool rounds run as the stream is iterated. A failure before the first emitted
+        delta is safe to retry non-streaming (nothing reached the user); a 501 from an
+        upstream that doesn't implement streamGenerateContent additionally disables
+        streaming for the rest of the runtime. A failure after text reached the channel
+        re-raises so the caller's error handling takes over.
+        """
+        emitted_chunks: list[str] = []
+        usage_metadata: types.GenerateContentResponseUsageMetadata | None = None
+        try:
+            stream = await self._chat.send_message_stream(message=message, config=config)
+            async for chunk in stream:
+                chunk_usage = getattr(chunk, "usage_metadata", None)
+                if chunk_usage is not None:
+                    usage_metadata = chunk_usage
+                delta = self._extract_chunk_text(chunk)
+                if delta:
+                    emitted_chunks.append(delta)
+                    await on_text_delta(delta)
+        except Exception as exc:
+            if emitted_chunks:
+                raise
+            if _is_streaming_unsupported_error(exc):
+                self._service.disable_streaming(str(exc))
+            else:
+                logger.warning(
+                    f"Streaming send failed before any output for session={self._session_id}; "
+                    f"falling back to a non-streaming send: {exc}"
+                )
+            return None
+
+        return _StreamedSendResult(
+            text="".join(emitted_chunks),
+            usage_metadata=usage_metadata,
+        )
+
+    def _extract_chunk_text(self, chunk: Any) -> str:
+        candidates = getattr(chunk, "candidates", None)
+        if not candidates:
+            return ""
+        content = getattr(candidates[0], "content", None)
+        if content is None:
+            return ""
+        return self._extract_parts_text(getattr(content, "parts", None))
 
     @staticmethod
     def _unknown_tool_name(error: KeyError) -> str | None:

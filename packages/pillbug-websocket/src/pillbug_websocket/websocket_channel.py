@@ -3,8 +3,8 @@
 import asyncio
 import re
 import time
-from collections.abc import AsyncIterator
-from contextlib import suppress
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager, suppress
 from typing import Any
 
 import socketio
@@ -117,6 +117,39 @@ class WebSocketChannel(BaseChannel):
             response_text,
             attachments=attachments,
         )
+
+    @asynccontextmanager
+    async def stream_response(
+        self,
+        inbound_message: InboundMessage,
+    ) -> AsyncIterator[Callable[[str], Awaitable[None]]]:
+        """Optional streaming capability used by ApplicationLoop when PB_STREAMING_CHANNELS
+        includes `websocket`. Deltas go out as `stream` events; on clean exit the full text
+        is re-sent as the terminal `message` event so clients that ignore `stream` events
+        keep working unchanged."""
+        session_id = inbound_message.conversation_id.strip().upper()
+        streamed_parts: list[str] = []
+
+        async def emit(delta: str) -> None:
+            if not delta:
+                return
+            sids = list(self._session_to_sids.get(session_id, ()))
+            if not sids:
+                raise RuntimeError(f"no active websocket sids for session {session_id}")
+
+            payload = {"session_id": session_id, "delta": delta}
+            for sid in sids:
+                try:
+                    await self._sio.emit("stream", payload, to=sid)
+                except Exception as exc:
+                    logger.warning(f"Websocket stream emit failed sid={sid} session_id={session_id}: {exc}")
+
+            streamed_parts.append(delta)
+            self._session_last_activity[session_id] = time.monotonic()
+
+        yield emit
+        if streamed_parts:
+            await self.send_message(session_id, "".join(streamed_parts))
 
     def telemetry_details(self) -> dict[str, Any]:
         return {

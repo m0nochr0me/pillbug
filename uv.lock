@@ -1388,7 +1388,7 @@ wheels = [
 
 [[package]]
 name = "pillbug"
-version = "0.1.4"
+version = "0.1.5"
 source = { editable = "." }
 dependencies = [
     { name = "aiocache" },
@@ -1462,7 +1462,7 @@ requires-dist = [
     { name = "fastmcp", extras = ["tasks"], specifier = ">=3.1.0" },
     { name = "google-api-python-client", marker = "extra == 'gmail'", specifier = ">=2.140" },
     { name = "google-auth", marker = "extra == 'gmail'", specifier = ">=2.34" },
-    { name = "google-genai", specifier = ">=1.67.0" },
+    { name = "google-genai", specifier = ">=1.67.0,<2" },
     { name = "jinja2", specifier = ">=3.1.6" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "pillbug-a2a", marker = "extra == 'a2a'", editable = "packages/pillbug-a2a" },
