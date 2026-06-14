@@ -62,6 +62,20 @@ def _is_streaming_unsupported_error(exc: Exception) -> bool:
     return "not implemented" in str(exc).lower()
 
 
+def _coerce_function_call_args(args: Any) -> Any:
+    # The developer-backend Gemini API surfaces every JSON number as a float. Mirror the
+    # SDK's automatic-function-calling path (which restores whole-number floats to ints
+    # before invoking a tool) so integer-typed MCP parameters still validate when we run
+    # the call ourselves in the manual streaming loop.
+    if isinstance(args, float) and args.is_integer():
+        return int(args)
+    if isinstance(args, dict):
+        return {key: _coerce_function_call_args(value) for key, value in args.items()}
+    if isinstance(args, list):
+        return [_coerce_function_call_args(value) for value in args]
+    return args
+
+
 def _render_todo_list_instruction(todo_snapshot: TodoListSnapshot | None) -> str | None:
     if todo_snapshot is None or not todo_snapshot.items:
         return None
@@ -429,52 +443,147 @@ class GeminiChatSession:
         config: types.GenerateContentConfig,
         on_text_delta: Callable[[str], Awaitable[None]],
     ) -> _StreamedSendResult | None:
-        """Streamed send; returns None when the turn should fall back to a non-streaming send.
+        """Streamed send with a hand-rolled automatic-function-calling (AFC) loop.
 
-        The SDK records chat history only once the stream generator is fully consumed, and
-        AFC tool rounds run as the stream is iterated. A failure before the first emitted
-        delta is safe to retry non-streaming (nothing reached the user); a 501 from an
-        upstream that doesn't implement streamGenerateContent additionally disables
-        streaming for the rest of the runtime. A failure after text reached the channel
-        re-raises so the caller's error handling takes over.
+        google-genai 1.73.1's streaming AFC (`generate_content_stream`) aborts the moment the
+        model emits a content-less first chunk — exactly what Gemini 3 thinking models produce
+        before a function call — so the tool never runs and the turn streams empty (the SDK's
+        own `TODO: b/453739108`). We disable the SDK's AFC and drive the tool rounds ourselves:
+        stream each model turn, emit its text deltas, execute any function calls against the
+        MCP session, feed the responses back, and repeat until the model answers in text.
+
+        Returning None falls back to a non-streaming send, but only before anything reached the
+        user or any tool ran; once we have emitted text or executed a tool the chat history
+        holds those turns, so a later failure re-raises instead of silently re-sending.
         """
-        emitted_chunks: list[str] = []
-        usage_metadata: types.GenerateContentResponseUsageMetadata | None = None
-        try:
-            stream = await self._chat.send_message_stream(message=message, config=config)
-            async for chunk in stream:
-                chunk_usage = getattr(chunk, "usage_metadata", None)
-                if chunk_usage is not None:
-                    usage_metadata = chunk_usage
-                delta = self._extract_chunk_text(chunk)
-                if delta:
-                    emitted_chunks.append(delta)
-                    await on_text_delta(delta)
-        except Exception as exc:
-            if emitted_chunks:
-                raise
-            if _is_streaming_unsupported_error(exc):
-                self._service.disable_streaming(str(exc))
-            else:
-                logger.warning(
-                    f"Streaming send failed before any output for session={self._session_id}; "
-                    f"falling back to a non-streaming send: {exc}"
-                )
-            return None
-
-        return _StreamedSendResult(
-            text="".join(emitted_chunks),
-            usage_metadata=usage_metadata,
+        afc_config = config.model_copy(
+            update={"automatic_function_calling": types.AutomaticFunctionCallingConfig(disable=True)}
         )
+        max_remote_calls = self._streaming_max_remote_calls(config)
 
-    def _extract_chunk_text(self, chunk: Any) -> str:
+        next_message: Any = message
+        aggregated_text: list[str] = []
+        last_usage: types.GenerateContentResponseUsageMetadata | None = None
+        emitted_text = False
+        executed_tool = False
+
+        async def emit(delta: str) -> None:
+            # Tracks emission in the outer scope so a failure that strikes after a delta
+            # reached the channel re-raises instead of silently retrying non-streaming.
+            nonlocal emitted_text
+            emitted_text = True
+            await on_text_delta(delta)
+
+        for _ in range(max_remote_calls + 1):
+            try:
+                round_text, function_calls, round_usage = await self._stream_one_turn(
+                    message=next_message,
+                    config=afc_config,
+                    on_text_delta=emit,
+                )
+            except Exception as exc:
+                if emitted_text or executed_tool:
+                    raise
+                if _is_streaming_unsupported_error(exc):
+                    self._service.disable_streaming(str(exc))
+                else:
+                    logger.warning(
+                        f"Streaming send failed before any output for session={self._session_id}; "
+                        f"falling back to a non-streaming send: {exc}"
+                    )
+                return None
+
+            if round_usage is not None:
+                last_usage = round_usage
+            if round_text:
+                aggregated_text.append(round_text)
+
+            if not function_calls:
+                return _StreamedSendResult(text="".join(aggregated_text), usage_metadata=last_usage)
+
+            next_message = await self._execute_streamed_function_calls(function_calls)
+            executed_tool = True
+
+        logger.warning(
+            f"Streaming AFC reached the {max_remote_calls}-call limit for session={self._session_id} "
+            f"with tool calls still pending; returning partial text"
+        )
+        return _StreamedSendResult(text="".join(aggregated_text), usage_metadata=last_usage)
+
+    @staticmethod
+    def _streaming_max_remote_calls(config: types.GenerateContentConfig) -> int:
+        afc = config.automatic_function_calling
+        if afc is not None and afc.maximum_remote_calls is not None:
+            return int(afc.maximum_remote_calls)
+        return settings.GEMINI_MAX_AFC_CALLS
+
+    async def _stream_one_turn(
+        self,
+        *,
+        message: Any,
+        config: types.GenerateContentConfig,
+        on_text_delta: Callable[[str], Awaitable[None]],
+    ) -> tuple[str, list[types.FunctionCall], types.GenerateContentResponseUsageMetadata | None]:
+        """Stream a single model turn, emitting text deltas and collecting any function calls."""
+        text_chunks: list[str] = []
+        function_calls: list[types.FunctionCall] = []
+        usage_metadata: types.GenerateContentResponseUsageMetadata | None = None
+
+        stream = await self._chat.send_message_stream(message=message, config=config)
+        async for chunk in stream:
+            chunk_usage = getattr(chunk, "usage_metadata", None)
+            if chunk_usage is not None:
+                usage_metadata = chunk_usage
+            for part in self._chunk_parts(chunk):
+                function_call = getattr(part, "function_call", None)
+                if function_call is not None:
+                    function_calls.append(function_call)
+                    continue
+                if getattr(part, "thought", False):
+                    continue
+                part_text = getattr(part, "text", None)
+                if isinstance(part_text, str) and part_text:
+                    text_chunks.append(part_text)
+                    await on_text_delta(part_text)
+
+        return "".join(text_chunks), function_calls, usage_metadata
+
+    @staticmethod
+    def _chunk_parts(chunk: Any) -> list[types.Part]:
         candidates = getattr(chunk, "candidates", None)
         if not candidates:
-            return ""
+            return []
         content = getattr(candidates[0], "content", None)
         if content is None:
-            return ""
-        return self._extract_parts_text(getattr(content, "parts", None))
+            return []
+        return getattr(content, "parts", None) or []
+
+    async def _execute_streamed_function_calls(
+        self,
+        function_calls: list[types.FunctionCall],
+    ) -> list[types.Part]:
+        """Run the model's function calls against the MCP session and build response parts.
+
+        Mirrors google-genai's own MCP execution (`McpToGenAiToolAdapter` → `session.call_tool`,
+        wrapped as `{"result": ...}` / `{"error": ...}`) so streamed tool rounds record the same
+        history the non-streaming AFC path would. A missing or raising tool yields an error
+        response the model can recover from rather than failing the whole turn.
+        """
+        mcp_client = await self._ensure_mcp_client_open()
+        session = mcp_client.session
+        response_parts: list[types.Part] = []
+        for function_call in function_calls:
+            name = function_call.name or ""
+            arguments = _coerce_function_call_args(dict(function_call.args)) if function_call.args else {}
+            try:
+                result = await session.call_tool(name=name, arguments=arguments)
+            except Exception as exc:
+                logger.warning(f"Streamed tool call {name!r} failed for session={self._session_id}: {exc}")
+                response_parts.append(types.Part.from_function_response(name=name, response={"error": str(exc)}))
+                continue
+            key = "error" if getattr(result, "isError", False) else "result"
+            response_parts.append(types.Part.from_function_response(name=name, response={key: result}))
+        return response_parts
 
     @staticmethod
     def _unknown_tool_name(error: KeyError) -> str | None:
