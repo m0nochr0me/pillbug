@@ -77,24 +77,69 @@ on the websocket upgrade directly.
 
 ## 4. Message Protocol
 
-The client sends and receives `message` events. The server MAY additionally emit
-`stream` events when the operator has enabled response streaming (see
-[Outbound streaming](#outbound-streaming-optional)). A client that handles only
-`message` is fully conformant; `stream` is a progressive-rendering enhancement a
-client can ignore.
+The client sends and receives `message` events. It MAY additionally send an
+**audio** payload on the same `message` event (§4 "Inbound audio"), the server
+MAY emit `stream` events when the operator has enabled response streaming (§4
+"Outbound streaming"), and the server emits an `error` event when it rejects an
+input (§4 "Server errors"). A client that handles only text `message` events is
+fully conformant; `stream` and `error` matter only for streaming and audio
+respectively.
 
 ### Inbound (client → server)
 
-Either of these payload shapes is accepted:
+Either of these payload shapes is accepted for text:
 
 ```js
 sock.emit("message", "free-form text");
 sock.emit("message", { text: "free-form text" });
 ```
 
-Other shapes are silently dropped. Empty / whitespace-only text is dropped.
-The message is forwarded into the standard Pillbug processing pipeline
-(security filtering, debounce, agent invocation).
+Empty / whitespace-only text is dropped. Shapes other than the text and audio
+forms documented here are silently dropped. The message is forwarded into the
+standard Pillbug processing pipeline (security filtering, debounce, agent
+invocation).
+
+### Inbound audio (optional)
+
+A client MAY send a voice clip or other audio in the **same `message` event** by
+including an `audio` object:
+
+```js
+sock.emit("message", {
+  audio: {
+    data: "<base64-encoded audio bytes>", // required
+    mime_type: "audio/webm",              // required, must be audio/*
+    filename: "clip.webm"                 // optional
+  },
+  text: "optional caption or instruction" // optional, accompanies the audio
+});
+```
+
+Rules the client MUST follow:
+
+- `audio.data` is the audio file's raw bytes, base64-encoded with the standard
+  alphabet (not URL-safe). `audio.mime_type` is required and MUST start with
+  `audio/` (e.g. `audio/webm`, `audio/ogg`, `audio/mpeg`, `audio/wav`,
+  `audio/m4a`).
+- `audio.filename` is optional and used only for display and to pick a file
+  extension; path components are ignored (only the base name is kept).
+- The optional top-level `text` is a caption/instruction that accompanies the
+  audio (e.g. "transcribe this", "summarize the voicemail"). Unlike a text-only
+  message, an audio message does **not** require non-empty `text`.
+- Keep clips small. The server enforces a size cap
+  (`PB_WEBSOCKET_MAX_AUDIO_BYTES`, default 8 MB) on the **decoded** bytes;
+  base64 inflates the wire payload by ~33%, so budget accordingly.
+
+The server stores the audio in the runtime workspace and forwards it to the
+model as a multimodal attachment. The reply arrives as a normal `message` event
+(or `stream` deltas followed by a terminal `message`, if streaming is enabled);
+there is no separate "audio received" acknowledgement.
+
+**Backend requirement.** Audio understanding requires the runtime to be pointed
+at the **real Gemini API** with an audio-capable model. If the operator has
+configured a proxy backend (`PB_GEMINI_BASE_URL`), audio is **rejected** with an
+`error` event while text messages keep working. Whenever audio is rejected, no
+`message` reply follows — the input never enters the agent pipeline.
 
 ### Outbound (server → client)
 
@@ -150,6 +195,31 @@ Contract the client MUST follow if it consumes `stream` events:
 - Tool-use phases are not streamed: deltas begin only once the model starts its
   user-facing answer, so expect a pause — and on tool-only turns, possibly no
   `stream` events at all — before the terminal `message`.
+
+### Server errors (`error` event)
+
+When the server rejects an input it cannot process, it emits an `error` event to
+the originating socket instead of a `message`:
+
+```json
+{
+  "session_id": "01HXYZP6Z9N4Y8Q7K3GJ4M5VQ2",
+  "error": "human-readable reason"
+}
+```
+
+`error` is currently emitted only for rejected **audio** input. Causes include:
+
+- `mime_type` is missing or not `audio/*`.
+- A proxy backend (`PB_GEMINI_BASE_URL`) is configured — audio requires the real
+  Gemini backend.
+- `audio.data` is missing, not valid base64, or decodes to empty.
+- The decoded audio exceeds `PB_WEBSOCKET_MAX_AUDIO_BYTES`.
+
+An `error` is terminal for that input: the message is not enqueued and no
+`message` reply will follow. Surface it to the user and do not auto-retry the
+same payload unless the cause is transient (e.g. shrink an oversized clip and
+resend). Plain text input is never rejected this way.
 
 ## 5. Connection Lifecycle
 
@@ -219,6 +289,7 @@ Recommended client behavior:
 | Connection silently drops, can reconnect | Idle timeout or operator restart | Reconnect with same ULID for continuity, or new ULID for a fresh session |
 | Outbound `message` never arrives after sending one | Agent is still processing (no ack model is provided), or the runtime debounced multiple messages into a single batch | Show a pending indicator; do not retransmit (the runtime de-duplicates by message id only within a debounce window) |
 | `stream` deltas arrive but no terminal `message` follows | The turn failed mid-stream | Discard the partial deltas; the next `message` (an error notice or the next reply) is authoritative — do not render the partial buffer as a finished reply |
+| `error` event after sending audio | Audio rejected: non-audio MIME, oversized, invalid base64, or the runtime is on a proxy backend that can't do audio | Read `payload.error`; fix the payload (smaller clip, valid `audio/*`) or fall back to text. Do not retry unchanged |
 | Repeated `connect_error` with valid creds | Server-side bearer changed, or the runtime is shutting down | Surface to the user; back off |
 
 There is no application-level acknowledgement. If you need delivery guarantees
@@ -260,8 +331,18 @@ sock.on("message", (payload: { session_id: string; text: string }) => {
   pending = "";            // terminal message is authoritative
   console.log("agent>", payload.text);
 });
+// Only needed if you send audio: rejected input arrives as `error`, never `message`.
+sock.on("error", (payload: { session_id: string; error: string }) => {
+  console.error("rejected:", payload.error); // e.g. clip too large, or proxy backend
+});
 
 sock.emit("message", { text: "hello pillbug" });
+
+// Sending audio (e.g. a recorded clip already base64-encoded):
+// sock.emit("message", {
+//   audio: { data: base64Audio, mime_type: "audio/webm", filename: "clip.webm" },
+//   text: "transcribe this",
+// });
 ```
 
 ### Python
@@ -301,6 +382,11 @@ async def main() -> None:
         pending = ""  # terminal message is authoritative
         print("agent>", payload["text"])
 
+    # Only needed if you send audio: rejected input arrives as `error`.
+    @sio.on("error")
+    async def on_error(payload: dict) -> None:
+        print("rejected:", payload["error"])  # e.g. clip too large, or proxy backend
+
     await sio.connect(
         "http://127.0.0.1:9200",
         socketio_path="/socket.io",
@@ -311,6 +397,16 @@ async def main() -> None:
         },
     )
     await sio.emit("message", {"text": "hello pillbug"})
+    # Sending audio: base64-encode the bytes and attach an `audio` object.
+    # import base64
+    # await sio.emit("message", {
+    #     "audio": {
+    #         "data": base64.b64encode(audio_bytes).decode(),
+    #         "mime_type": "audio/webm",
+    #         "filename": "clip.webm",
+    #     },
+    #     "text": "transcribe this",
+    # })
     await sio.wait()
 
 asyncio.run(main())
@@ -348,6 +444,8 @@ diagnosing integration issues:
 | `PB_WEBSOCKET_BEARER_TOKEN` | Value to send in `Authorization` |
 | `PB_WEBSOCKET_IDLE_TIMEOUT_SECONDS` | How long without activity before forced disconnect |
 | `PB_WEBSOCKET_CORS_ALLOWED_ORIGINS` | Browser origins the server accepts; `*` allows all |
+| `PB_WEBSOCKET_MAX_AUDIO_BYTES` | Max decoded size of an inbound audio clip (default 8 MB); larger clips get an `error` event |
+| `PB_GEMINI_BASE_URL` | If set, the runtime uses a proxy backend and **audio input is rejected**; audio requires the real Gemini backend (this var unset) |
 | `PB_STREAMING_CHANNELS` | Whether replies stream as `stream` deltas; include `websocket` to enable, omit for `message`-only |
 
 ## 10. Stable Contract Summary
@@ -357,10 +455,13 @@ A conforming client:
 1. Speaks Socket.IO v4 to the configured endpoint and path.
 2. Sends `Authorization: Bearer <token>` and `X-SessionID: <ULID>` on every
    connect.
-3. Sends user input as `emit("message", "..." or { text: "..." })`.
-4. Receives agent replies as `on("message", payload => payload.text)`, and MAY
+3. Sends user input as `emit("message", "..." or { text: "..." })`, and MAY send
+   audio as `emit("message", { audio: { data, mime_type, filename? }, text? })`.
+4. Receives agent replies as `on("message", payload => payload.text)`, MAY
    additionally consume `on("stream", payload => payload.delta)` for progressive
-   rendering — treating the terminal `message` as authoritative.
+   rendering (treating the terminal `message` as authoritative), and — if it
+   sends audio — handles `on("error", payload => payload.error)` for rejected
+   input.
 5. Treats disconnects as recoverable; reuses the ULID to continue, generates a
    new ULID to start a new conversation.
 6. Does not log or persist the bearer token client-side beyond what is

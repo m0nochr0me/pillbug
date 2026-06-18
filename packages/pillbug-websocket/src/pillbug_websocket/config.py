@@ -12,6 +12,7 @@ class WebsocketSettings(BaseSettings):
     JANITOR_INTERVAL_SECONDS: float = 30.0
     CORS_ALLOWED_ORIGINS: str = "*"
     SOCKETIO_PATH: str = "/socket.io"
+    MAX_AUDIO_BYTES: int = 8 * 1024 * 1024
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -39,6 +40,13 @@ class WebsocketSettings(BaseSettings):
     def _validate_positive(cls, value: float) -> float:
         if value <= 0:
             raise ValueError("must be greater than zero")
+        return value
+
+    @field_validator("MAX_AUDIO_BYTES")
+    @classmethod
+    def _validate_max_audio_bytes(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("PB_WEBSOCKET_MAX_AUDIO_BYTES must be greater than zero")
         return value
 
 

@@ -43,6 +43,7 @@ _DEFAULT_INBOUND_ATTACHMENT_ROOTS: dict[str, str] = {
     "telegram": "inbox/telegram",
     "a2a": "inbox/a2a",
     "cli": "inbox/cli",
+    "websocket": "inbox/websocket",
 }
 
 

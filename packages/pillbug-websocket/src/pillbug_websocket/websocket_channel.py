@@ -1,24 +1,31 @@
 """Socket.IO-based websocket channel plugin for Pillbug."""
 
 import asyncio
+import base64
+import mimetypes
 import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 from typing import Any
 
 import socketio
 import uvicorn
 
+from app.core.config import settings as core_settings
 from app.core.log import logger
+from app.runtime.channel_helpers import render_attachment_text
 from app.runtime.channels import BaseChannel, register_channel_conversation
 from app.schema.messages import InboundMessage, OutboundAttachment
+from app.util.workspace import async_write_bytes_file, resolve_path_within_root
 from pillbug_websocket.config import settings
 
 _ULID_PATTERN = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$")
 _AUTH_HEADER_ENV_KEY = "HTTP_AUTHORIZATION"
 _SESSION_ID_HEADER_ENV_KEY = "HTTP_X_SESSIONID"
 _BEARER_PREFIX = "Bearer "
+_AUDIO_SUFFIX_PATTERN = re.compile(r"\.[A-Za-z0-9]{1,8}")
 
 
 class _ConnectionRefused(socketio.exceptions.ConnectionRefusedError):
@@ -234,6 +241,10 @@ class WebSocketChannel(BaseChannel):
             logger.warning(f"Websocket message from unknown sid={sid}; ignoring")
             return
 
+        if isinstance(data, dict) and isinstance(data.get("audio"), dict):
+            await self._handle_audio_message(sid, session_id, data)
+            return
+
         text = self._extract_message_text(data)
         if not text:
             return
@@ -253,6 +264,122 @@ class WebSocketChannel(BaseChannel):
                 },
             )
         )
+
+    async def _handle_audio_message(self, sid: str, session_id: str, data: dict[str, Any]) -> None:
+        """Accept a base64 audio payload, store it under the channel inbox sub-root, and enqueue
+        it as a normal inbound attachment. Native audio understanding requires the real Gemini
+        backend, so a configured proxy (`PB_GEMINI_BASE_URL`) fails fast rather than forwarding
+        audio that a proxy upstream cannot interpret."""
+        audio = data["audio"]
+
+        mime_type = str(audio.get("mime_type", "")).strip().lower()
+        if not mime_type.startswith("audio/"):
+            await self._emit_error(sid, session_id, "unsupported audio payload; mime_type must be audio/*")
+            return
+
+        if core_settings.GEMINI_BASE_URL is not None:
+            logger.warning(
+                f"Websocket audio rejected: a proxy backend (PB_GEMINI_BASE_URL) is configured session_id={session_id}"
+            )
+            await self._emit_error(
+                sid,
+                session_id,
+                "audio input requires the real Gemini backend; a proxy (PB_GEMINI_BASE_URL) is configured",
+            )
+            return
+
+        raw_data = audio.get("data")
+        if not isinstance(raw_data, str) or not raw_data.strip():
+            await self._emit_error(sid, session_id, "audio payload missing base64 data")
+            return
+
+        try:
+            audio_bytes = base64.b64decode(raw_data, validate=True)
+        except ValueError:
+            await self._emit_error(sid, session_id, "audio data is not valid base64")
+            return
+
+        if not audio_bytes:
+            await self._emit_error(sid, session_id, "audio data is empty")
+            return
+        if len(audio_bytes) > settings.MAX_AUDIO_BYTES:
+            await self._emit_error(sid, session_id, f"audio exceeds the limit of {settings.MAX_AUDIO_BYTES} bytes")
+            return
+
+        sub_root = core_settings.inbound_attachment_roots().get(self.name, "inbox/websocket")
+        display_name = self._audio_display_name(audio.get("filename"))
+        extension = self._audio_extension(audio.get("filename"), mime_type)
+        relative_path = f"{sub_root}/{session_id}-{time.time_ns()}{extension}"
+
+        try:
+            target_path = resolve_path_within_root(relative_path, core_settings.WORKSPACE_ROOT)
+            await asyncio.to_thread(target_path.parent.mkdir, parents=True, exist_ok=True)
+            await async_write_bytes_file(target_path, audio_bytes)
+        except (ValueError, OSError) as exc:
+            logger.warning(f"Websocket audio write failed session_id={session_id}: {exc}")
+            await self._emit_error(sid, session_id, "failed to store audio attachment")
+            return
+
+        workspace_path = target_path.relative_to(core_settings.WORKSPACE_ROOT).as_posix()
+        raw_caption = data.get("text")
+        caption = raw_caption.strip() if isinstance(raw_caption, str) else ""
+        message_text = render_attachment_text(
+            channel_label="Websocket",
+            attachment_label="audio",
+            caption_text=caption,
+            workspace_path=workspace_path,
+            original_file_name=display_name,
+            mime_type=mime_type,
+            download_failed=False,
+        )
+
+        self._session_last_activity[session_id] = time.monotonic()
+        await self._inbound_queue.put(
+            InboundMessage(
+                channel_name=self.name,
+                conversation_id=session_id,
+                user_id=f"ws:{session_id}",
+                text=message_text,
+                metadata={
+                    "source": "websocket",
+                    "websocket_sid": sid,
+                    "websocket_session_id": session_id,
+                    "inbound_attachments": [
+                        {
+                            "path": workspace_path,
+                            "mime_type": mime_type,
+                            "display_name": display_name,
+                            "source": self.name,
+                            "kind": "audio",
+                        }
+                    ],
+                },
+            )
+        )
+        logger.info(
+            f"Websocket audio stored session_id={session_id} path={workspace_path} "
+            f"mime_type={mime_type} bytes={len(audio_bytes)}"
+        )
+
+    async def _emit_error(self, sid: str, session_id: str, message: str) -> None:
+        payload = {"session_id": session_id, "error": message}
+        try:
+            await self._sio.emit("error", payload, to=sid)
+        except Exception as exc:
+            logger.warning(f"Websocket error emit failed sid={sid} session_id={session_id}: {exc}")
+
+    @staticmethod
+    def _audio_display_name(raw_filename: object) -> str | None:
+        if isinstance(raw_filename, str) and raw_filename.strip():
+            return Path(raw_filename.strip()).name or None
+        return None
+
+    @staticmethod
+    def _audio_extension(raw_filename: object, mime_type: str) -> str:
+        if isinstance(raw_filename, str) and (suffix := Path(raw_filename.strip()).suffix):
+            if _AUDIO_SUFFIX_PATTERN.fullmatch(suffix):
+                return suffix.lower()
+        return mimetypes.guess_extension(mime_type) or ".bin"
 
     @staticmethod
     def _extract_message_text(data: object) -> str:
