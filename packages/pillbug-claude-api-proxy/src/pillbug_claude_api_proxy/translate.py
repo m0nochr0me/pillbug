@@ -15,12 +15,67 @@ from typing import Any
 
 __all__ = (
     "StreamChunkAssembler",
+    "apply_prompt_cache_breakpoints",
     "extract_generation_config",
     "extract_history",
     "extract_system_text",
     "extract_tool_decls",
     "message_to_gemini_response",
 )
+
+# Anthropic walks back at most 20 content blocks from a breakpoint to find a prior cache
+# entry; cascading message breakpoints at this stride keeps a long tool-call turn within
+# reach of the previous turn's cache. Max 4 breakpoints per request.
+_CACHE_LOOKBACK_STRIDE = 20
+_MAX_CACHE_BREAKPOINTS = 4
+
+
+def _cache_control(ttl: str) -> dict[str, Any]:
+    control: dict[str, Any] = {"type": "ephemeral"}
+    if ttl == "1h":
+        control["ttl"] = "1h"
+    return control
+
+
+def apply_prompt_cache_breakpoints(
+    request_kwargs: dict[str, Any], *, ttl: str = "5m", max_breakpoints: int = _MAX_CACHE_BREAKPOINTS
+) -> None:
+    """Annotate the assembled Anthropic request in-place with `cache_control` breakpoints.
+
+    Render order is tools → system → messages, so a breakpoint caches everything before it.
+    One breakpoint goes on the last system block (covering tools + the byte-stable system
+    prompt); the rest go on the conversation tail, anchored at the final block and cascading
+    backward by the 20-block lookback window so a long tool-call turn still reads the prior
+    turn's cache. `cache_control` is a sibling key of `text`, so it never alters the
+    OAuth-validated first-system-block prefix.
+
+    No-op for sub-threshold prefixes is automatic: Anthropic silently declines to cache a
+    prefix below the per-model minimum, so injecting a breakpoint on a tiny prompt is safe.
+    """
+
+    used = 0
+    system = request_kwargs.get("system")
+    # Only the list form carries a real (user) system prompt worth caching; a bare string is
+    # the tiny Claude-Code identity prefix, which is below the cacheable minimum anyway.
+    if isinstance(system, list) and system and isinstance(system[-1], dict):
+        system[-1]["cache_control"] = _cache_control(ttl)
+        used = 1
+
+    remaining = max_breakpoints - used
+    if remaining <= 0:
+        return
+
+    blocks: list[dict[str, Any]] = []
+    for message in request_kwargs.get("messages") or []:
+        content = message.get("content")
+        if isinstance(content, list):
+            blocks.extend(block for block in content if isinstance(block, dict))
+
+    position = len(blocks) - 1
+    while position >= 0 and remaining > 0:
+        blocks[position]["cache_control"] = _cache_control(ttl)
+        position -= _CACHE_LOOKBACK_STRIDE
+        remaining -= 1
 
 
 def _pick(payload: dict[str, Any], *names: str, default: Any = None) -> Any:
@@ -482,15 +537,33 @@ def message_to_gemini_response(message: Any) -> dict[str, Any]:
 
     usage = _block_attr(message, "usage", None)
     if usage is not None:
-        input_tokens = _block_attr(usage, "input_tokens", 0) or 0
-        output_tokens = _block_attr(usage, "output_tokens", 0) or 0
-        response["usageMetadata"] = {
-            "promptTokenCount": int(input_tokens),
-            "candidatesTokenCount": int(output_tokens),
-            "totalTokenCount": int(input_tokens) + int(output_tokens),
-        }
+        response["usageMetadata"] = _usage_metadata(usage)
 
     return response
+
+
+def _usage_metadata(usage: Any) -> dict[str, int]:
+    """Map an Anthropic `usage` block onto Gemini `usageMetadata`, including cache reads.
+
+    Anthropic's `input_tokens` is the UNCACHED remainder; Gemini's `promptTokenCount` is the
+    full prompt with `cachedContentTokenCount` as the cached subset. Surfacing the cached
+    read count lets Pillbug's existing ChatSessionUsageTotals.cached_content_token_count
+    telemetry report cache effectiveness.
+    """
+
+    input_tokens = int(_block_attr(usage, "input_tokens", 0) or 0)
+    output_tokens = int(_block_attr(usage, "output_tokens", 0) or 0)
+    cache_read = int(_block_attr(usage, "cache_read_input_tokens", 0) or 0)
+    cache_creation = int(_block_attr(usage, "cache_creation_input_tokens", 0) or 0)
+    prompt_tokens = input_tokens + cache_read + cache_creation
+    metadata: dict[str, int] = {
+        "promptTokenCount": prompt_tokens,
+        "candidatesTokenCount": output_tokens,
+        "totalTokenCount": prompt_tokens + output_tokens,
+    }
+    if cache_read:
+        metadata["cachedContentTokenCount"] = cache_read
+    return metadata
 
 
 _BLOCK_CLASS_NAME_TO_TYPE = {
@@ -535,6 +608,8 @@ class StreamChunkAssembler:
         self._function_call_parts: list[dict[str, Any]] = []
         self._input_tokens = 0
         self._output_tokens = 0
+        self._cache_read_tokens = 0
+        self._cache_creation_tokens = 0
         self._stop_reason: str | None = None
         self._model_version = ""
 
@@ -563,6 +638,8 @@ class StreamChunkAssembler:
         usage = _block_attr(message, "usage", None)
         if usage is not None:
             self._input_tokens = int(_block_attr(usage, "input_tokens", 0) or 0)
+            self._cache_read_tokens = int(_block_attr(usage, "cache_read_input_tokens", 0) or 0)
+            self._cache_creation_tokens = int(_block_attr(usage, "cache_creation_input_tokens", 0) or 0)
 
     def _on_content_block_start(self, event: Any) -> None:
         block = _block_attr(event, "content_block", None)
@@ -640,11 +717,15 @@ class StreamChunkAssembler:
                 _FINISH_REASON_MAP.get(self._stop_reason, "STOP") if isinstance(self._stop_reason, str) else "STOP"
             )
             candidate["finishReason"] = finish_reason
-            chunk["usageMetadata"] = {
-                "promptTokenCount": self._input_tokens,
+            prompt_tokens = self._input_tokens + self._cache_read_tokens + self._cache_creation_tokens
+            usage_metadata: dict[str, int] = {
+                "promptTokenCount": prompt_tokens,
                 "candidatesTokenCount": self._output_tokens,
-                "totalTokenCount": self._input_tokens + self._output_tokens,
+                "totalTokenCount": prompt_tokens + self._output_tokens,
             }
+            if self._cache_read_tokens:
+                usage_metadata["cachedContentTokenCount"] = self._cache_read_tokens
+            chunk["usageMetadata"] = usage_metadata
         return chunk
 
 

@@ -164,11 +164,8 @@ class GeminiChatSession:
         # P2 #12: scheduled tasks can lower the per-run AFC cap via `max_remote_calls`.
         effective_max_remote_calls = max_remote_calls if max_remote_calls is not None else settings.GEMINI_MAX_AFC_CALLS
         async with asyncio.timeout(settings.GEMINI_RESPONSE_TIMEOUT_SECONDS):
-            message_parts = await self._build_message_parts(message, message_metadata)
-            system_instruction = await self._service.build_system_instruction(
-                channel_name=channel_name,
-                message_metadata=message_metadata,
-            )
+            message_parts = await self._build_message_parts(message, message_metadata, channel_name)
+            system_instruction = await self._service.build_system_instruction()
             self._latest_system_instruction = system_instruction
 
             mcp_client = await self._ensure_mcp_client_open()
@@ -212,10 +209,7 @@ class GeminiChatSession:
                 logger.info(
                     f"Gemini returned no text for session={self._session_id}; sending nudge {nudge_attempt}/{max_nudges}"
                 )
-                system_instruction = await self._service.build_system_instruction(
-                    channel_name=channel_name,
-                    message_metadata=message_metadata,
-                )
+                system_instruction = await self._service.build_system_instruction()
                 self._latest_system_instruction = system_instruction
 
                 mcp_client = await self._ensure_mcp_client_open()
@@ -276,12 +270,29 @@ class GeminiChatSession:
         header = "Current plan state (do not restate; use to inform the next action):"
         return types.Part.from_text(text=f"{header}\n{rendered}")
 
+    async def _build_base_context_part(
+        self,
+        channel_name: str | None,
+        message_metadata: list[dict[str, Any]] | None,
+    ) -> types.Part:
+        # Caching: the volatile base_context (datetime, timezone, workspace, available
+        # channels, optional direct-reply memo) moved out of the system instruction into
+        # the user turn so the cached system prefix stays byte-stable across turns. It
+        # lands in append-only history, so each turn's datetime freezes once sent and only
+        # the newest turn carries a live value. Mirrors _build_todo_snapshot_part.
+        base_context = await self._service.get_base_context(
+            channel_name=channel_name,
+            message_metadata=message_metadata,
+        )
+        return types.Part.from_text(text=base_context)
+
     async def _build_message_parts(
         self,
         message: str,
         message_metadata: list[dict[str, Any]] | None,
+        channel_name: str | None = None,
     ) -> list[types.Part]:
-        message_parts: list[types.Part] = []
+        message_parts: list[types.Part] = [await self._build_base_context_part(channel_name, message_metadata)]
         if (todo_part := self._build_todo_snapshot_part()) is not None:
             message_parts.append(todo_part)
         message_parts.append(types.Part.from_text(text=message))

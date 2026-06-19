@@ -38,6 +38,7 @@ _DEFAULT_OAUTH_BETA = ""
 _DEFAULT_ELEVENLABS_BASE_URL = "https://api.elevenlabs.io"
 _DEFAULT_ELEVENLABS_MODEL = "scribe_v2"
 _AUDIO_MODES = ("placeholder", "elevenlabs")
+_PROMPT_CACHE_TTLS = ("5m", "1h")
 
 
 class ProxySettings(BaseSettings):
@@ -48,6 +49,15 @@ class ProxySettings(BaseSettings):
     MAX_TOKENS: int = 8192
 
     REQUEST_TIMEOUT_SECONDS: float = 600.0
+
+    # Prompt caching: inject Anthropic `cache_control` breakpoints into the translated
+    # request so the byte-stable tools+system prefix and the conversation history are
+    # reused across turns. Gemini clients never send cache_control, so the proxy is the
+    # only place caching can be expressed. See README "Prompt caching".
+    PROMPT_CACHE_ENABLED: bool = True
+    # "5m" (ephemeral default, no beta header) or "1h" (extended TTL; the OAuth path may
+    # require OAUTH_BETA_HEADER to include `extended-cache-ttl-2025-04-11`).
+    PROMPT_CACHE_TTL: str = "5m"
 
     OAUTH_TOKEN: str = ""
 
@@ -91,6 +101,14 @@ class ProxySettings(BaseSettings):
         normalized = value.strip().lower()
         if normalized not in _AUDIO_MODES:
             raise ValueError(f"PB_CLAUDE_API_PROXY_AUDIO_MODE must be one of {_AUDIO_MODES}, got {value!r}")
+        return normalized
+
+    @field_validator("PROMPT_CACHE_TTL")
+    @classmethod
+    def validate_prompt_cache_ttl(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in _PROMPT_CACHE_TTLS:
+            raise ValueError(f"PB_CLAUDE_API_PROXY_PROMPT_CACHE_TTL must be one of {_PROMPT_CACHE_TTLS}, got {value!r}")
         return normalized
 
     def resolved_oauth_token(self) -> str | None:

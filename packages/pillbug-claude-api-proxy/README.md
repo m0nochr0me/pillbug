@@ -67,6 +67,19 @@ The `anthropic-beta: oauth-2025-04-20` header — frequently cited in community 
 
 None of this is documented by Anthropic; treat the OAuth-as-third-party-API path as unofficial.
 
+## Prompt caching
+
+Gemini clients never send Anthropic `cache_control`, so the proxy injects the breakpoints itself at translation time (this is the whole job — there is no client-managed-caching case to preserve, unlike a transparent Anthropic→Anthropic proxy). Render order is `tools → system → messages`, and a breakpoint caches everything before it, so the proxy spends its 4-breakpoint budget on:
+
+1. the **last system block** — caches the tool declarations plus the whole system prompt. `cache_control` is a sibling key of `text`, so it never alters the OAuth-validated Claude Code identity prefix in the first block. (A bare-string system — the identity prefix alone, with no user `systemInstruction` — is left unmarked; it is below the cacheable minimum anyway.)
+2. the **conversation tail** — a breakpoint on the final history block plus backstops cascading back by the 20-block lookback window, so a long tool-call turn still reads the previous turn's cache.
+
+**This only pays off if the cached prefix is byte-stable across turns.** Pillbug's runtime keeps the system instruction frozen (stable `AGENTS.md` → skills → channel memos) and puts volatile per-turn content — the datetime/workspace frame and the todo snapshot — in the user turn, where it lands in append-only history and freezes once sent. A timestamp in the system prompt would silently defeat all caching here, since `system` renders before `messages`.
+
+On the Claude Pro/Max subscription path, billing is **quota, not per-token dollars**, so the win is **lower latency** (the large stable prefix isn't reprocessed) and **rate-limit/quota headroom** (cached input counts at a reduced rate) rather than a cost line-item. Cache reads are surfaced back to Pillbug as Gemini `usageMetadata.cachedContentTokenCount` (which feeds the runtime's existing cached-token telemetry), and each turn logs an INFO line with the read/write/uncached token split and cache-read fraction.
+
+Caching is on by default with a 5-minute TTL. Set `PB_CLAUDE_API_PROXY_PROMPT_CACHE_TTL=1h` for the extended TTL (2× write cost, ~3 reads to break even — worth it only for bursty/gappy conversations); the OAuth path may then require `PB_CLAUDE_API_PROXY_OAUTH_BETA_HEADER` to include `extended-cache-ttl-2025-04-11`. Set `PB_CLAUDE_API_PROXY_PROMPT_CACHE_ENABLED=false` to turn injection off.
+
 ## Audio input
 
 Claude has no native audio modality — the Anthropic Messages API has no audio content block (current models accept only text and image input). Pillbug forwards voice notes as Gemini `inlineData` audio parts, so the proxy rewrites them before history translation. `PB_CLAUDE_API_PROXY_AUDIO_MODE` controls how:
@@ -82,7 +95,7 @@ Translates the subset of the Gemini wire format Pillbug actually sends:
 
 - `systemInstruction`, text and `inlineData` (image, base64) parts, function declarations, function call/response parts.
 - `generationConfig.{temperature, topP, maxOutputTokens, stopSequences}` → Anthropic sampling params.
-- `usage` (from `Message.usage.input_tokens` / `output_tokens`) → `usageMetadata`.
+- `usage` (`Message.usage.input_tokens` / `output_tokens`, plus `cache_read_input_tokens` → `usageMetadata.cachedContentTokenCount`) → `usageMetadata`. See **Prompt caching**.
 - Streaming: `:streamGenerateContent?alt=sse` re-frames the Anthropic event stream as Gemini SSE chunks. Text deltas stream incrementally; `tool_use` blocks are buffered whole and emitted as `functionCall` parts on the final chunk, which also carries `finishReason` and `usageMetadata`.
 
 Out of scope:
@@ -100,6 +113,8 @@ Out of scope:
 | `PB_CLAUDE_API_PROXY_MODEL` | (empty) | Overrides the model name from the request URL. |
 | `PB_CLAUDE_API_PROXY_MAX_TOKENS` | `8192` | Cap on output tokens when `generationConfig.maxOutputTokens` is not supplied. |
 | `PB_CLAUDE_API_PROXY_REQUEST_TIMEOUT_SECONDS` | `600.0` | |
+| `PB_CLAUDE_API_PROXY_PROMPT_CACHE_ENABLED` | `true` | Inject Anthropic `cache_control` breakpoints into the translated request. See **Prompt caching**. |
+| `PB_CLAUDE_API_PROXY_PROMPT_CACHE_TTL` | `5m` | `5m` (ephemeral default) or `1h` (extended TTL; may require `extended-cache-ttl-2025-04-11` in `OAUTH_BETA_HEADER`). |
 | `PB_CLAUDE_API_PROXY_OAUTH_TOKEN` | (empty) | Bearer OAuth token from `claude setup-token`. Falls back to `CLAUDE_CODE_OAUTH_TOKEN`. |
 | `PB_CLAUDE_API_PROXY_CLAUDE_CODE_SYSTEM_PREFIX` | `You are Claude Code, Anthropic's official CLI for Claude.` | Prepended to `systemInstruction`. **Required by the OAuth subscription path**; setting empty triggers HTTP 429 on every call. |
 | `PB_CLAUDE_API_PROXY_OAUTH_BETA_HEADER` | (empty) | If set, sent as the `anthropic-beta` request header. Not currently required by the OAuth path; reserved for forward-compatibility. |

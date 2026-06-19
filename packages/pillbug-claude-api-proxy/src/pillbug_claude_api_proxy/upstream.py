@@ -111,7 +111,24 @@ def _build_request_kwargs(
     if "stop_sequences" in generation_config:
         request_kwargs["stop_sequences"] = generation_config["stop_sequences"]
 
+    if settings.PROMPT_CACHE_ENABLED:
+        translate.apply_prompt_cache_breakpoints(request_kwargs, ttl=settings.PROMPT_CACHE_TTL)
+
     return request_kwargs
+
+
+def _log_cache_usage(usage: Any) -> None:
+    if usage is None:
+        return
+    cache_read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+    cache_write = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
+    uncached = int(getattr(usage, "input_tokens", 0) or 0)
+    prompt_tokens = cache_read + cache_write + uncached
+    read_fraction = cache_read / prompt_tokens if prompt_tokens else 0.0
+    logger.info(
+        f"Anthropic prompt cache: read={cache_read} write={cache_write} "
+        f"uncached={uncached} read_fraction={read_fraction:.2f}"
+    )
 
 
 async def run_inference(
@@ -147,6 +164,8 @@ async def run_inference(
         f"block_types={[type(b).__name__ for b in (message.content or [])]} "
         f"usage_present={bool(getattr(message, 'usage', None))}"
     )
+    if settings.PROMPT_CACHE_ENABLED:
+        _log_cache_usage(getattr(message, "usage", None))
 
     return translate.message_to_gemini_response(message)
 

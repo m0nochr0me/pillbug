@@ -17,7 +17,3 @@
 {% endif %}
 {% endfor %}
 {% endif %}
-
----
-
-{{ base_context }}

@@ -300,17 +300,14 @@ class GeminiChatService:
         """
         return await asyncio.to_thread(discover_workspace_skills, settings.WORKSPACE_ROOT)
 
-    async def build_system_instruction(
-        self,
-        *,
-        channel_name: str | None = None,
-        message_metadata: list[dict[str, Any]] | None = None,
-    ) -> str | None:
-        # P1 #5: the system instruction holds only stable content (agents_md → skills →
-        # channel_memos → base_context). The per-session todo snapshot moved to the user
-        # turn so it doesn't fragment Gemini's automatic prefix cache. base_context still
-        # carries the volatile datetime line; it lives at the end so the cached prefix is
-        # everything before it.
+    async def build_system_instruction(self) -> str | None:
+        # P1 #5: the system instruction holds ONLY stable content (agents_md → skills →
+        # channel_memos), so the cached prefix is byte-identical across turns. The two
+        # volatile per-turn pieces live in the user turn instead (see
+        # GeminiChatSession._build_message_parts): the todo snapshot and base_context (the
+        # datetime/workspace/channels frame). Keeping the system prompt frozen lets the
+        # downstream — Gemini's automatic prefix cache or the claude-api-proxy's injected
+        # cache_control breakpoints — reuse the whole tools+system prefix every turn.
         agents_md = await _read_agents_md(settings.WORKSPACE_ROOT / "AGENTS.md")
         skills_prompt: str | None = None
         if skills := await self.discover_skills():
@@ -321,10 +318,6 @@ class GeminiChatService:
         channel_memos = await self.get_channel_instruction_memos()
         return self.render_prompt_text(
             _MODEL_INPUT_PROMPT_NAME,
-            base_context=await self.get_base_context(
-                channel_name=channel_name,
-                message_metadata=message_metadata,
-            ),
             agents_md=agents_md,
             channel_memos=tuple(channel_memos),
             skills=skills_prompt.strip() if skills_prompt else None,
