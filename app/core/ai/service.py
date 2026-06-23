@@ -25,7 +25,8 @@ from app.runtime.session_binding import (
 from app.schema.ai import ChatSessionSnapshot, ChatSessionUsageTotals, Skill
 from app.schema.messages import extract_a2a_origin_route
 from app.util.base_dir import get_module_root
-from app.util.skills import discover_workspace_skills
+from app.util.skills import SKILL_FILE_NAME, discover_workspace_skills, extract_skill_body
+from app.util.workspace import async_read_text_file
 
 _DIRECT_REPLY_CHANNEL_MEMO_PROMPT_NAME = "direct_reply_channel_memo.prompt.md"
 _MODEL_INPUT_PROMPT_NAME = "model_input.prompt.md"
@@ -311,9 +312,11 @@ class GeminiChatService:
         agents_md = await _read_agents_md(settings.WORKSPACE_ROOT / "AGENTS.md")
         skills_prompt: str | None = None
         if skills := await self.discover_skills():
+            auto_skills, ondemand_skills = await self._partition_skills_for_prompt(skills)
             skills_prompt = self.render_prompt_text(
                 _SKILLS_PROMPT_NAME,
-                skills=skills,
+                auto_skills=auto_skills,
+                ondemand_skills=ondemand_skills,
             )
         channel_memos = await self.get_channel_instruction_memos()
         return self.render_prompt_text(
@@ -322,6 +325,30 @@ class GeminiChatService:
             channel_memos=tuple(channel_memos),
             skills=skills_prompt.strip() if skills_prompt else None,
         )
+
+    async def _partition_skills_for_prompt(self, skills: list[Skill]) -> tuple[list[dict[str, str]], list[Skill]]:
+        """Split discovered skills into always-on (body inlined) and on-demand groups.
+
+        Auto-load skills whose body cannot be read fall back to the on-demand list so the
+        capability is never silently dropped.
+        """
+        auto_skills: list[dict[str, str]] = []
+        ondemand_skills: list[Skill] = []
+        for skill in skills:
+            if skill.auto_load and (body := await self._read_skill_body(skill)):
+                auto_skills.append({"name": skill.name, "body": body})
+            else:
+                ondemand_skills.append(skill)
+        return auto_skills, ondemand_skills
+
+    async def _read_skill_body(self, skill: Skill) -> str | None:
+        skill_file = skill.location / SKILL_FILE_NAME
+        try:
+            text = await async_read_text_file(skill_file)
+        except OSError:
+            logger.exception(f"Failed to read auto-load skill body from {skill_file}")
+            return None
+        return extract_skill_body(text) or None
 
 
 chat_service = GeminiChatService()

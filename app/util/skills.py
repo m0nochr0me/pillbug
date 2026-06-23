@@ -8,7 +8,9 @@ from app.schema.ai import Skill
 _FRONTMATTER_DELIMITER = "---"
 _NAME_PREFIX = "name:"
 _DESCRIPTION_PREFIX = "description:"
+_AUTO_LOAD_PREFIX = "auto_load:"
 _QUOTE_CHARS = "\"'"
+_TRUTHY_VALUES = frozenset({"true", "yes", "on", "1"})
 
 SKILL_FILE_NAME = "SKILL.md"
 SKILLS_DIRECTORY_NAME = "skills"
@@ -40,6 +42,24 @@ def _strip_wrapping_quotes(value: str) -> str:
     return normalized
 
 
+def _parse_bool(value: str) -> bool:
+    return _strip_wrapping_quotes(value).lower() in _TRUTHY_VALUES
+
+
+def extract_skill_body(text: str) -> str:
+    """Return the SKILL.md content after the closing frontmatter delimiter.
+
+    Auto-loaded skills inline this body directly into the system prompt. When the text
+    has no complete frontmatter block, the whole stripped text is returned.
+    """
+
+    lines = text.splitlines()
+    delimiters = [index for index, line in enumerate(lines) if line.strip() == _FRONTMATTER_DELIMITER]
+    if len(delimiters) >= 2:
+        return "\n".join(lines[delimiters[1] + 1 :]).strip()
+    return text.strip()
+
+
 def _read_skill_metadata(skill_file: Path) -> Skill | None:
     try:
         lines = skill_file.read_text(encoding="utf-8").splitlines()
@@ -49,6 +69,7 @@ def _read_skill_metadata(skill_file: Path) -> Skill | None:
 
     name: str | None = None
     description: str | None = None
+    auto_load = False
     in_frontmatter = False
 
     for raw_line in lines:
@@ -67,9 +88,11 @@ def _read_skill_metadata(skill_file: Path) -> Skill | None:
             name = _strip_wrapping_quotes(line[len(_NAME_PREFIX) :])
         elif line.startswith(_DESCRIPTION_PREFIX):
             description = _strip_wrapping_quotes(line[len(_DESCRIPTION_PREFIX) :])
+        elif line.startswith(_AUTO_LOAD_PREFIX):
+            auto_load = _parse_bool(line[len(_AUTO_LOAD_PREFIX) :])
 
-        if name and description:
-            return Skill(name=name, description=description, location=skill_file.parent)
+    if name and description:
+        return Skill(name=name, description=description, location=skill_file.parent, auto_load=auto_load)
 
     logger.warning(
         f"Skipping skill directory {skill_file.parent} because SKILL.md is missing name/description frontmatter"

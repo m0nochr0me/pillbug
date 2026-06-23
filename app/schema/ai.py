@@ -105,5 +105,12 @@ class Skill(BaseModel):
     location: Path = Field(
         description="The file path to the skill's implementation.",
     )
+    auto_load: bool = Field(
+        default=False,
+        description=(
+            "When true, the skill's SKILL.md body is inlined into the system prompt and always in effect, "
+            "instead of being loaded on demand via read_file."
+        ),
+    )
 
     model_config = ConfigDict(extra="ignore")

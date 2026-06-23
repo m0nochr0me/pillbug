@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from app.util.skills import discover_workspace_skills
+from app.util.skills import discover_workspace_skills, extract_skill_body
 
 
 def _write_skill(workspace_root: Path, name: str, body: str) -> Path:
@@ -63,3 +63,40 @@ class TestDiscoverWorkspaceSkills:
         _write_skill(workspace_root, "charlie", "---\nname: charlie\ndescription: c\n---\n")
         skills = discover_workspace_skills(workspace_root)
         assert [skill.name for skill in skills] == ["alpha", "bravo", "charlie"]
+
+
+class TestAutoLoadFrontmatter:
+    def test_auto_load_defaults_to_false(self, workspace_root: Path):
+        _write_skill(workspace_root, "alpha", "---\nname: alpha\ndescription: d\n---\nbody")
+        assert discover_workspace_skills(workspace_root)[0].auto_load is False
+
+    def test_auto_load_true_is_parsed(self, workspace_root: Path):
+        _write_skill(workspace_root, "alpha", "---\nname: alpha\ndescription: d\nauto_load: true\n---\nbody")
+        assert discover_workspace_skills(workspace_root)[0].auto_load is True
+
+    @pytest.mark.parametrize("value", ["true", "True", "YES", "on", "1", '"true"'])
+    def test_truthy_values_enable_auto_load(self, workspace_root: Path, value: str):
+        _write_skill(workspace_root, "alpha", f"---\nname: alpha\ndescription: d\nauto_load: {value}\n---\n")
+        assert discover_workspace_skills(workspace_root)[0].auto_load is True
+
+    @pytest.mark.parametrize("value", ["false", "no", "0", "off", "maybe", ""])
+    def test_non_truthy_values_keep_auto_load_disabled(self, workspace_root: Path, value: str):
+        _write_skill(workspace_root, "alpha", f"---\nname: alpha\ndescription: d\nauto_load: {value}\n---\n")
+        assert discover_workspace_skills(workspace_root)[0].auto_load is False
+
+    def test_auto_load_after_required_fields_is_still_read(self, workspace_root: Path):
+        # Regression: the parser must scan the whole frontmatter, not stop at name+description.
+        _write_skill(workspace_root, "alpha", "---\nname: alpha\ndescription: d\nauto_load: true\n---\nbody")
+        assert discover_workspace_skills(workspace_root)[0].auto_load is True
+
+
+class TestExtractSkillBody:
+    def test_returns_content_after_frontmatter(self):
+        text = "---\nname: a\ndescription: d\nauto_load: true\n---\nLine one\nLine two\n"
+        assert extract_skill_body(text) == "Line one\nLine two"
+
+    def test_no_frontmatter_returns_stripped_text(self):
+        assert extract_skill_body("\njust body\n") == "just body"
+
+    def test_empty_body_returns_empty_string(self):
+        assert extract_skill_body("---\nname: a\ndescription: d\n---\n") == ""
