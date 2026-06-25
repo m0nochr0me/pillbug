@@ -332,15 +332,7 @@ def unregister_channel_plugin(channel_name: str) -> None:
     _active_channels.pop(channel_name, None)
 
 
-def register_channel_conversation(
-    channel_name: str,
-    conversation_id: str,
-) -> None:
-    normalized_conversation_id = conversation_id.strip()
-    if not normalized_conversation_id:
-        return
-
-    _known_channel_conversations.setdefault(channel_name, set()).add(normalized_conversation_id)
+def _schedule_channel_conversation_sync(channel_name: str) -> None:
     existing_task = _channel_conversation_sync_tasks.get(channel_name)
     if existing_task is not None:
         existing_task.cancel()
@@ -354,6 +346,37 @@ def register_channel_conversation(
         return
 
     _track_channel_conversation_sync_task(channel_name, sync_task)
+
+
+def register_channel_conversation(
+    channel_name: str,
+    conversation_id: str,
+) -> None:
+    normalized_conversation_id = conversation_id.strip()
+    if not normalized_conversation_id:
+        return
+
+    _known_channel_conversations.setdefault(channel_name, set()).add(normalized_conversation_id)
+    _schedule_channel_conversation_sync(channel_name)
+
+
+def unregister_channel_conversation(
+    channel_name: str,
+    conversation_id: str,
+) -> None:
+    normalized_conversation_id = conversation_id.strip()
+    if not normalized_conversation_id:
+        return
+
+    conversations = _known_channel_conversations.get(channel_name)
+    if conversations is None or normalized_conversation_id not in conversations:
+        return
+
+    conversations.discard(normalized_conversation_id)
+    if not conversations:
+        _known_channel_conversations.pop(channel_name, None)
+
+    _schedule_channel_conversation_sync(channel_name)
 
 
 async def get_available_channels_context() -> list[str]:
@@ -372,10 +395,12 @@ async def get_available_channels_context() -> list[str]:
                 | await _get_cached_channel_conversations(channel_name)
             )
             context_destinations = _channel_context_destinations(channel, tuple(known_destinations))
+            if context_destinations is None:
+                # No channel opinion: advertise every destination learned from traffic.
+                context_destinations = tuple(known_destinations)
+
             if context_destinations:
                 channels.extend(f"{channel.name}:{destination}" for destination in context_destinations)
-            elif known_destinations:
-                channels.extend(f"{channel.name}:{destination}" for destination in known_destinations)
             else:
                 channels.append(_channel_send_target(channel))
 

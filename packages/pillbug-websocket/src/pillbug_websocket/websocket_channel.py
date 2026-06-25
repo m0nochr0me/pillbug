@@ -16,7 +16,7 @@ import uvicorn
 from app.core.config import settings as core_settings
 from app.core.log import logger
 from app.runtime.channel_helpers import render_attachment_text
-from app.runtime.channels import BaseChannel, register_channel_conversation
+from app.runtime.channels import BaseChannel, register_channel_conversation, unregister_channel_conversation
 from app.schema.messages import InboundMessage, OutboundAttachment
 from app.util.workspace import async_write_bytes_file, resolve_path_within_root
 from pillbug_websocket.config import settings
@@ -168,6 +168,14 @@ class WebSocketChannel(BaseChannel):
             "active_sockets": len(self._sid_to_session),
         }
 
+    def context_destinations(self, known_destinations: tuple[str, ...]) -> tuple[str, ...]:
+        # Websocket sessions are ephemeral and reply-in-session: the originating turn already
+        # carries its own session id, and any stored ULID goes stale the moment the idle
+        # janitor disconnects it. Advertise only the `websocket:<session_id>` placeholder
+        # instead of enumerating live sessions as outbound targets.
+        del known_destinations
+        return ()
+
     async def close(self) -> None:
         if self._closed:
             return
@@ -232,6 +240,7 @@ class WebSocketChannel(BaseChannel):
             if not sids:
                 self._session_to_sids.pop(session_id, None)
                 self._session_last_activity.pop(session_id, None)
+                unregister_channel_conversation(self.name, session_id)
 
         logger.info(f"Websocket disconnected sid={sid} session_id={session_id}")
 
@@ -437,6 +446,7 @@ class WebSocketChannel(BaseChannel):
                     logger.warning(f"Websocket janitor disconnect failed sid={sid} session_id={session_id}: {exc}")
             self._session_last_activity.pop(session_id, None)
             self._session_to_sids.pop(session_id, None)
+            unregister_channel_conversation(self.name, session_id)
             logger.info(f"Websocket session expired due to inactivity session_id={session_id}")
 
 
